@@ -4,64 +4,88 @@
 @import (reference) '~stremio/common/screen-sizes.less';
 
 .meta-row-container {
+    position: relative;
     overflow: visible;
+    padding: 0;
+    margin-bottom: 0.25rem;
+    z-index: 0;
+    transition: z-index 0s 0.35s;
+
+    // When any card inside is hovered, lift this entire row above other rows
+    // Uses data-hovered attribute because CSS modules mangle class names
+    &:has([data-hovered]) {
+        z-index: 100;
+        transition: z-index 0s;
+    }
 
     .header-container {
         display: flex;
         flex-direction: row;
         align-items: center;
-        justify-content: flex-end;
-        padding: 0 1rem;
+        justify-content: flex-start;
+        padding: 0 3.5rem;
         margin-bottom: 0.25rem;
 
         .title-container {
-            flex: 1;
-            max-height: 2.4em;
-            font-size: 1.6rem;
-            font-weight: 500;
-            color: var(--primary-foreground-color);
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #e5e5e5;
+            white-space: nowrap;
+            text-overflow: ellipsis;
         }
 
         .see-all-container {
-            flex: none;
             display: flex;
             flex-direction: row;
             align-items: center;
-            max-width: 12rem;
-            height: 2.5rem;
-            padding: 0 0.5rem 0 1rem;
-            border-radius: 2.5rem;
-            opacity: 0.6;
+            margin-left: 0.75rem;
+            opacity: 0.7;
+            transition: opacity 0.15s ease;
 
-            &:hover, &:focus {
-                outline: none;
-                background-color: var(--overlay-color);
+            &:hover {
                 opacity: 1;
             }
 
             .label {
-                flex: 0 1 auto;
-                max-height: 1.2em;
-                font-size: 1rem;
-                font-weight: 500;
-                color: var(--primary-foreground-color);
+                font-size: 0.75rem;
+                font-weight: 600;
+                color: #e5e5e5;
             }
 
             .icon {
-                flex: none;
-                height: 1.5rem;
-                margin-left: 0.5rem;
-                color: var(--primary-foreground-color);
+                height: 1rem;
+                margin-left: 0.15rem;
+                color: #e5e5e5;
             }
+        }
+
+        .source-label {
+            margin-left: auto;
+            font-size: 0.55rem;
+            font-weight: 500;
+            color: rgba(255, 255, 255, 0.2);
+            letter-spacing: 0.04em;
+            text-transform: uppercase;
+            white-space: nowrap;
         }
     }
 
     .message-container {
-        max-height: 3.6em;
-        padding: 0 0.5rem;
-        font-size: 1.3rem;
-        color: var(--primary-foreground-color);
-        opacity: 0.6;
+        padding: 0 3.5rem;
+        font-size: 1rem;
+        color: #999;
+    }
+
+    .carousel-wrapper {
+        position: relative;
+        // Use clip on X to hide scrolled-out items, visible on Y for hover expansion
+        overflow-x: clip;
+        overflow-y: visible;
+
+        // When a card is hovered, allow it to overflow the carousel bounds
+        &:has([data-hovered]) {
+            overflow: visible;
+        }
     }
 
     .meta-items-container {
@@ -69,19 +93,87 @@
         flex-direction: row;
         align-items: stretch;
         overflow: visible;
+        -webkit-overflow-scrolling: touch;
+        padding: 1.5rem 3.5rem;
+        gap: 0;
+        scrollbar-width: none;
 
+        &::-webkit-scrollbar {
+            display: none;
+        }
+
+        // All cards are landscape — ~4.5 visible per row
         .meta-item {
-            &.poster-shape-poster {
-                flex: calc(1 / var(--poster-shape-ratio));
-            }
+            flex: 0 0 calc(100% / 4.5);
+        }
+    }
 
-            &.poster-shape-square {
-                flex: 1;
-            }
+    .carousel-arrow {
+        position: absolute;
+        top: 0;
+        bottom: 0;
+        width: 3.5rem;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: rgba(0, 0, 0, 0.6);
+        border: none;
+        cursor: pointer;
+        z-index: 50;
+        opacity: 0;
+        transition: opacity 0.15s ease, background-color 0.15s ease;
 
-            &.poster-shape-landscape {
-                flex: calc(1 / var(--landscape-shape-ratio));
+        .arrow-icon {
+            width: 2rem;
+            height: 2rem;
+            color: white;
+        }
+    }
+
+    .carousel-arrow-visible {
+        opacity: 0.8;
+
+        &:hover {
+            opacity: 1;
+            background-color: rgba(0, 0, 0, 0.85);
+        }
+    }
+
+    .carousel-arrow-left {
+        left: 0;
+    }
+
+    .carousel-arrow-right {
+        right: 0;
+    }
+}
+
+@media only screen and (min-width: 1800px) {
+    .meta-row-container {
+        .meta-items-container {
+            .meta-item {
+                flex: 0 0 calc(100% / 5.5);
             }
+        }
+    }
+}
+
+@media only screen and (max-width: @small) {
+    .meta-row-container {
+        .header-container {
+            padding: 0 2rem;
+        }
+
+        .meta-items-container {
+            padding: 1rem 2rem;
+
+            .meta-item {
+                flex: 0 0 calc(100% / 3.5);
+            }
+        }
+
+        .carousel-arrow {
+            width: 2rem;
         }
     }
 }
@@ -89,21 +181,22 @@
 @media only screen and (max-width: @minimum) {
     .meta-row-container {
         .header-container {
-            padding: 0 0.5rem;
-
-            .title-container {
-                margin-right: 0.5rem;
-                white-space: nowrap;
-                text-overflow: ellipsis;
-            }
+            padding: 0 1rem;
         }
 
         .meta-items-container {
+            padding: 0.75rem 1rem;
+            overflow-x: auto;
+            scroll-snap-type: x mandatory;
+
             .meta-item {
-                &:not(:first-child) {
-                    margin-left: 0;
-                }
+                scroll-snap-align: start;
+                flex: 0 0 calc(100% / 2.2);
             }
+        }
+
+        .carousel-arrow {
+            display: none;
         }
     }
 }

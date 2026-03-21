@@ -14,6 +14,91 @@ const { default: SeasonEpisodePicker } = require('../EpisodePicker');
 
 const ALL_ADDONS_KEY = 'ALL';
 
+// ─── Auto-pick scoring ───
+const SOURCE_PATTERNS = {
+    realdebrid: /\[RD[+\s]|RealDebrid/i,
+    debridlink: /\[DL[+\s]|Debrid-Link/i,
+    alldebrid: /\[AD[+\s]|AllDebrid/i,
+    premiumize: /\[PM[+\s]|Premiumize/i,
+};
+
+function getAutoPickSettings() {
+    try {
+        const enabled = localStorage.getItem('netflix_ui_autopick') === 'true';
+        if (!enabled) return null;
+        return {
+            quality: localStorage.getItem('netflix_ui_autopick_quality') || '4k',
+            fallback: localStorage.getItem('netflix_ui_autopick_fallback') || '1080p',
+            source: localStorage.getItem('netflix_ui_autopick_source') || 'realdebrid',
+        };
+    } catch { return null; }
+}
+
+function detectQuality(stream) {
+    const name = (stream.name || '').toLowerCase();
+    const desc = (stream.description || '').toLowerCase();
+    if (name.includes('4k') || name.includes('2160p') || desc.includes('2160p')) return '4k';
+    if (name.includes('1080p') || desc.includes('1080p')) return '1080p';
+    if (name.includes('720p') || desc.includes('720p')) return '720p';
+    if (name.includes('480p') || desc.includes('480p')) return '480p';
+    return null;
+}
+
+function matchesSource(stream, source) {
+    if (source === 'any') return true;
+    const regex = SOURCE_PATTERNS[source];
+    return regex ? regex.test(stream.name || '') : false;
+}
+
+function scoreStream(stream, settings) {
+    const name = (stream.name || '').toLowerCase();
+    const desc = (stream.description || '').toLowerCase();
+    const combined = name + ' ' + desc;
+    let score = 0;
+
+    const quality = detectQuality(stream);
+    if (quality === settings.quality) score += 1000;
+    else if (quality === settings.fallback) score += 500;
+    else if (quality === '4k') score += 400;
+    else if (quality === '1080p') score += 300;
+    else if (quality === '720p') score += 200;
+    else if (quality === '480p') score += 100;
+    else score += 50; // unknown quality
+
+    // HDR bonus
+    if (/hdr|dolby\s*vision|dv/i.test(combined)) score += 50;
+
+    // Seeder bonus (parsed from description like "👤 177")
+    const seedMatch = desc.match(/👤\s*(\d+)/);
+    if (seedMatch) score += Math.min(parseInt(seedMatch[1], 10), 100);
+
+    return score;
+}
+
+function pickBestStream(allStreams, settings) {
+    if (!settings || allStreams.length === 0) return null;
+
+    // ONLY consider streams from the selected provider
+    const providerStreams = allStreams.filter((stream) => {
+        if (!stream.name) return false;
+        if (/subscription|rent|buy/i.test(stream.description || '')) return false;
+        return matchesSource(stream, settings.source);
+    });
+
+    if (providerStreams.length === 0) return null;
+
+    let best = null;
+    let bestScore = -1;
+    for (const stream of providerStreams) {
+        const s = scoreStream(stream, settings);
+        if (s > bestScore) {
+            bestScore = s;
+            best = stream;
+        }
+    }
+    return best;
+}
+
 const StreamsList = ({ className, video, type, onEpisodeSearch, ...props }) => {
     const { t } = useTranslation();
     const { core } = useServices();
@@ -94,6 +179,42 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, ...props }) => {
         };
     }, [streamsByAddon, selectedAddon]);
 
+    // ─── Auto-pick best stream ───
+    // Picks immediately as soon as any stream from the selected provider loads.
+    // Does NOT wait for all addons — if 1080p RD loads first, it plays that.
+    const autoPickTriggered = React.useRef(false);
+    const [autoPickActive] = React.useState(() => !!getAutoPickSettings());
+    const [autoPickInfo, setAutoPickInfo] = React.useState(null);
+    React.useEffect(() => {
+        if (autoPickTriggered.current) return;
+        if (filteredStreams.length === 0) return;
+
+        const settings = getAutoPickSettings();
+        if (!settings) return;
+
+        const best = pickBestStream(filteredStreams, settings);
+        if (best && best.deepLinks?.player) {
+            autoPickTriggered.current = true;
+            setAutoPickInfo({ name: best.name, description: (best.description || '').split('\n')[0] });
+            // Fire analytics
+            if (typeof best.onClick === 'function') best.onClick();
+            // Mark video as watched for external player
+            if (profile.settings.playerType !== null) {
+                core.transport.dispatch({
+                    action: 'MetaDetails',
+                    args: {
+                        action: 'MarkVideoAsWatched',
+                        args: [{ id: video?.id, released: video?.released }, true]
+                    }
+                });
+            }
+            // Small delay so user sees the selection
+            setTimeout(() => {
+                window.location = best.deepLinks.player;
+            }, 800);
+        }
+    }, [filteredStreams]);
+
     const handleEpisodePicker = React.useCallback((season, episode) => {
         onEpisodeSearch(season, episode);
     }, [onEpisodeSearch]);
@@ -124,6 +245,21 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, ...props }) => {
                         null
                 }
             </div>
+            {
+                autoPickActive && countLoadingAddons > 0 ?
+                    <div className={styles['autopick-banner']}>
+                        <span className={styles['autopick-spinner']} />
+                        <span>{t('MOBILE_ADDONS_LOADING')}... Auto-pick will select the best stream</span>
+                    </div>
+                    :
+                    autoPickInfo ?
+                        <div className={styles['autopick-banner']}>
+                            <span className={styles['autopick-check']}>&#10003;</span>
+                            <span>Auto-playing: {autoPickInfo.description}</span>
+                        </div>
+                        :
+                        null
+            }
             {
                 props.streams.length === 0 ?
                     <div className={styles['message-container']}>

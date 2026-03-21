@@ -1,6 +1,5 @@
 // Copyright (C) 2017-2023 Smart code 203358507
 
-@import (reference) '~@stremio/stremio-colors/less/stremio-colors.less';
 @import (reference) '~stremio/common/screen-sizes.less';
 
 :import('~stremio/components/ModalDialog/styles.less') {
@@ -10,38 +9,44 @@
 
 .password-reset-modal-container {
     .password-reset-modal-content {
-        width: 30rem;
+        width: 28rem;
+        background: #181818;
+        border-radius: 0.25rem;
 
         .credentials-text-input {
             width: 100%;
-            padding: 1rem;
-            border-radius: var(--border-radius);
-            outline-offset: calc(-1 * var(--focus-outline-size));
-            color: var(--primary-foreground-color);
-            background: var(--overlay-color);
-            
-            &:hover, &:focus {
-                outline: var(--focus-outline-size) solid var(--overlay-color);
+            padding: 1rem 1.2rem;
+            border-radius: 0.25rem;
+            border: 1px solid #333;
+            color: #fff;
+            background: #333;
+            font-size: 1rem;
+            outline: none;
+
+            &:focus {
+                border-color: #e5e5e5;
             }
         }
     }
 
     .error-message {
-        font-size: 1.1rem;
-        margin-top: 2rem;
+        font-size: 0.9rem;
+        margin-top: 1.5rem;
         text-align: center;
-        color: @color-accent5-90;
+        color: #e87c03;
     }
 
     .cancel-button {
         background-color: transparent;
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        border-radius: 0.25rem;
 
-        &:hover, &:focus {
-            outline-color: var(--primary-foreground-color);
+        &:hover {
+            background-color: rgba(255, 255, 255, 0.1);
         }
 
         .cancel-button-label {
-            color: var(--primary-foreground-color);
+            color: #e5e5e5;
         }
     }
 }

@@ -4,56 +4,152 @@ const React = require('react');
 const classnames = require('classnames');
 const debounce = require('lodash.debounce');
 const useTranslate = require('stremio/common/useTranslate');
-const { useStreamingServer, useNotifications, withCoreSuspender, getVisibleChildrenRange, useProfile } = require('stremio/common');
+const { useStreamingServer, useNotifications, withCoreSuspender } = require('stremio/common');
 const { ContinueWatchingItem, EventModal, MainNavBars, MetaItem, MetaRow } = require('stremio/components');
+const HeroBanner = require('stremio/components/HeroBanner');
+const { TrailerProvider, TrailerContext } = require('stremio/common/TrailerContext');
 const useBoard = require('./useBoard');
 const useContinueWatchingPreview = require('./useContinueWatchingPreview');
+const useRecommendations = require('./useRecommendations');
+const useTraktRecommendations = require('./useTraktRecommendations');
 const styles = require('./styles');
-const { default: StreamingServerWarning } = require('./StreamingServerWarning');
 
 const THRESHOLD = 5;
 
-const Board = () => {
+// Inner component that has access to TrailerContext (rendered inside TrailerProvider)
+const BoardContent = () => {
     const t = useTranslate();
     const streamingServer = useStreamingServer();
     const continueWatchingPreview = useContinueWatchingPreview();
     const [board, loadBoardRows] = useBoard();
     const notifications = useNotifications();
-    const profile = useProfile();
-    const boardCatalogsOffset = continueWatchingPreview.items.length > 0 ? 1 : 0;
+    const { recommendations } = useRecommendations();
+    const { rows: traktRows } = useTraktRecommendations();
+    // boardCatalogsOffset no longer needed — visible range uses scroll fraction
     const scrollContainerRef = React.useRef();
-    const showStreamingServerWarning = React.useMemo(() => {
-        return streamingServer.settings !== null && streamingServer.settings.type === 'Err' && (
-            isNaN(profile.settings.streamingServerWarningDismissed.getTime()) ||
-            profile.settings.streamingServerWarningDismissed.getTime() < Date.now());
-    }, [profile.settings, streamingServer.settings]);
+    const heroRef = React.useRef(null);
+    const trailerCtx = React.useContext(TrailerContext);
+
+    // Get hero items from the first ready catalog
+    const heroItems = React.useMemo(() => {
+        for (const catalog of board.catalogs) {
+            if (catalog.content?.type === 'Ready' && Array.isArray(catalog.content.content)) {
+                return catalog.content.content.slice(0, 10);
+            }
+        }
+        return [];
+    }, [board.catalogs]);
+
     const onVisibleRangeChange = React.useCallback(() => {
-        const range = getVisibleChildrenRange(scrollContainerRef.current);
-        if (range === null) {
-            return;
+        // Since catalogs are reordered in the UI (Trakt first, then others),
+        // DOM indices don't map 1:1 to board.catalogs indices.
+        // Load all catalogs to ensure everything renders regardless of order.
+        if (board.catalogs.length > 0) {
+            loadBoardRows({ start: 0, end: board.catalogs.length });
         }
+    }, [board.catalogs.length]);
 
-        const start = Math.max(0, range.start - boardCatalogsOffset - THRESHOLD);
-        const end = range.end - boardCatalogsOffset + THRESHOLD;
-        if (end < start) {
-            return;
+    // Check hero banner visibility on every scroll tick (not debounced — must be instant)
+    const heroInViewRef = React.useRef(true);
+    const checkHeroVisibility = React.useCallback(() => {
+        const el = heroRef.current;
+        if (!el) return;
+        const rect = el.getBoundingClientRect();
+        const vpHeight = window.innerHeight;
+        const visibleTop = Math.max(rect.top, 0);
+        const visibleBottom = Math.min(rect.bottom, vpHeight);
+        const visibleHeight = Math.max(0, visibleBottom - visibleTop);
+        const ratio = rect.height > 0 ? visibleHeight / rect.height : 0;
+        const inView = ratio >= 0.75;
+        if (heroInViewRef.current !== inView) {
+            heroInViewRef.current = inView;
+            if (trailerCtx) trailerCtx.setHeroInView(inView);
         }
+    }, [trailerCtx]);
 
-        loadBoardRows({ start, end });
-    }, [boardCatalogsOffset]);
-    const onScroll = React.useCallback(debounce(onVisibleRangeChange, 250), [onVisibleRangeChange]);
+    const debouncedVisibleRange = React.useCallback(debounce(onVisibleRangeChange, 250), [onVisibleRangeChange]);
+    const onScroll = React.useCallback(() => {
+        checkHeroVisibility();
+        debouncedVisibleRange();
+    }, [checkHeroVisibility, debouncedVisibleRange]);
+
     React.useLayoutEffect(() => {
         onVisibleRangeChange();
     }, [board.catalogs, onVisibleRangeChange]);
+
+    // When user navigates away from Board page, mark hero as not in view
+    React.useEffect(() => {
+        const onHashChange = () => {
+            heroInViewRef.current = false;
+            if (trailerCtx) trailerCtx.setHeroInView(false);
+        };
+        window.addEventListener('hashchange', onHashChange);
+        return () => window.removeEventListener('hashchange', onHashChange);
+    }, [trailerCtx]);
+
+    // Addons/catalogs to exclude entirely (source-based, utility, channels)
+    const EXCLUDED_ADDONS = new Set([
+        'com.linvo.stremiochannels',    // YouTube channels
+        'org.stremio.ftututs',          // Udemy courses
+        'com.stremio.torrentio.addon',  // RealDebrid/Torrentio
+        'org.stremio.pubdomainmovies',  // Public Domain Movies
+        'community.fmovies',           // FMovies
+        'org.cinetorrent',             // CineTorrent
+        'pw.ers.netflix-catalog',      // Netflix/HBO/Disney/Prime/Apple source catalogs
+    ]);
+    // Cyberflix source-based catalog IDs to exclude (keep premieres, trending, genre-based)
+    const EXCLUDED_CYBERFLIX_PREFIXES = [
+        'netflix.', 'disney_plus.', 'hbo_max.', 'amazon_prime.', 'apple_tv_plus.',
+    ];
+
+    // Split catalogs into: Trakt top (recommendations/watchlist), content rows, Trakt bottom (history/collection)
+    const { traktTopCatalogs, contentCatalogs, traktBottomCatalogs } = React.useMemo(() => {
+        const traktTop = [];   // recommendations, watchlist
+        const traktBottom = []; // history, collection
+        const content = [];
+
+        for (let i = 0; i < board.catalogs.length; i++) {
+            const c = board.catalogs[i];
+            const addonId = c.addon?.manifest?.id || '';
+            const catalogId = c.id || '';
+
+            // Trakt addon — split by catalog type
+            if (addonId.startsWith('org.trakt')) {
+                if (catalogId === 'recommendations' || catalogId === 'watchlist') {
+                    traktTop.push({ catalog: c, originalIndex: i });
+                } else {
+                    traktBottom.push({ catalog: c, originalIndex: i });
+                }
+                continue;
+            }
+
+            // Exclude entire addons
+            if (EXCLUDED_ADDONS.has(addonId)) continue;
+
+            // Exclude Cyberflix source-based catalogs (keep premieres, trending, genre)
+            if (addonId === 'marcojoao.ml.cyberflix.catalog') {
+                if (EXCLUDED_CYBERFLIX_PREFIXES.some((p) => catalogId.startsWith(p))) continue;
+            }
+
+            content.push({ catalog: c, originalIndex: i });
+        }
+
+        return { traktTopCatalogs: traktTop, contentCatalogs: content, traktBottomCatalogs: traktBottom };
+    }, [board.catalogs]);
+
     return (
         <div className={styles['board-container']}>
             <EventModal />
             <MainNavBars className={styles['board-content-container']} route={'board'}>
-                <div ref={scrollContainerRef} className={styles['board-content']} onScroll={onScroll}>
+                <div ref={scrollContainerRef} className={styles['board-content']} data-scroll-container onScroll={onScroll}>
+                    <div ref={heroRef}>
+                        <HeroBanner items={heroItems} />
+                    </div>
+                    <div className={styles['board-rows']}>
                     {
                         continueWatchingPreview.items.length > 0 ?
                             <MetaRow
-                                className={classnames(styles['board-row'], styles['continue-watching-row'], 'animation-fade-in')}
+                                className={classnames(styles['board-row'], 'animation-fade-in')}
                                 title={t.string('BOARD_CONTINUE_WATCHING')}
                                 catalog={continueWatchingPreview}
                                 itemComponent={ContinueWatchingItem}
@@ -62,52 +158,81 @@ const Board = () => {
                             :
                             null
                     }
-                    {board.catalogs.map((catalog, index) => {
-                        switch (catalog.content?.type) {
-                            case 'Ready': {
-                                return (
-                                    <MetaRow
-                                        key={index}
-                                        className={classnames(styles['board-row'], styles[`board-row-${catalog.content.content[0].posterShape}`], 'animation-fade-in')}
-                                        catalog={catalog}
-                                        itemComponent={MetaItem}
-                                    />
-                                );
-                            }
-                            case 'Err': {
-                                if (catalog.content.content !== 'EmptyContent') {
-                                    return (
-                                        <MetaRow
-                                            key={index}
-                                            className={classnames(styles['board-row'], 'animation-fade-in')}
-                                            catalog={catalog}
-                                            message={catalog.content.content}
-                                        />
-                                    );
-                                }
-                                return null;
-                            }
-                            default: {
-                                return (
-                                    <MetaRow.Placeholder
-                                        key={index}
-                                        className={classnames(styles['board-row'], styles['board-row-poster'], 'animation-fade-in')}
-                                        catalog={catalog}
-                                        title={t.catalogTitle(catalog)}
-                                    />
-                                );
-                            }
-                        }
+                    {/* Trakt addon catalogs — top: recommendations, watchlist */}
+                    {traktTopCatalogs.map(({ catalog, originalIndex }) => {
+                        if (catalog.content?.type !== 'Ready') return null;
+                        return (
+                            <MetaRow
+                                key={`trakt-${originalIndex}`}
+                                className={classnames(styles['board-row'], 'animation-fade-in')}
+                                catalog={catalog}
+                                itemComponent={MetaItem}
+                                source={'Trakt'}
+                            />
+                        );
                     })}
+                    {/* TMDB discovery rows (trending, popular, etc.) */}
+                    {traktRows.map((row, index) => (
+                        <MetaRow
+                            key={`tmdb-disc-${index}`}
+                            className={classnames(styles['board-row'], 'animation-fade-in')}
+                            title={row.title}
+                            catalog={{ items: row.items, content: { type: 'Ready', content: row.items } }}
+                            itemComponent={MetaItem}
+                            source={'TMDB'}
+                        />
+                    ))}
+                    {/* TMDB "Because You Watched" recommendations */}
+                    {recommendations.map((rec, index) => (
+                        <MetaRow
+                            key={`rec-${index}`}
+                            className={classnames(styles['board-row'], 'animation-fade-in')}
+                            title={rec.title}
+                            catalog={{ items: rec.items, content: { type: 'Ready', content: rec.items } }}
+                            itemComponent={MetaItem}
+                            source={'TMDB'}
+                        />
+                    ))}
+                    {/* Other addon catalogs — only show rows that loaded successfully */}
+                    {contentCatalogs.map(({ catalog, originalIndex }) => {
+                        if (catalog.content?.type !== 'Ready') return null;
+                        const addonName = catalog.addon?.manifest?.name || '';
+                        return (
+                            <MetaRow
+                                key={originalIndex}
+                                className={classnames(styles['board-row'], 'animation-fade-in')}
+                                catalog={catalog}
+                                itemComponent={MetaItem}
+                                source={addonName}
+                            />
+                        );
+                    })}
+                    {/* Trakt addon catalogs — bottom: history, collection */}
+                    {traktBottomCatalogs.map(({ catalog, originalIndex }) => {
+                        if (catalog.content?.type !== 'Ready') return null;
+                        return (
+                            <MetaRow
+                                key={`trakt-bottom-${originalIndex}`}
+                                className={classnames(styles['board-row'], 'animation-fade-in')}
+                                catalog={catalog}
+                                itemComponent={MetaItem}
+                                source={'Trakt'}
+                            />
+                        );
+                    })}
+                    </div>
                 </div>
             </MainNavBars>
-            {
-                showStreamingServerWarning ?
-                    <StreamingServerWarning className={styles['board-warning-container']} />
-                    :
-                    null
-            }
         </div>
+    );
+};
+
+// Outer component wraps with TrailerProvider so BoardContent can use the context
+const Board = () => {
+    return (
+        <TrailerProvider>
+            <BoardContent />
+        </TrailerProvider>
     );
 };
 

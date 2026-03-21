@@ -34,6 +34,29 @@
         }
     }
 
+    .netflix-ui-button {
+        position: relative;
+        color: #e50914;
+
+        &::before {
+            content: '';
+            position: absolute;
+            left: 1rem;
+            top: 50%;
+            transform: translateY(-50%);
+            width: 0.45rem;
+            height: 0.45rem;
+            border-radius: 50%;
+            background-color: #e50914;
+            box-shadow: 0 0 4px rgba(229, 9, 20, 0.5);
+        }
+
+        &.selected {
+            color: #e50914;
+            background-color: rgba(229, 9, 20, 0.12);
+        }
+    }
+
     .spacing {
         flex: 1;
     }

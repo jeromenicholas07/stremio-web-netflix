@@ -52,20 +52,20 @@
     --color-placeholder: #60606080;
     --color-placeholder-text: @color-surface-50;
     --color-placeholder-background: @color-surface-dark5-20;
-    --primary-background-color: rgba(12, 11, 17, 1);
-    --secondary-background-color: rgba(26, 23, 62, 1);
-    --primary-foreground-color: rgba(255, 255, 255, 0.9);
-    --secondary-foreground-color: rgb(12, 11, 17, 1);
-    --primary-accent-color: rgb(123, 91, 245);
-    --secondary-accent-color: rgba(34, 179, 101, 1);
-    --tertiary-accent-color: rgba(246, 199, 0, 1);
-    --quaternary-accent-color: rgba(18, 69, 166, 1);
-    --overlay-color: rgba(255, 255, 255, 0.05);
-    --modal-background-color: rgba(15, 13, 32, 1);
-    --outer-glow: 0px 0px 15px rgba(123, 91, 245, 0.37);
+    --primary-background-color: #141414;
+    --secondary-background-color: #181818;
+    --primary-foreground-color: #e5e5e5;
+    --secondary-foreground-color: #141414;
+    --primary-accent-color: #e50914;
+    --secondary-accent-color: #46d369;
+    --tertiary-accent-color: #f5c518;
+    --quaternary-accent-color: #2196f3;
+    --overlay-color: rgba(255, 255, 255, 0.08);
+    --modal-background-color: #181818;
+    --outer-glow: none;
     --warning-accent-color: rgba(255, 165, 0, 1);
-    --danger-accent-color: rgba(220, 38, 38, 1);  
-    --border-radius: 0.75rem;
+    --danger-accent-color: rgba(220, 38, 38, 1);
+    --border-radius: 0.25rem;
     --top-overlay-size: @top-overlay-size;
     --bottom-overlay-size: @bottom-overlay-size;
     --overlap-size: @overlap-size;
@@ -151,7 +151,7 @@ svg {
 html {
     width: @html-width;
     height: @html-height;
-    font-family: 'PlusJakartaSans', 'Arial', 'Helvetica', 'sans-serif';
+    font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif;
     overflow: auto;
     overscroll-behavior: none;
     user-select: none;
@@ -167,7 +167,7 @@ html {
     body {
         width: 100%;
         height: 100%;
-        background: linear-gradient(41deg, var(--primary-background-color) 0%, var(--secondary-background-color) 100%);
+        background: #141414;
         -webkit-font-smoothing: antialiased;
 
         :global(#app) {
@@ -203,7 +203,7 @@ html {
                 color: var(--primary-foreground-color);
                 border-radius: var(--border-radius);
                 background-color: var(--modal-background-color);
-                box-shadow: var(--outer-glow);
+                box-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
                 transition: opacity 0.1s ease-out;
             }
 

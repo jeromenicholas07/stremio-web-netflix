@@ -181,6 +181,49 @@
     }
 }
 
+// --- Auto-pick banner ---
+.autopick-banner {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    padding: 0.6rem 1rem;
+    margin: 0 1rem 0.5rem;
+    background: linear-gradient(135deg, rgba(70, 211, 105, 0.1) 0%, rgba(70, 211, 105, 0.03) 100%);
+    border: 1px solid rgba(70, 211, 105, 0.25);
+    border-radius: 0.4rem;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.7);
+    font-weight: 500;
+    animation: autopick-fade-in 0.3s ease;
+}
+
+.autopick-spinner {
+    display: inline-block;
+    width: 0.8rem;
+    height: 0.8rem;
+    flex-shrink: 0;
+    border: 2px solid rgba(70, 211, 105, 0.2);
+    border-top-color: #46d369;
+    border-radius: 50%;
+    animation: autopick-spin 0.6s linear infinite;
+}
+
+.autopick-check {
+    color: #46d369;
+    font-weight: 700;
+    font-size: 0.9rem;
+    flex-shrink: 0;
+}
+
+@keyframes autopick-spin {
+    to { transform: rotate(360deg); }
+}
+
+@keyframes autopick-fade-in {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
 @media only screen and (max-width: @minimum) {
     .streams-list-container {
         overflow: visible;

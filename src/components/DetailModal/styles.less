@@ -1,0 +1,399 @@
+// Copyright (C) 2017-2024 Smart code 203358507
+
+@import (reference) '~stremio/common/screen-sizes.less';
+
+.modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 100;
+    background-color: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: flex-start;
+    justify-content: center;
+    overflow-y: auto;
+    padding: 2rem 0;
+}
+
+.modal-container {
+    position: relative;
+    width: 100%;
+    max-width: 850px;
+    background-color: #181818;
+    border-radius: 0.5rem;
+    overflow: hidden;
+    box-shadow: 0 8px 40px rgba(0, 0, 0, 0.8);
+}
+
+.close-btn {
+    position: absolute;
+    top: 1rem;
+    right: 1rem;
+    z-index: 10;
+    width: 2.25rem;
+    height: 2.25rem;
+    border-radius: 50%;
+    background-color: #181818;
+    border: none;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: opacity 0.15s ease;
+
+    &:hover {
+        opacity: 0.8;
+    }
+
+    .close-icon {
+        width: 1.25rem;
+        height: 1.25rem;
+        color: white;
+    }
+}
+
+.loading-container {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 400px;
+
+    .loading-spinner {
+        width: 3rem;
+        height: 3rem;
+        border: 3px solid rgba(255, 255, 255, 0.1);
+        border-top-color: #e50914;
+        border-radius: 50%;
+        animation: spin 0.8s linear infinite;
+    }
+}
+
+@keyframes spin {
+    to { transform: rotate(360deg); }
+}
+
+.modal-hero {
+    position: relative;
+    width: 100%;
+    height: 0;
+    padding-bottom: 56.25%; // 16:9
+    overflow: hidden;
+
+    .modal-backdrop {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+    }
+
+    .modal-trailer {
+        position: absolute;
+        top: -60px;
+        left: 0;
+        width: 100%;
+        height: calc(100% + 120px);
+        border: none;
+        z-index: 1;
+        pointer-events: none;
+    }
+
+    .modal-hero-gradient {
+        position: absolute;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        height: 50%;
+        background: linear-gradient(0deg, #181818 0%, transparent 100%);
+        z-index: 2;
+    }
+
+    .modal-hero-content {
+        position: absolute;
+        bottom: 1.5rem;
+        left: 2rem;
+        z-index: 3;
+
+        .modal-title {
+            font-size: 2rem;
+            font-weight: 800;
+            color: white;
+            margin-bottom: 0.75rem;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        .modal-hero-buttons {
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            gap: 0.75rem;
+        }
+    }
+}
+
+.play-btn {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.4rem 1.5rem;
+    background-color: white;
+    border-radius: 0.25rem;
+    border: none;
+    cursor: pointer;
+    transition: opacity 0.15s ease;
+
+    &:hover {
+        opacity: 0.8;
+    }
+
+    .play-btn-icon {
+        width: 1.5rem;
+        height: 1.5rem;
+        color: #141414;
+    }
+
+    span {
+        font-size: 1rem;
+        font-weight: 700;
+        color: #141414;
+    }
+}
+
+.circle-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 2.5rem;
+    height: 2.5rem;
+    border-radius: 50%;
+    border: 2px solid rgba(255, 255, 255, 0.5);
+    background: transparent;
+    cursor: pointer;
+    transition: border-color 0.15s ease;
+
+    &:hover {
+        border-color: white;
+    }
+
+    .circle-btn-icon {
+        width: 1.25rem;
+        height: 1.25rem;
+        color: white;
+    }
+}
+
+.modal-info {
+    display: flex;
+    flex-direction: row;
+    gap: 2rem;
+    padding: 1.5rem 2rem;
+
+    .modal-info-main {
+        flex: 2;
+    }
+
+    .modal-info-side {
+        flex: 1;
+    }
+}
+
+.modal-meta-row {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+}
+
+.match-text {
+    font-size: 0.9rem;
+    font-weight: 700;
+    color: #46d369;
+}
+
+.meta-text {
+    font-size: 0.9rem;
+    color: #bcbcbc;
+}
+
+.modal-description {
+    font-size: 0.9rem;
+    color: #d2d2d2;
+    line-height: 1.5;
+}
+
+.info-label {
+    font-size: 0.85rem;
+    color: #999;
+    margin-bottom: 0.5rem;
+    line-height: 1.4;
+
+    .info-label-title {
+        color: #777;
+    }
+}
+
+.episodes-section {
+    padding: 0 2rem 2rem;
+
+    .episodes-header {
+        display: flex;
+        flex-direction: row;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+
+        .episodes-title {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: white;
+        }
+
+        .season-select {
+            padding: 0.4rem 0.75rem;
+            background-color: #242424;
+            color: white;
+            border: 1px solid #555;
+            border-radius: 0.25rem;
+            font-size: 0.9rem;
+            cursor: pointer;
+            appearance: auto;
+
+            option {
+                background-color: #242424;
+                color: white;
+            }
+        }
+    }
+
+    .episodes-list {
+        display: flex;
+        flex-direction: column;
+        gap: 0;
+    }
+}
+
+.episode-item {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 1rem;
+    padding: 1rem 0;
+    border-top: 1px solid #333;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+
+    &:hover {
+        background-color: #2a2a2a;
+    }
+
+    .episode-number {
+        flex: none;
+        width: 2rem;
+        text-align: center;
+        font-size: 1.5rem;
+        font-weight: 400;
+        color: #999;
+    }
+
+    .episode-thumb {
+        flex: none;
+        position: relative;
+        width: 8rem;
+        height: 4.5rem;
+        border-radius: 0.25rem;
+        overflow: hidden;
+        background-color: #333;
+
+        .episode-thumb-img {
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+        }
+
+        .episode-play-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            opacity: 0;
+            transition: opacity 0.15s ease;
+        }
+
+        .episode-play-icon {
+            width: 2rem;
+            height: 2rem;
+            color: white;
+        }
+    }
+
+    &:hover .episode-thumb .episode-play-overlay {
+        opacity: 1;
+        background-color: rgba(0, 0, 0, 0.4);
+    }
+
+    .episode-info {
+        flex: 1;
+        overflow: hidden;
+
+        .episode-name {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: white;
+            margin-bottom: 0.25rem;
+        }
+
+        .episode-overview {
+            font-size: 0.8rem;
+            color: #999;
+            line-height: 1.4;
+            display: -webkit-box;
+            -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+    }
+}
+
+@media only screen and (max-width: @minimum) {
+    .modal-overlay {
+        padding: 0;
+    }
+
+    .modal-container {
+        border-radius: 0;
+        max-width: 100%;
+    }
+
+    .modal-info {
+        flex-direction: column;
+        gap: 1rem;
+        padding: 1rem;
+    }
+
+    .modal-hero .modal-hero-content {
+        left: 1rem;
+
+        .modal-title {
+            font-size: 1.4rem;
+        }
+    }
+
+    .episodes-section {
+        padding: 0 1rem 1rem;
+    }
+
+    .episode-item {
+        .episode-thumb {
+            width: 6rem;
+            height: 3.5rem;
+        }
+    }
+}

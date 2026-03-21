@@ -7,7 +7,7 @@ const classnames = require('classnames');
 const { default: Icon } = require('@stremio/stremio-icons/react');
 const { useServices } = require('stremio/services');
 const { CONSTANTS, useBinaryState, useOnScrollToBottom, withCoreSuspender } = require('stremio/common');
-const { AddonDetailsModal, Button, DelayedRenderer, Image, MainNavBars, MetaItem, MetaPreview, ModalDialog, MultiselectMenu } = require('stremio/components');
+const { AddonDetailsModal, Button, DelayedRenderer, Image, MainNavBars, MetaItem, ModalDialog, MultiselectMenu } = require('stremio/components');
 const useDiscover = require('./useDiscover');
 const useSelectableInputs = require('./useSelectableInputs');
 const styles = require('./styles');
@@ -21,10 +21,8 @@ const Discover = ({ urlParams, queryParams }) => {
     const [selectInputs, hasNextPage] = useSelectableInputs(discover);
     const [inputsModalOpen, openInputsModal, closeInputsModal] = useBinaryState(false);
     const [addonModalOpen, openAddonModal, closeAddonModal] = useBinaryState(false);
-    const [selectedMetaItemIndex, setSelectedMetaItemIndex] = React.useState(0);
 
     const metasContainerRef = React.useRef();
-    const metaPreviewRef = React.useRef();
 
     React.useEffect(() => {
         if (discover.catalog?.content.type === 'Loading') {
@@ -40,52 +38,6 @@ const Discover = ({ urlParams, queryParams }) => {
             }
         }
     }, [hasNextPage, loadNextPage]);
-    const selectedMetaItem = React.useMemo(() => {
-        return discover.catalog !== null &&
-            discover.catalog.content.type === 'Ready' &&
-            discover.catalog.content.content[selectedMetaItemIndex] ?
-            discover.catalog.content.content[selectedMetaItemIndex]
-            :
-            null;
-    }, [discover.catalog, selectedMetaItemIndex]);
-    const addToLibrary = React.useCallback(() => {
-        if (selectedMetaItem === null) {
-            return;
-        }
-
-        core.transport.dispatch({
-            action: 'Ctx',
-            args: {
-                action: 'AddToLibrary',
-                args: selectedMetaItem
-            }
-        });
-    }, [selectedMetaItem]);
-    const removeFromLibrary = React.useCallback(() => {
-        if (selectedMetaItem === null) {
-            return;
-        }
-
-        core.transport.dispatch({
-            action: 'Ctx',
-            args: {
-                action: 'RemoveFromLibrary',
-                args: selectedMetaItem.id
-            }
-        });
-    }, [selectedMetaItem]);
-    const metaItemsOnFocusCapture = React.useCallback((event) => {
-        if (event.target.dataset.index !== null && !isNaN(event.target.dataset.index)) {
-            setSelectedMetaItemIndex(parseInt(event.target.dataset.index, 10));
-        }
-    }, []);
-    const metaItemOnClick = React.useCallback((event) => {
-        const visible = window.getComputedStyle(metaPreviewRef.current).display !== 'none';
-        if (event.currentTarget.dataset.index !== selectedMetaItemIndex.toString() && visible) {
-            event.preventDefault();
-            event.currentTarget.focus();
-        }
-    }, [selectedMetaItemIndex]);
     const onScrollToBottom = React.useCallback(() => {
         if (hasNextPage) {
             loadNextPage();
@@ -95,7 +47,6 @@ const Discover = ({ urlParams, queryParams }) => {
     React.useEffect(() => {
         closeInputsModal();
         closeAddonModal();
-        setSelectedMetaItemIndex(0);
     }, [discover.selected]);
     return (
         <MainNavBars className={styles['discover-container']} route={'discover'}>
@@ -156,52 +107,22 @@ const Discover = ({ urlParams, queryParams }) => {
                                         ))}
                                     </div>
                                     :
-                                    <div ref={metasContainerRef} className={classnames(styles['meta-items-container'], 'animation-fade-in')} onScroll={onScroll} onFocusCapture={metaItemsOnFocusCapture}>
+                                    <div ref={metasContainerRef} className={classnames(styles['meta-items-container'], 'animation-fade-in')} onScroll={onScroll}>
                                         {discover.catalog.content.content.map((metaItem, index) => (
                                             <MetaItem
                                                 key={index}
-                                                className={classnames({ 'selected': selectedMetaItemIndex === index })}
                                                 type={metaItem.type}
                                                 name={metaItem.name}
                                                 poster={metaItem.poster}
-                                                posterShape={metaItem.posterShape}
-                                                playname={selectedMetaItemIndex === index}
+                                                posterShape={'landscape'}
                                                 deepLinks={metaItem.deepLinks}
                                                 watched={metaItem.watched}
-                                                data-index={index}
-                                                onClick={metaItemOnClick}
+                                                disableTrailerExpand
                                             />
                                         ))}
                                     </div>
                     }
                 </div>
-                {
-                    selectedMetaItem !== null ?
-                        <MetaPreview
-                            className={styles['meta-preview-container']}
-                            compact={true}
-                            ref={metaPreviewRef}
-                            name={selectedMetaItem.name}
-                            logo={selectedMetaItem.logo}
-                            background={selectedMetaItem.poster}
-                            runtime={selectedMetaItem.runtime}
-                            releaseInfo={selectedMetaItem.releaseInfo}
-                            released={selectedMetaItem.released}
-                            description={selectedMetaItem.description}
-                            links={selectedMetaItem.links}
-                            deepLinks={selectedMetaItem.deepLinks}
-                            trailerStreams={selectedMetaItem.trailerStreams}
-                            inLibrary={selectedMetaItem.inLibrary}
-                            toggleInLibrary={selectedMetaItem.inLibrary ? removeFromLibrary : addToLibrary}
-                            metaId={selectedMetaItem.id}
-                            like={selectedMetaItem.like}
-                        />
-                        :
-                        discover.catalog !== null && discover.catalog.content.type === 'Loading' ?
-                            <div className={styles['meta-preview-container']} />
-                            :
-                            null
-                }
             </div>
             {
                 inputsModalOpen ?

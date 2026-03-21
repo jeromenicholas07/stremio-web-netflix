@@ -5,10 +5,9 @@
 .main-nav-bars-container {
     position: relative;
     z-index: 0;
-    overflow: clip;
-    margin-left: var(--safe-area-inset-left);
-    margin-right: var(--safe-area-inset-right);
-    width: calc(100% - var(--safe-area-inset-left) - var(--safe-area-inset-right));
+    // Use clip-path instead of overflow:clip to avoid creating a stacking context
+    // that traps z-index of hovered cards
+    width: 100%;
     height: 100%;
 
     .horizontal-nav-bar {
@@ -16,37 +15,19 @@
         top: 0;
         right: 0;
         left: 0;
-        z-index: 1;
-    }
-
-    .vertical-nav-bar {
-        position: absolute;
-        top: var(--horizontal-nav-bar-size);
-        bottom: 0;
-        left: 0;
-        z-index: 1;
+        z-index: 10;
     }
 
     .nav-content-container {
         position: absolute;
-        top: calc(var(--horizontal-nav-bar-size) + var(--safe-area-inset-top));
+        top: 0;
         right: 0;
         bottom: 0;
-        left: var(--vertical-nav-bar-size);
+        left: 0;
         z-index: 0;
-        overflow: hidden;
-    }
-}
-
-@media only screen and (max-width: @minimum) {
-    .main-nav-bars-container {
-        .nav-content-container {
-            left: 0;
-            bottom: var(--vertical-nav-bar-size);
-        }
-
-        .vertical-nav-bar {
-            top: initial;
-        }
+        // overflow-x hidden to prevent horizontal scroll
+        // overflow-y visible so hovered cards can extend vertically
+        overflow-x: hidden;
+        overflow-y: visible;
     }
 }
