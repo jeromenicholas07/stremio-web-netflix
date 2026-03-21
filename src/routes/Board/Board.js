@@ -31,7 +31,7 @@ const BoardContent = () => {
     const trailerCtx = React.useContext(TrailerContext);
 
     // Get hero items from the first ready catalog
-    const heroItems = React.useMemo(() => {
+    const baseHeroItems = React.useMemo(() => {
         for (const catalog of board.catalogs) {
             if (catalog.content?.type === 'Ready' && Array.isArray(catalog.content.content)) {
                 return catalog.content.content.slice(0, 10);
@@ -39,6 +39,22 @@ const BoardContent = () => {
         }
         return [];
     }, [board.catalogs]);
+
+    // Prepend promoted item (from card ^ button) to hero items
+    const promotedItem = trailerCtx ? trailerCtx.promotedItem : null;
+    const heroItems = React.useMemo(() => {
+        if (!promotedItem) return baseHeroItems;
+        // Remove duplicate if already in list, then prepend
+        const filtered = baseHeroItems.filter((h) => h.id !== promotedItem.id);
+        return [promotedItem, ...filtered].slice(0, 10);
+    }, [baseHeroItems, promotedItem]);
+
+    // Scroll to top when an item is promoted to hero
+    React.useEffect(() => {
+        if (promotedItem && scrollContainerRef.current) {
+            scrollContainerRef.current.scrollTo({ top: 0, behavior: 'smooth' });
+        }
+    }, [promotedItem]);
 
     const onVisibleRangeChange = React.useCallback(() => {
         // Since catalogs are reordered in the UI (Trakt first, then others),

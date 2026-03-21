@@ -65,6 +65,15 @@ const HeroBanner = React.memo(({ items }) => {
         return items.filter((item) => item.background || item.poster).slice(0, 10);
     }, [items]);
 
+    // When a promoted item arrives, jump to index 0 (where it's prepended)
+    const promotedItem = trailerCtx ? trailerCtx.promotedItem : null;
+    React.useEffect(() => {
+        if (promotedItem && featuredItems.length > 0) {
+            setCurrentIndex(0);
+            setPhase('IMAGE');
+        }
+    }, [promotedItem]);
+
     const item = featuredItems[currentIndex] || null;
 
     // TMDB trailer fetch — primary source; falls back to stremio trailerStreams

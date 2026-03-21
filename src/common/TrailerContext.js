@@ -11,6 +11,8 @@ function TrailerProvider({ children }) {
     const [globalMuted, setGlobalMuted] = React.useState(true);
     const [pageVisible, setPageVisible] = React.useState(!document.hidden);
     const [heroInView, setHeroInView] = React.useState(true);
+    // Promoted item — card item pushed to hero banner
+    const [promotedItem, setPromotedItem] = React.useState(null);
 
     const setActiveTrailer = React.useCallback((id) => {
         setActiveTrailerId(id);
@@ -22,6 +24,12 @@ function TrailerProvider({ children }) {
 
     const toggleGlobalMute = React.useCallback(() => {
         setGlobalMuted((prev) => !prev);
+    }, []);
+
+    // Promote a MetaItem to the hero banner
+    const promoteToHero = React.useCallback((item) => {
+        setPromotedItem(item);
+        setActiveTrailerId('hero');
     }, []);
 
     // Listen for tab visibility changes
@@ -54,8 +62,10 @@ function TrailerProvider({ children }) {
             pageVisible,
             heroInView,
             setHeroInView,
+            promotedItem,
+            promoteToHero,
         }),
-        [activeTrailerId, globalMuted, setActiveTrailer, clearActiveTrailer, toggleGlobalMute, pageVisible, heroInView],
+        [activeTrailerId, globalMuted, setActiveTrailer, clearActiveTrailer, toggleGlobalMute, pageVisible, heroInView, promotedItem, promoteToHero],
     );
 
     return React.createElement(TrailerContext.Provider, { value }, children);

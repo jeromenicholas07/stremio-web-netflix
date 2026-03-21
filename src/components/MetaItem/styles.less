@@ -348,11 +348,9 @@
         }
     }
 
-    // ─── Mute button (top-right of trailer) ───
-    .card-mute-btn {
+    // ─── Trailer overlay buttons ───
+    .card-trailer-btn {
         position: absolute;
-        top: 0.35rem;
-        right: 0.35rem;
         z-index: 20;
         display: flex;
         align-items: center;
@@ -376,7 +374,7 @@
             background-color: rgba(0, 0, 0, 0.7);
         }
 
-        .card-mute-icon {
+        .card-trailer-btn-icon {
             flex-shrink: 0;
             width: 0.55rem;
             height: 0.55rem;
@@ -385,7 +383,25 @@
         }
     }
 
-    &.trailer-playing .card-mute-btn {
+    // Mute button — bottom-right of poster area
+    .card-mute-btn {
+        bottom: 0.35rem;
+        right: 0.35rem;
+    }
+
+    // Promote-to-hero button — top-right of poster area
+    .card-promote-btn {
+        top: 0.35rem;
+        right: 0.35rem;
+
+        .card-trailer-btn-icon {
+            width: 0.5rem;
+            height: 0.5rem;
+            transform: rotate(0deg);
+        }
+    }
+
+    &.trailer-playing .card-trailer-btn {
         opacity: 1;
     }
 

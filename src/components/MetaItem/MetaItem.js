@@ -571,16 +571,39 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
             }
             {
                 isTrailerPlaying ?
-                    <button
-                        className={styles['card-mute-btn']}
-                        onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            if (trailerCtx) trailerCtx.toggleGlobalMute();
-                        }}
-                    >
-                        <Icon className={styles['card-mute-icon']} name={globalMuted ? 'volume-off' : 'volume-high'} />
-                    </button>
+                    <React.Fragment>
+                        <button
+                            className={classnames(styles['card-trailer-btn'], styles['card-promote-btn'])}
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (trailerCtx) {
+                                    trailerCtx.promoteToHero({
+                                        id: itemId,
+                                        name: name || '',
+                                        poster: poster || '',
+                                        background: background || poster || '',
+                                        type: type,
+                                        deepLinks: deepLinks,
+                                        trailerStreams: trailerStreams,
+                                    });
+                                }
+                            }}
+                            title={'Play in banner'}
+                        >
+                            <Icon className={styles['card-trailer-btn-icon']} name={'chevron-up'} />
+                        </button>
+                        <button
+                            className={classnames(styles['card-trailer-btn'], styles['card-mute-btn'])}
+                            onClick={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                if (trailerCtx) trailerCtx.toggleGlobalMute();
+                            }}
+                        >
+                            <Icon className={styles['card-trailer-btn-icon']} name={globalMuted ? 'volume-off' : 'volume-high'} />
+                        </button>
+                    </React.Fragment>
                     :
                     null
             }
