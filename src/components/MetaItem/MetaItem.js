@@ -570,6 +570,21 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                     null
             }
             {
+                isTrailerPlaying ?
+                    <button
+                        className={styles['card-mute-btn']}
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (trailerCtx) trailerCtx.toggleGlobalMute();
+                        }}
+                    >
+                        <Icon className={styles['card-mute-icon']} name={globalMuted ? 'volume-off' : 'volume-high'} />
+                    </button>
+                    :
+                    null
+            }
+            {
                 isHovered ?
                     <div className={styles['hover-info']} style={hoverInfoStyle}>
                         <div className={styles['hover-buttons']}>

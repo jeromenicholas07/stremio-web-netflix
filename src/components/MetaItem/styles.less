@@ -149,8 +149,8 @@
         transform: translateX(-50%);
         z-index: 10;
         overflow: hidden;
-        border-radius: 0.25rem 0.25rem 0 0;
-        background: #000;
+        border-radius: 0;
+        background: #141414;
         transition: width 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0);
 
         // YouTube iframe fills the trailer layer exactly — no overscan, no cropping
@@ -346,6 +346,47 @@
         .hover-btn-icon {
             transform: translateY(0.5px);
         }
+    }
+
+    // ─── Mute button (top-right of trailer) ───
+    .card-mute-btn {
+        position: absolute;
+        top: 0.35rem;
+        right: 0.35rem;
+        z-index: 20;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 1.2rem;
+        height: 1.2rem;
+        border-radius: 50%;
+        border: 1px solid rgba(255, 255, 255, 0.4);
+        background-color: rgba(0, 0, 0, 0.5);
+        cursor: pointer;
+        padding: 0;
+        margin: 0;
+        outline: none;
+        -webkit-appearance: none;
+        line-height: 0;
+        opacity: 0;
+        transition: opacity 0.2s ease, border-color 0.15s ease, background-color 0.15s ease;
+
+        &:hover {
+            border-color: white;
+            background-color: rgba(0, 0, 0, 0.7);
+        }
+
+        .card-mute-icon {
+            flex-shrink: 0;
+            width: 0.55rem;
+            height: 0.55rem;
+            color: white;
+            display: block;
+        }
+    }
+
+    &.trailer-playing .card-mute-btn {
+        opacity: 1;
     }
 
     .hover-progress-bar {
