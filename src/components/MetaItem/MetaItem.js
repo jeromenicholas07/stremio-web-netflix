@@ -585,7 +585,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
             onMouseEnter={onMouseEnter}
             onMouseLeave={onMouseLeave}
         >
-            <Button title={name} href={href} ref={posterRef} className={styles['poster-container']}>
+            <Button href={href} ref={posterRef} className={styles['poster-container']}>
                 <div className={styles['poster-image-layer']}>
                     <Image
                         className={styles['poster-image']}
@@ -655,7 +655,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                     });
                                 }
                             }}
-                            title={'Play in banner'}
+                            aria-label={'Play in banner'}
                         >
                             <Icon className={styles['card-trailer-btn-icon']} name={'chevron-up'} />
                         </button>

@@ -203,8 +203,8 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            width: 1.2rem;
-            height: 1.2rem;
+            width: 18px;
+            height: 18px;
             border-radius: 50%;
             border: 1px solid rgba(255, 255, 255, 0.4);
             background-color: rgba(0, 0, 0, 0.5);
@@ -213,7 +213,6 @@
             margin: 0;
             outline: none;
             -webkit-appearance: none;
-            line-height: 0;
             opacity: 0;
             transition: opacity 0.2s ease, border-color 0.15s ease, background-color 0.15s ease;
 
@@ -223,11 +222,13 @@
             }
 
             .card-trailer-btn-icon {
-                flex-shrink: 0;
-                width: 0.55rem;
-                height: 0.55rem;
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                width: 8px;
+                height: 8px;
                 color: white;
-                display: block;
             }
         }
 
@@ -249,9 +250,7 @@
             border-color: rgba(255, 255, 255, 0.15);
             background-color: rgba(0, 0, 0, 0.2);
 
-            svg {
-                // Speaker shape is left-heavy — nudge right for visual centering
-                transform: translateX(0.5px);
+            .card-trailer-btn-icon {
                 opacity: 0.6;
             }
 
@@ -259,7 +258,7 @@
                 border-color: rgba(255, 255, 255, 0.4);
                 background-color: rgba(0, 0, 0, 0.4);
 
-                svg {
+                .card-trailer-btn-icon {
                     opacity: 1;
                 }
             }
@@ -352,9 +351,7 @@
     }
 
     .hover-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
+        position: relative;
         width: 1.4rem;
         height: 1.4rem;
         min-width: 1.4rem;
@@ -370,10 +367,11 @@
         margin: 0;
         outline: none;
         -webkit-appearance: none;
-        line-height: 0;
         box-sizing: border-box;
         text-decoration: none;
         flex-grow: 0;
+        flex-shrink: 0;
+        overflow: hidden;
 
         &:hover {
             border-color: white;
@@ -381,11 +379,13 @@
         }
 
         .hover-btn-icon {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
             width: 0.6rem;
             height: 0.6rem;
             color: white;
-            display: block;
-            flex-shrink: 0;
         }
     }
 
