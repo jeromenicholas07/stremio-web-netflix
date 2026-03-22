@@ -2,7 +2,7 @@ import React, { forwardRef, useState, useCallback, useEffect } from 'react';
 import { Section, Option } from '../components';
 import styles from './NetflixUI.less';
 
-const { useToast } = require('stremio/common');
+const { useToast, useProfile } = require('stremio/common');
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TRAKT_API = 'https://api.trakt.tv';
@@ -98,9 +98,14 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
     const [saved, setSaved] = useState(false);
 
     // Trakt integration state
+    const profile = useProfile();
+    const stremioTraktToken = profile?.auth?.user?.trakt?.access_token || '';
     const [traktClientId, setTraktClientId] = useState(() => getSetting('trakt_client_id', ''));
     const [traktToken, setTraktToken] = useState(() => getSetting('trakt_access_token', ''));
     const [traktNotInterestedSlug, setTraktNotInterestedSlug] = useState(() => getSetting('trakt_not_interested_slug', ''));
+
+    // The effective token: manual override takes priority, then Stremio's built-in token
+    const effectiveTraktToken = traktToken || stremioTraktToken;
     const [traktLists, setTraktLists] = useState<any[]>([]);
     const [traktTest, setTraktTest] = useState<TestResult>({ status: 'idle', message: '' });
     const [traktSyncResult, setTraktSyncResult] = useState<TestResult>({ status: 'idle', message: '' });
@@ -141,7 +146,7 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
     const testTraktConnection = useCallback(async () => {
         setTraktTest({ status: 'loading', message: 'Testing Trakt connection...' });
         try {
-            const data: any = await traktFetch('/users/settings', traktClientId, traktToken);
+            const data: any = await traktFetch('/users/settings', traktClientId, effectiveTraktToken);
             const user = data?.user;
             setTraktTest({
                 status: 'success',
@@ -154,23 +159,23 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
             });
             // Fetch user lists after successful connection
             try {
-                const lists: any = await traktFetch(`/users/${user?.username || 'me'}/lists`, traktClientId, traktToken);
+                const lists: any = await traktFetch(`/users/${user?.username || 'me'}/lists`, traktClientId, effectiveTraktToken);
                 if (Array.isArray(lists)) setTraktLists(lists);
             } catch { /* silent */ }
         } catch (err: any) {
             setTraktTest({ status: 'error', message: err.message });
             toast.show({ type: 'error', title: 'Trakt Connection Failed', message: err.message, timeout: 5000 });
         }
-    }, [traktClientId, traktToken]);
+    }, [traktClientId, effectiveTraktToken]);
 
     const syncTraktData = useCallback(async () => {
         setTraktSyncResult({ status: 'loading', message: 'Syncing from Trakt...' });
         try {
             const [ratingsMovies, ratingsShows, watchedMovies, watchedShows]: any[] = await Promise.all([
-                traktFetch('/sync/ratings/movies', traktClientId, traktToken).catch(() => []),
-                traktFetch('/sync/ratings/shows', traktClientId, traktToken).catch(() => []),
-                traktFetch('/sync/watched/movies', traktClientId, traktToken).catch(() => []),
-                traktFetch('/sync/watched/shows', traktClientId, traktToken).catch(() => []),
+                traktFetch('/sync/ratings/movies', traktClientId, effectiveTraktToken).catch(() => []),
+                traktFetch('/sync/ratings/shows', traktClientId, effectiveTraktToken).catch(() => []),
+                traktFetch('/sync/watched/movies', traktClientId, effectiveTraktToken).catch(() => []),
+                traktFetch('/sync/watched/shows', traktClientId, effectiveTraktToken).catch(() => []),
             ]);
             const ratedCount = (Array.isArray(ratingsMovies) ? ratingsMovies.length : 0) + (Array.isArray(ratingsShows) ? ratingsShows.length : 0);
             const watchedCount = (Array.isArray(watchedMovies) ? watchedMovies.length : 0) + (Array.isArray(watchedShows) ? watchedShows.length : 0);
@@ -193,12 +198,12 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
             setTraktSyncResult({ status: 'error', message: err.message });
             toast.show({ type: 'error', title: 'Trakt Sync Failed', message: err.message, timeout: 5000 });
         }
-    }, [traktClientId, traktToken]);
+    }, [traktClientId, effectiveTraktToken]);
 
     const testTraktRate = useCallback(async () => {
         setTraktRateTest({ status: 'loading', message: 'Testing rating API access...' });
         try {
-            const ratingsRes: any = await traktFetch('/sync/ratings/movies', traktClientId, traktToken);
+            const ratingsRes: any = await traktFetch('/sync/ratings/movies', traktClientId, effectiveTraktToken);
             const existing = Array.isArray(ratingsRes) ? ratingsRes.find((r: any) => r.movie?.ids?.imdb === 'tt1375666') : null;
 
             if (existing) {
@@ -226,16 +231,16 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
             setTraktRateTest({ status: 'error', message: err.message });
             toast.show({ type: 'error', title: 'Trakt Rating Test Failed', message: err.message, timeout: 5000 });
         }
-    }, [traktClientId, traktToken]);
+    }, [traktClientId, effectiveTraktToken]);
 
     // Load Trakt lists on mount if configured
     useEffect(() => {
-        if (traktClientId && traktToken) {
-            traktFetch('/users/me/lists', traktClientId, traktToken)
+        if (traktClientId && effectiveTraktToken) {
+            traktFetch('/users/me/lists', traktClientId, effectiveTraktToken)
                 .then((lists: any) => { if (Array.isArray(lists)) setTraktLists(lists); })
                 .catch(() => {});
         }
-    }, [traktClientId, traktToken]);
+    }, [traktClientId, effectiveTraktToken]);
 
     const onTmdbKeyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value.trim();
@@ -433,7 +438,7 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
                         className={styles['text-input']}
                         value={traktToken}
                         onChange={onTraktTokenChange}
-                        placeholder="Your Trakt OAuth Bearer token..."
+                        placeholder={stremioTraktToken ? 'Auto-detected from Stremio login' : 'Your Trakt OAuth Bearer token...'}
                         spellCheck={false}
                     />
                     <button

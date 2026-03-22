@@ -34,7 +34,18 @@ class TraktBridge {
     }
 
     getAccessToken() {
-        try { return localStorage.getItem('trakt_access_token') || ''; } catch { return ''; }
+        // First check localStorage (manual override)
+        try {
+            const manual = localStorage.getItem('trakt_access_token');
+            if (manual) return manual;
+        } catch { /* */ }
+        // Fall back to Stremio's built-in Trakt auth from profile
+        return this._stremioTraktToken || '';
+    }
+
+    // Called by components that have access to the profile to inject Stremio's Trakt token
+    setStremioTraktToken(token) {
+        this._stremioTraktToken = token || '';
     }
 
     getNotInterestedListSlug() {

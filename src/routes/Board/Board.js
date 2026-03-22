@@ -17,6 +17,7 @@ const styles = require('./styles');
 const THRESHOLD = 5;
 
 const traktBridge = require('stremio/services/TraktBridge');
+const { useProfile } = require('stremio/common');
 
 // Load dismissed/not-interested/rated/watchlisted item IDs from localStorage + TraktBridge
 function useDismissedItems() {
@@ -83,12 +84,21 @@ function filterCatalogItems(catalog, dismissedSet) {
 // Inner component that has access to TrailerContext (rendered inside TrailerProvider)
 const BoardContent = () => {
     const t = useTranslate();
+    const profile = useProfile();
     const streamingServer = useStreamingServer();
     const continueWatchingPreview = useContinueWatchingPreview();
     const [board, loadBoardRows] = useBoard();
     const notifications = useNotifications();
     const { recommendations } = useRecommendations();
     const { rows: traktRows } = useTraktRecommendations();
+
+    // Inject Stremio's built-in Trakt token into TraktBridge so it can make API calls
+    React.useEffect(() => {
+        const traktAuth = profile?.auth?.user?.trakt;
+        if (traktAuth?.access_token) {
+            traktBridge.setStremioTraktToken(traktAuth.access_token);
+        }
+    }, [profile?.auth?.user?.trakt]);
     const dismissedSet = useDismissedItems();
     // boardCatalogsOffset no longer needed — visible range uses scroll fraction
     const scrollContainerRef = React.useRef();
