@@ -80,17 +80,34 @@ const HeroBanner = React.memo(({ items }) => {
     const [trailerYtId, setTrailerYtId] = React.useState(null);
     React.useEffect(() => {
         if (!item) { setTrailerYtId(null); return; }
+
+        // If the item already has a resolved trailerYtId (from promoted MetaItem), use it directly
+        if (item.trailerYtId) {
+            setTrailerYtId(item.trailerYtId);
+            return;
+        }
+
         let cancelled = false;
 
         const fetchTrailer = async () => {
             const source = tmdbService.getTrailerSource();
-            // Try TMDB first (if enabled and item has an IMDB ID)
-            if (source === 'tmdb' && item.id && /^tt/.test(item.id)) {
+            if (source === 'tmdb' && item.id) {
                 try {
-                    const tmdbItem = await tmdbService.findByImdbId(item.id);
-                    if (tmdbItem && !cancelled) {
-                        const ytId = await tmdbService.getBestTrailerYtId(tmdbItem.id, tmdbItem.type);
+                    // Handle TMDB IDs (tmdb:1234) directly
+                    const tmdbMatch = item.id.match(/^tmdb:(\d+)$/);
+                    if (tmdbMatch) {
+                        const tmdbId = parseInt(tmdbMatch[1], 10);
+                        const mediaType = item.type === 'series' ? 'tv' : 'movie';
+                        const ytId = await tmdbService.getBestTrailerYtId(tmdbId, mediaType);
                         if (ytId && !cancelled) { setTrailerYtId(ytId); return; }
+                    }
+                    // Handle IMDB IDs (tt1234567)
+                    if (/^tt/.test(item.id)) {
+                        const tmdbItem = await tmdbService.findByImdbId(item.id);
+                        if (tmdbItem && !cancelled) {
+                            const ytId = await tmdbService.getBestTrailerYtId(tmdbItem.id, tmdbItem.type);
+                            if (ytId && !cancelled) { setTrailerYtId(ytId); return; }
+                        }
                     }
                 } catch { /* fall through to fallback */ }
             }
@@ -210,6 +227,7 @@ const HeroBanner = React.memo(({ items }) => {
                                 onEnded={onTrailerEnded}
                                 onPlaying={onTrailerPlaying}
                                 className={styles['hero-trailer-player']}
+                                startTime={item.trailerStartTime || 0}
                             />
                         </div>
                         :

@@ -149,7 +149,7 @@
         transform: translateX(-50%);
         z-index: 10;
         overflow: hidden;
-        border-radius: 0;
+        border-radius: 0.25rem 0.25rem 0 0;
         background: #141414;
         transition: width 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0);
 
@@ -192,6 +192,75 @@
             background:
                 linear-gradient(180deg, rgba(0, 0, 0, 0.3) 0%, transparent 8%),
                 linear-gradient(0deg, rgba(0, 0, 0, 0.25) 0%, transparent 7%);
+        }
+
+        // Buttons inside trailer layer — anchored to trailer edges
+        .card-trailer-btn {
+            position: absolute;
+            z-index: 10;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 1.2rem;
+            height: 1.2rem;
+            border-radius: 50%;
+            border: 1px solid rgba(255, 255, 255, 0.4);
+            background-color: rgba(0, 0, 0, 0.5);
+            cursor: pointer;
+            padding: 0;
+            margin: 0;
+            outline: none;
+            -webkit-appearance: none;
+            line-height: 0;
+            opacity: 0;
+            transition: opacity 0.2s ease, border-color 0.15s ease, background-color 0.15s ease;
+
+            &:hover {
+                border-color: white;
+                background-color: rgba(0, 0, 0, 0.7);
+            }
+
+            .card-trailer-btn-icon {
+                flex-shrink: 0;
+                width: 0.55rem;
+                height: 0.55rem;
+                color: white;
+                display: block;
+            }
+        }
+
+        // Promote button — top-left of trailer
+        .card-promote-btn {
+            top: 0.35rem;
+            left: 0.35rem;
+
+            .card-trailer-btn-icon {
+                width: 0.5rem;
+                height: 0.5rem;
+            }
+        }
+
+        // Mute button — bottom-right of trailer, subtle to not obstruct
+        .card-mute-btn {
+            bottom: 0.35rem;
+            right: 0.35rem;
+            border-color: rgba(255, 255, 255, 0.15);
+            background-color: rgba(0, 0, 0, 0.2);
+
+            svg {
+                // Speaker shape is left-heavy — nudge right for visual centering
+                transform: translateX(0.5px);
+                opacity: 0.6;
+            }
+
+            &:hover {
+                border-color: rgba(255, 255, 255, 0.4);
+                background-color: rgba(0, 0, 0, 0.4);
+
+                svg {
+                    opacity: 1;
+                }
+            }
         }
     }
 
@@ -237,18 +306,23 @@
         transform: scale(1.35) translateX(-0.3rem);
     }
 
-    // When trailer plays, hide poster behind the video
+    // When trailer plays, hide poster behind the video — trailer layer owns the shadow
     &.trailer-playing {
         .poster-container {
-            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.9);
+            box-shadow: none;
 
             .poster-image-layer {
                 opacity: 0;
             }
         }
+
+        .card-trailer-layer {
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.9);
+        }
     }
 
     // ─── Hover info panel (compact) ───
+    // Must use identical transition timing as .card-trailer-layer so they move as one unit
     .hover-info {
         position: absolute;
         left: 0.2rem;
@@ -258,6 +332,7 @@
         border-radius: 0 0 0.25rem 0.25rem;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
         z-index: 200;
+        box-sizing: border-box;
         transition: width 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0),
                     left 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0),
                     right 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0);
@@ -295,7 +370,8 @@
         -webkit-appearance: none;
         line-height: 0;
         box-sizing: border-box;
-        position: relative;
+        text-decoration: none;
+        flex-grow: 0;
 
         &:hover {
             border-color: white;
@@ -303,27 +379,11 @@
         }
 
         .hover-btn-icon {
-            flex-shrink: 0;
-            width: 0.65rem;
-            height: 0.65rem;
+            width: 0.6rem;
+            height: 0.6rem;
             color: white;
-            // Ensure SVG is centered within the icon element
             display: block;
-        }
-    }
-
-    // Play icon (triangle) needs a slight rightward nudge for visual centering
-    .hover-btn-play {
-        background-color: white;
-        border-color: white;
-
-        .hover-btn-icon {
-            color: #141414;
-            transform: translateX(0.5px);
-        }
-
-        &:hover {
-            background-color: #e5e5e5;
+            flex-shrink: 0;
         }
     }
 
@@ -341,67 +401,14 @@
         }
     }
 
-    // Chevron-down needs a slight downward nudge for visual centering
-    .hover-btn-chevron {
-        .hover-btn-icon {
-            transform: translateY(0.5px);
-        }
-    }
-
-    // ─── Trailer overlay buttons ───
-    .card-trailer-btn {
-        position: absolute;
-        z-index: 20;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 1.2rem;
-        height: 1.2rem;
-        border-radius: 50%;
-        border: 1px solid rgba(255, 255, 255, 0.4);
-        background-color: rgba(0, 0, 0, 0.5);
-        cursor: pointer;
-        padding: 0;
-        margin: 0;
-        outline: none;
-        -webkit-appearance: none;
-        line-height: 0;
-        opacity: 0;
-        transition: opacity 0.2s ease, border-color 0.15s ease, background-color 0.15s ease;
-
+    .hover-btn-notinterested {
         &:hover {
-            border-color: white;
-            background-color: rgba(0, 0, 0, 0.7);
-        }
-
-        .card-trailer-btn-icon {
-            flex-shrink: 0;
-            width: 0.55rem;
-            height: 0.55rem;
-            color: white;
-            display: block;
+            border-color: rgba(255, 255, 255, 0.7);
         }
     }
 
-    // Mute button — bottom-right of poster area
-    .card-mute-btn {
-        bottom: 0.35rem;
-        right: 0.35rem;
-    }
-
-    // Promote-to-hero button — top-right of poster area
-    .card-promote-btn {
-        top: 0.35rem;
-        right: 0.35rem;
-
-        .card-trailer-btn-icon {
-            width: 0.5rem;
-            height: 0.5rem;
-            transform: rotate(0deg);
-        }
-    }
-
-    &.trailer-playing .card-trailer-btn {
+    // Trailer buttons become visible when trailer is playing
+    &.trailer-playing .card-trailer-layer .card-trailer-btn {
         opacity: 1;
     }
 

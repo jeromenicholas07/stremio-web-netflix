@@ -16,6 +16,50 @@ const styles = require('./styles');
 
 const THRESHOLD = 5;
 
+// Load dismissed/not-interested/rated/watchlisted item IDs from localStorage for filtering suggestion rows
+function useDismissedItems() {
+    const [dismissedSet, setDismissedSet] = React.useState(new Set());
+
+    React.useEffect(() => {
+        const load = () => {
+            const ids = new Set();
+            try {
+                const notInterested = JSON.parse(localStorage.getItem('stremio_not_interested') || '[]');
+                notInterested.forEach((id) => ids.add(id));
+            } catch { /* */ }
+            try {
+                const ratings = JSON.parse(localStorage.getItem('stremio_ratings') || '{}');
+                Object.keys(ratings).forEach((id) => ids.add(id));
+            } catch { /* */ }
+            try {
+                const watchlist = JSON.parse(localStorage.getItem('stremio_watchlist') || '[]');
+                watchlist.forEach((id) => ids.add(id));
+            } catch { /* */ }
+            setDismissedSet(ids);
+        };
+        load();
+        // Re-check when localStorage changes (from MetaItem dismiss actions)
+        window.addEventListener('storage', load);
+        const interval = setInterval(load, 5000); // poll for same-tab updates
+        return () => { window.removeEventListener('storage', load); clearInterval(interval); };
+    }, []);
+
+    return dismissedSet;
+}
+
+// Filter items from a catalog, removing dismissed/not-interested/rated ones
+function filterCatalogItems(catalog, dismissedSet) {
+    if (dismissedSet.size === 0) return catalog;
+    if (catalog.content?.type !== 'Ready' || !Array.isArray(catalog.content.content)) return catalog;
+    const filtered = catalog.content.content.filter((item) => !dismissedSet.has(item.id));
+    if (filtered.length === catalog.content.content.length) return catalog;
+    if (filtered.length === 0) return null;
+    return {
+        ...catalog,
+        content: { ...catalog.content, content: filtered },
+    };
+}
+
 // Inner component that has access to TrailerContext (rendered inside TrailerProvider)
 const BoardContent = () => {
     const t = useTranslate();
@@ -25,6 +69,7 @@ const BoardContent = () => {
     const notifications = useNotifications();
     const { recommendations } = useRecommendations();
     const { rows: traktRows } = useTraktRecommendations();
+    const dismissedSet = useDismissedItems();
     // boardCatalogsOffset no longer needed — visible range uses scroll fraction
     const scrollContainerRef = React.useRef();
     const heroRef = React.useRef(null);
@@ -174,50 +219,62 @@ const BoardContent = () => {
                             :
                             null
                     }
-                    {/* Trakt addon catalogs — top: recommendations, watchlist */}
+                    {/* Trakt addon catalogs — top: recommendations, watchlist (filtered) */}
                     {traktTopCatalogs.map(({ catalog, originalIndex }) => {
                         if (catalog.content?.type !== 'Ready') return null;
+                        const filtered = filterCatalogItems(catalog, dismissedSet);
+                        if (!filtered) return null;
                         return (
                             <MetaRow
                                 key={`trakt-${originalIndex}`}
                                 className={classnames(styles['board-row'], 'animation-fade-in')}
-                                catalog={catalog}
+                                catalog={filtered}
                                 itemComponent={MetaItem}
                                 source={'Trakt'}
                             />
                         );
                     })}
-                    {/* TMDB discovery rows (trending, popular, etc.) */}
-                    {traktRows.map((row, index) => (
-                        <MetaRow
-                            key={`tmdb-disc-${index}`}
-                            className={classnames(styles['board-row'], 'animation-fade-in')}
-                            title={row.title}
-                            catalog={{ items: row.items, content: { type: 'Ready', content: row.items } }}
-                            itemComponent={MetaItem}
-                            source={'TMDB'}
-                        />
-                    ))}
-                    {/* TMDB "Because You Watched" recommendations */}
-                    {recommendations.map((rec, index) => (
-                        <MetaRow
-                            key={`rec-${index}`}
-                            className={classnames(styles['board-row'], 'animation-fade-in')}
-                            title={rec.title}
-                            catalog={{ items: rec.items, content: { type: 'Ready', content: rec.items } }}
-                            itemComponent={MetaItem}
-                            source={'TMDB'}
-                        />
-                    ))}
-                    {/* Other addon catalogs — only show rows that loaded successfully */}
+                    {/* TMDB discovery rows (trending, popular, etc.) — filtered */}
+                    {traktRows.map((row, index) => {
+                        const items = dismissedSet.size > 0 ? row.items.filter((item) => !dismissedSet.has(item.id)) : row.items;
+                        if (items.length === 0) return null;
+                        return (
+                            <MetaRow
+                                key={`tmdb-disc-${index}`}
+                                className={classnames(styles['board-row'], 'animation-fade-in')}
+                                title={row.title}
+                                catalog={{ items, content: { type: 'Ready', content: items } }}
+                                itemComponent={MetaItem}
+                                source={'TMDB'}
+                            />
+                        );
+                    })}
+                    {/* TMDB "Because You Watched" recommendations — filtered */}
+                    {recommendations.map((rec, index) => {
+                        const items = dismissedSet.size > 0 ? rec.items.filter((item) => !dismissedSet.has(item.id)) : rec.items;
+                        if (items.length === 0) return null;
+                        return (
+                            <MetaRow
+                                key={`rec-${index}`}
+                                className={classnames(styles['board-row'], 'animation-fade-in')}
+                                title={rec.title}
+                                catalog={{ items, content: { type: 'Ready', content: items } }}
+                                itemComponent={MetaItem}
+                                source={'TMDB'}
+                            />
+                        );
+                    })}
+                    {/* Other addon catalogs — only show rows that loaded successfully, filtered */}
                     {contentCatalogs.map(({ catalog, originalIndex }) => {
                         if (catalog.content?.type !== 'Ready') return null;
+                        const filtered = filterCatalogItems(catalog, dismissedSet);
+                        if (!filtered) return null;
                         const addonName = catalog.addon?.manifest?.name || '';
                         return (
                             <MetaRow
                                 key={originalIndex}
                                 className={classnames(styles['board-row'], 'animation-fade-in')}
-                                catalog={catalog}
+                                catalog={filtered}
                                 itemComponent={MetaItem}
                                 source={addonName}
                             />

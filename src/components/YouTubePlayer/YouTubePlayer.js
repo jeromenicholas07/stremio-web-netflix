@@ -6,7 +6,7 @@ const PropTypes = require('prop-types');
 const { loadYouTubeAPI } = require('stremio/services/YouTubePlayerAPI');
 const styles = require('./styles');
 
-const YouTubePlayer = React.forwardRef(({ ytId, muted, paused, onEnded, onPlaying, className, style, overlayScale }, ref) => {
+const YouTubePlayer = React.forwardRef(({ ytId, muted, paused, onEnded, onPlaying, className, style, overlayScale, startTime }, ref) => {
     const containerRef = React.useRef(null);
     const playerRef = React.useRef(null);
     const [ready, setReady] = React.useState(false);
@@ -25,6 +25,9 @@ const YouTubePlayer = React.forwardRef(({ ytId, muted, paused, onEnded, onPlayin
         },
         unMute: () => {
             try { playerRef.current?.unMute(); } catch (e) { /* */ }
+        },
+        getCurrentTime: () => {
+            try { return playerRef.current?.getCurrentTime() || 0; } catch (e) { return 0; }
         },
     }), []);
 
@@ -56,6 +59,7 @@ const YouTubePlayer = React.forwardRef(({ ytId, muted, paused, onEnded, onPlayin
                     disablekb: 1,
                     fs: 0,
                     origin: window.location.origin,
+                    start: startTime > 0 ? Math.floor(startTime) : undefined,
                 },
                 events: {
                     onReady: (event) => {

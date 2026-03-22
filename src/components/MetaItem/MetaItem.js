@@ -15,6 +15,26 @@ const styles = require('./styles');
 
 let cardIdCounter = 0;
 
+// Mute icon — same as HeroBanner: identical speaker in both states, only accessory changes
+const SPEAKER_PATH = 'M10 3.75a.75.75 0 0 0-1.264-.546L4.703 7H3.167c-.587 0-1.14.294-1.46.756A6.018 6.018 0 0 0 1.25 10c0 1.192.348 2.302.942 3.236.32.462.873.764 1.46.764h1.086l4.033 3.796A.75.75 0 0 0 10 16.25V3.75Z';
+const MuteIcon = React.memo(({ muted, size }) => {
+    const s = size || 16;
+    return (
+        <svg width={s} height={s} viewBox="0 0 20 20" fill="white" xmlns="http://www.w3.org/2000/svg" style={{ display: 'block' }}>
+            <path d={SPEAKER_PATH} />
+            {muted ? (
+                <path d="M13.28 7.22a.75.75 0 1 0-1.06 1.06L13.94 10l-1.72 1.72a.75.75 0 0 0 1.06 1.06L15 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L16.06 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L15 8.94l-1.72-1.72Z" />
+            ) : (
+                <React.Fragment>
+                    <path d="M15.95 5.06a.75.75 0 0 0-1.06 1.06 5.5 5.5 0 0 1 0 7.78.75.75 0 0 0 1.06 1.06 7 7 0 0 0 0-9.9Z" />
+                    <path d="M13.829 7.172a.75.75 0 0 0-1.06 1.06 2.5 2.5 0 0 1 0 3.536.75.75 0 0 0 1.06 1.06 4 4 0 0 0 0-5.656Z" />
+                </React.Fragment>
+            )}
+        </svg>
+    );
+});
+MuteIcon.displayName = 'MuteIcon';
+
 // ─── Letterbox detection ───
 // Analyzes YouTube's auto-generated video frame thumbnails (1.jpg, 2.jpg, 3.jpg
 // at 25%, 50%, 75% of the video) to detect black bars baked into the video.
@@ -146,7 +166,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     const [localWatched, setLocalWatched] = React.useState(null); // optimistic override
     const [showRating, setShowRating] = React.useState(false); // rating overlay visible
     const [hoverStar, setHoverStar] = React.useState(0); // star being hovered (1-5)
-    const [dismissed, setDismissed] = React.useState(false); // fade out after marking watched
+    const [dismissed, setDismissed] = React.useState(false); // fade out after marking watched/not-interested
     const [showTrailer, setShowTrailer] = React.useState(false);
     const [edgePosition, setEdgePosition] = React.useState('center');
     const hoverTimerRef = React.useRef(null);
@@ -155,6 +175,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     const cardIdRef = React.useRef(`card-${++cardIdCounter}`);
     const posterRef = React.useRef(null);
     const originalDimsRef = React.useRef(null);
+    const trailerPlayerRef = React.useRef(null);
     const [trailerMounted, setTrailerMounted] = React.useState(false);
 
     const thumbnailSrc = background || poster;
@@ -288,6 +309,51 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         markAsWatched();
         setDismissed(true);
     }, [markAsWatched]);
+
+    // Add to Trakt watchlist via stremio-core dispatch
+    const onAddToWatchlist = React.useCallback((event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!itemId) return;
+        core.transport.dispatch({
+            action: 'Ctx',
+            args: {
+                action: 'AddToLibrary',
+                args: {
+                    id: itemId,
+                    type: type === 'series' ? 'series' : 'movie',
+                    name: name || '',
+                    poster: poster || '',
+                    posterShape: 'landscape',
+                    background: background || '',
+                }
+            }
+        });
+        // Also track locally for immediate filtering
+        try {
+            const watchlist = JSON.parse(localStorage.getItem('stremio_watchlist') || '[]');
+            if (!watchlist.includes(itemId)) {
+                watchlist.push(itemId);
+                localStorage.setItem('stremio_watchlist', JSON.stringify(watchlist));
+            }
+        } catch { /* silent */ }
+        setDismissed(true);
+    }, [itemId, type, name, poster, background, core]);
+
+    // "Not interested" — dismiss item from suggestion rows
+    const onNotInterested = React.useCallback((event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        if (!itemId) return;
+        try {
+            const dismissed = JSON.parse(localStorage.getItem('stremio_not_interested') || '[]');
+            if (!dismissed.includes(itemId)) {
+                dismissed.push(itemId);
+                localStorage.setItem('stremio_not_interested', JSON.stringify(dismissed));
+            }
+        } catch { /* silent */ }
+        setDismissed(true);
+    }, [itemId]);
 
     // TMDB trailer fetch — primary source with stremio fallback
     const [trailerYtId, setTrailerYtId] = React.useState(null);
@@ -431,8 +497,8 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         };
     }, [edgePosition]);
 
-    // Calculate trailer layer dimensions with edge-aware positioning
-    const trailerLayerStyle = React.useMemo(() => {
+    // Shared computed width for trailer + hover-info — ensures pixel-perfect alignment
+    const expandedWidth = React.useMemo(() => {
         if (!isTrailerPlaying || !originalDimsRef.current) return null;
         const { width: posterW, height: posterH } = originalDimsRef.current;
         const overcrop = 0.015;
@@ -440,8 +506,15 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         const bottom = letterbox.bottom > 0 ? letterbox.bottom + overcrop : 0;
         const totalBars = top + bottom;
         const effectiveAR = totalBars > 0.01 ? videoAR / (1 - totalBars) : videoAR;
-        const targetW = posterH * effectiveAR;
+        const targetW = Math.ceil(posterH * effectiveAR);
         const currentW = trailerMounted ? targetW : posterW;
+        return { posterW, posterH, currentW };
+    }, [isTrailerPlaying, videoAR, letterbox, trailerMounted]);
+
+    // Calculate trailer layer dimensions with edge-aware positioning
+    const trailerLayerStyle = React.useMemo(() => {
+        if (!expandedWidth) return null;
+        const { currentW, posterH } = expandedWidth;
 
         const style = {
             width: `${currentW}px`,
@@ -458,29 +531,21 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         }
 
         return style;
-    }, [isTrailerPlaying, videoAR, letterbox, trailerMounted, edgePosition]);
+    }, [expandedWidth, edgePosition]);
 
-    // Calculate hover-info style — match trailer width and edge positioning
+    // Calculate hover-info style — uses identical centering method as trailer layer
     const hoverInfoStyle = React.useMemo(() => {
-        if (!isTrailerPlaying || !trailerMounted || !originalDimsRef.current) return undefined;
-        const { width: posterW, height: posterH } = originalDimsRef.current;
-        const overcrop = 0.015;
-        const top = letterbox.top > 0 ? letterbox.top + overcrop : 0;
-        const bottom = letterbox.bottom > 0 ? letterbox.bottom + overcrop : 0;
-        const totalBars = top + bottom;
-        const effectiveAR = totalBars > 0.01 ? videoAR / (1 - totalBars) : videoAR;
-        const trailerW = posterH * effectiveAR;
-
-        if (trailerW <= posterW * 1.02) return undefined;
+        if (!expandedWidth) return undefined;
+        const { currentW } = expandedWidth;
 
         if (edgePosition === 'left') {
-            return { left: '0', right: 'auto', width: `${trailerW}px` };
+            return { left: '0', right: 'auto', width: `${currentW}px` };
         } else if (edgePosition === 'right') {
-            return { left: 'auto', right: '0', width: `${trailerW}px` };
+            return { left: 'auto', right: '0', width: `${currentW}px` };
         }
-        const overshoot = (trailerW - posterW) / 2;
-        return { left: `${-overshoot}px`, right: 'auto', width: `${trailerW}px` };
-    }, [isTrailerPlaying, trailerMounted, videoAR, letterbox, edgePosition]);
+        // Match trailer layer: left: 50% + translateX(-50%) for identical centering
+        return { left: '50%', right: 'auto', width: `${currentW}px`, transform: 'translateX(-50%)' };
+    }, [expandedWidth, edgePosition]);
 
     // Calculate crop style to remove detected letterbox black bars
     // Add a small overcompensation (1.5% extra per bar) to eat thin residual lines
@@ -558,6 +623,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                 isTrailerPlaying ?
                     <div className={styles['card-trailer-layer']} style={trailerLayerStyle}>
                         <YouTubePlayer
+                            ref={trailerPlayerRef}
                             ytId={trailerYtId}
                             muted={globalMuted}
                             paused={!pageVisible}
@@ -565,19 +631,13 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                             style={trailerCropStyle}
                             overlayScale={0.28}
                         />
-                    </div>
-                    :
-                    null
-            }
-            {
-                isTrailerPlaying ?
-                    <React.Fragment>
                         <button
                             className={classnames(styles['card-trailer-btn'], styles['card-promote-btn'])}
                             onClick={(e) => {
                                 e.preventDefault();
                                 e.stopPropagation();
                                 if (trailerCtx) {
+                                    const currentTime = trailerPlayerRef.current?.getCurrentTime() || 0;
                                     trailerCtx.promoteToHero({
                                         id: itemId,
                                         name: name || '',
@@ -586,6 +646,8 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                         type: type,
                                         deepLinks: deepLinks,
                                         trailerStreams: trailerStreams,
+                                        trailerYtId: trailerYtId,
+                                        trailerStartTime: Math.max(0, currentTime - 2),
                                     });
                                 }
                             }}
@@ -601,9 +663,9 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                 if (trailerCtx) trailerCtx.toggleGlobalMute();
                             }}
                         >
-                            <Icon className={styles['card-trailer-btn-icon']} name={globalMuted ? 'volume-off' : 'volume-high'} />
+                            <MuteIcon muted={globalMuted} size={10} />
                         </button>
-                    </React.Fragment>
+                    </div>
                     :
                     null
             }
@@ -611,31 +673,49 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                 isHovered ?
                     <div className={styles['hover-info']} style={hoverInfoStyle}>
                         <div className={styles['hover-buttons']}>
-                            {
-                                playHref ?
-                                    <Button className={classnames(styles['hover-btn'], styles['hover-btn-play'])} href={playHref}>
-                                        <Icon className={styles['hover-btn-icon']} name={'play'} />
-                                    </Button>
-                                    :
-                                    null
-                            }
-                            <Button className={styles['hover-btn']} href={href}>
-                                <Icon className={styles['hover-btn-icon']} name={'add'} />
+                            <Button
+                                className={styles['hover-btn']}
+                                onClick={onAddToWatchlist}
+                                title="Add to watchlist"
+                            >
+                                <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                                    <line x1="12" y1="5" x2="12" y2="19" />
+                                    <line x1="5" y1="12" x2="19" y2="12" />
+                                </svg>
                             </Button>
                             {
                                 itemId ?
                                     <Button
                                         className={classnames(styles['hover-btn'], { [styles['hover-btn-watched']]: isWatched })}
                                         onClick={onToggleWatched}
+                                        title={isWatched ? 'Unmark watched' : 'Mark as watched'}
                                     >
-                                        <Icon className={styles['hover-btn-icon']} name={'checkmark'} />
+                                        <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                                            <polyline points="4,12 10,18 20,6" />
+                                        </svg>
                                     </Button>
                                     :
                                     null
                             }
-                            <Button className={classnames(styles['hover-btn'], styles['hover-btn-chevron'])} href={href}>
-                                <Icon className={styles['hover-btn-icon']} name={'chevron-down'} />
+                            <Button className={styles['hover-btn']} href={href} title="More info">
+                                <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                                    <polyline points="6,9 12,15 18,9" />
+                                </svg>
                             </Button>
+                            {
+                                itemId ?
+                                    <Button
+                                        className={classnames(styles['hover-btn'], styles['hover-btn-notinterested'])}
+                                        onClick={onNotInterested}
+                                        title="Not interested"
+                                    >
+                                        <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
+                                            <line x1="6" y1="12" x2="18" y2="12" />
+                                        </svg>
+                                    </Button>
+                                    :
+                                    null
+                            }
                         </div>
                         <div className={styles['hover-meta']}>
                             {
