@@ -163,10 +163,13 @@ const BoardContent = () => {
         'netflix.', 'disney_plus.', 'hbo_max.', 'amazon_prime.', 'apple_tv_plus.',
     ];
 
-    // Split catalogs into: Trakt top (recommendations/watchlist), content rows, Trakt bottom (history/collection)
+    // The "Not Interested" list catalog ID from Trakt
+    const TRAKT_NOT_INTERESTED_ID = 'trakt_list:jeromeee:34129597:rank:asc';
+
+    // Split catalogs into: Trakt top, content rows (non-Trakt), Trakt bottom (history + not interested)
     const { traktTopCatalogs, contentCatalogs, traktBottomCatalogs } = React.useMemo(() => {
-        const traktTop = [];   // recommendations, watchlist
-        const traktBottom = []; // history, collection
+        const traktTop = [];    // recommendations, watchlist, popular, trending, curated lists
+        const traktBottom = []; // not interested list
         const content = [];
 
         for (let i = 0; i < board.catalogs.length; i++) {
@@ -174,12 +177,16 @@ const BoardContent = () => {
             const addonId = c.addon?.manifest?.id || '';
             const catalogId = c.id || '';
 
-            // Trakt addon — split by catalog type
-            if (addonId.startsWith('org.trakt')) {
-                if (catalogId === 'recommendations' || catalogId === 'watchlist') {
-                    traktTop.push({ catalog: c, originalIndex: i });
-                } else {
+            // Handle both old (org.trakt.*) and new (community.trakt-tv) Trakt addons
+            const isTrakt = addonId.startsWith('org.trakt') || addonId === 'community.trakt-tv';
+
+            if (isTrakt) {
+                // Not Interested list goes to the very bottom
+                if (catalogId === TRAKT_NOT_INTERESTED_ID) {
                     traktBottom.push({ catalog: c, originalIndex: i });
+                } else {
+                    // Everything else (recommendations, watchlist, popular, trending, curated) goes to top
+                    traktTop.push({ catalog: c, originalIndex: i });
                 }
                 continue;
             }
@@ -219,15 +226,19 @@ const BoardContent = () => {
                             :
                             null
                     }
-                    {/* Trakt addon catalogs — top: recommendations, watchlist (filtered) */}
+                    {/* Trakt addon catalogs — top: recommendations, watchlist, popular, trending, curated (filtered) */}
                     {traktTopCatalogs.map(({ catalog, originalIndex }) => {
                         if (catalog.content?.type !== 'Ready') return null;
                         const filtered = filterCatalogItems(catalog, dismissedSet);
                         if (!filtered) return null;
+                        // Use name field (new addon) or title (old addon), strip " - Trakt" suffix
+                        const rawTitle = catalog.name || catalog.title || '';
+                        const cleanTitle = rawTitle.replace(/\s*-\s*Trakt$/i, '');
                         return (
                             <MetaRow
                                 key={`trakt-${originalIndex}`}
                                 className={classnames(styles['board-row'], 'animation-fade-in')}
+                                title={cleanTitle}
                                 catalog={filtered}
                                 itemComponent={MetaItem}
                                 source={'Trakt'}
@@ -280,13 +291,16 @@ const BoardContent = () => {
                             />
                         );
                     })}
-                    {/* Trakt addon catalogs — bottom: history, collection */}
+                    {/* Trakt addon catalogs — bottom: Not Interested list */}
                     {traktBottomCatalogs.map(({ catalog, originalIndex }) => {
                         if (catalog.content?.type !== 'Ready') return null;
+                        const rawTitle = catalog.name || catalog.title || '';
+                        const cleanTitle = rawTitle.replace(/\s*-\s*Trakt$/i, '');
                         return (
                             <MetaRow
                                 key={`trakt-bottom-${originalIndex}`}
                                 className={classnames(styles['board-row'], 'animation-fade-in')}
+                                title={cleanTitle}
                                 catalog={catalog}
                                 itemComponent={MetaItem}
                                 source={'Trakt'}
