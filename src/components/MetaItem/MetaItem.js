@@ -10,7 +10,9 @@ const YouTubePlayer = require('stremio/components/YouTubePlayer');
 const { ICON_FOR_TYPE } = require('stremio/common/CONSTANTS');
 const { TrailerContext } = require('stremio/common/TrailerContext');
 const { useServices } = require('stremio/services');
+const { useToast } = require('stremio/common');
 const tmdbService = require('stremio/services/TMDBService');
+const traktBridge = require('stremio/services/TraktBridge');
 const styles = require('./styles');
 
 let cardIdCounter = 0;
@@ -161,6 +163,7 @@ function pickBestTrailerFallback(trailerStreams) {
 
 const MetaItem = React.memo(({ className, type, name, poster, posterShape, background, progress, newVideos, deepLinks, dataset, onPlayClick, watched, trailerStreams, releaseInfo, links, disableTrailerExpand, ...props }) => {
     const { core } = useServices();
+    const toast = useToast();
     const trailerCtx = React.useContext(TrailerContext);
     const [isHovered, setIsHovered] = React.useState(false);
     const [localWatched, setLocalWatched] = React.useState(null); // optimistic override
@@ -294,14 +297,15 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         markAsWatched();
         setDismissed(true);
         // Sync rating to Trakt via TraktBridge (also keeps localStorage as fallback)
-        try {
-            const traktBridge = require('stremio/services/TraktBridge');
-            if (traktBridge.isConfigured()) {
-                const itemType = type === 'series' ? 'series' : 'movie';
-                traktBridge.rateItem(itemId, itemType, rating).catch(() => {});
-                traktBridge.markWatched(itemId, itemType).catch(() => {});
-            }
-        } catch { /* silent */ }
+        if (traktBridge.isConfigured()) {
+            const itemType = type === 'series' ? 'series' : 'movie';
+            traktBridge.rateItem(itemId, itemType, rating).catch((err) => {
+                toast.show({ type: 'error', title: 'Trakt Rating Failed', message: err.message, timeout: 4000 });
+            });
+            traktBridge.markWatched(itemId, itemType).catch((err) => {
+                toast.show({ type: 'error', title: 'Trakt Watched Sync Failed', message: err.message, timeout: 4000 });
+            });
+        }
         // Also store locally as fallback
         try {
             const ratings = JSON.parse(localStorage.getItem('stremio_ratings') || '{}');
@@ -339,12 +343,11 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
             }
         });
         // Also sync directly to Trakt watchlist via TraktBridge
-        try {
-            const traktBridge = require('stremio/services/TraktBridge');
-            if (traktBridge.isConfigured()) {
-                traktBridge.addToWatchlist(itemId, type === 'series' ? 'series' : 'movie').catch(() => {});
-            }
-        } catch { /* silent */ }
+        if (traktBridge.isConfigured()) {
+            traktBridge.addToWatchlist(itemId, type === 'series' ? 'series' : 'movie').catch((err) => {
+                toast.show({ type: 'error', title: 'Trakt Watchlist Failed', message: err.message, timeout: 4000 });
+            });
+        }
         // Local fallback
         try {
             const watchlist = JSON.parse(localStorage.getItem('stremio_watchlist') || '[]');
@@ -362,12 +365,11 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         event.stopPropagation();
         if (!itemId) return;
         // Sync to Trakt "Not Interested" list via TraktBridge
-        try {
-            const traktBridge = require('stremio/services/TraktBridge');
-            if (traktBridge.isConfigured()) {
-                traktBridge.addToNotInterested(itemId, type === 'series' ? 'series' : 'movie').catch(() => {});
-            }
-        } catch { /* silent */ }
+        if (traktBridge.isConfigured()) {
+            traktBridge.addToNotInterested(itemId, type === 'series' ? 'series' : 'movie').catch((err) => {
+                toast.show({ type: 'error', title: 'Trakt Not Interested Failed', message: err.message, timeout: 4000 });
+            });
+        }
         // Local fallback
         try {
             const dismissed = JSON.parse(localStorage.getItem('stremio_not_interested') || '[]');

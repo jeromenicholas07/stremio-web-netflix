@@ -2,6 +2,8 @@ import React, { forwardRef, useState, useCallback, useEffect } from 'react';
 import { Section, Option } from '../components';
 import styles from './NetflixUI.less';
 
+const { useToast } = require('stremio/common');
+
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TRAKT_API = 'https://api.trakt.tv';
 
@@ -84,6 +86,7 @@ type TestResult = {
 };
 
 const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
+    const toast = useToast();
     const [tmdbKey, setTmdbKey] = useState(() => getSetting('tmdb_api_key', 'b06102636e7efd95cfc1676d0d78c70a'));
     const [trailerSource, setTrailerSource] = useState(() => getSetting('netflix_ui_trailer_source', 'tmdb'));
     const [trailerLang, setTrailerLang] = useState(() => getSetting('netflix_ui_trailer_lang', 'en'));
@@ -156,6 +159,7 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
             } catch { /* silent */ }
         } catch (err: any) {
             setTraktTest({ status: 'error', message: err.message });
+            toast.show({ type: 'error', title: 'Trakt Connection Failed', message: err.message, timeout: 5000 });
         }
     }, [traktClientId, traktToken]);
 
@@ -187,6 +191,7 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
             });
         } catch (err: any) {
             setTraktSyncResult({ status: 'error', message: err.message });
+            toast.show({ type: 'error', title: 'Trakt Sync Failed', message: err.message, timeout: 5000 });
         }
     }, [traktClientId, traktToken]);
 
@@ -219,6 +224,7 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
             }
         } catch (err: any) {
             setTraktRateTest({ status: 'error', message: err.message });
+            toast.show({ type: 'error', title: 'Trakt Rating Test Failed', message: err.message, timeout: 5000 });
         }
     }, [traktClientId, traktToken]);
 
