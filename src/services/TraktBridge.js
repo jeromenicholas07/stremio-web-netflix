@@ -30,7 +30,7 @@ class TraktBridge {
 
     // ─── Config ───
     getClientId() {
-        try { return localStorage.getItem('trakt_client_id') || ''; } catch { return ''; }
+        try { return localStorage.getItem('trakt_client_id') || '67bffdb0ebe7ee9ffda2192bf2a463d7a9f36da83325fd94e04552052ad7372c'; } catch { return '67bffdb0ebe7ee9ffda2192bf2a463d7a9f36da83325fd94e04552052ad7372c'; }
     }
 
     getAccessToken() {

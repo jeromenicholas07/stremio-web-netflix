@@ -100,7 +100,7 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
     // Trakt integration state
     const profile = useProfile();
     const stremioTraktToken = profile?.auth?.user?.trakt?.access_token || '';
-    const [traktClientId, setTraktClientId] = useState(() => getSetting('trakt_client_id', ''));
+    const [traktClientId, setTraktClientId] = useState(() => getSetting('trakt_client_id', '67bffdb0ebe7ee9ffda2192bf2a463d7a9f36da83325fd94e04552052ad7372c'));
     const [traktToken, setTraktToken] = useState(() => getSetting('trakt_access_token', ''));
     const [traktNotInterestedSlug, setTraktNotInterestedSlug] = useState(() => getSetting('trakt_not_interested_slug', ''));
 
@@ -425,7 +425,7 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
                         className={styles['text-input']}
                         value={traktClientId}
                         onChange={onTraktClientIdChange}
-                        placeholder="Your Trakt OAuth app Client ID..."
+                        placeholder="Trakt OAuth Client ID"
                         spellCheck={false}
                     />
                 </div>
