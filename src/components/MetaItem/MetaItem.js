@@ -292,15 +292,23 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         setShowRating(false);
         setLocalWatched(true);
         markAsWatched();
-        // Fade out from recommendation rows
         setDismissed(true);
-        // Store rating locally (Trakt OAuth would be needed for API sync)
+        // Sync rating to Trakt via TraktBridge (also keeps localStorage as fallback)
+        try {
+            const traktBridge = require('stremio/services/TraktBridge');
+            if (traktBridge.isConfigured()) {
+                const itemType = type === 'series' ? 'series' : 'movie';
+                traktBridge.rateItem(itemId, itemType, rating).catch(() => {});
+                traktBridge.markWatched(itemId, itemType).catch(() => {});
+            }
+        } catch { /* silent */ }
+        // Also store locally as fallback
         try {
             const ratings = JSON.parse(localStorage.getItem('stremio_ratings') || '{}');
             ratings[itemId] = rating;
             localStorage.setItem('stremio_ratings', JSON.stringify(ratings));
         } catch { /* silent */ }
-    }, [itemId, markAsWatched]);
+    }, [itemId, type, markAsWatched]);
 
     const onSkipRating = React.useCallback((event) => {
         if (event) { event.preventDefault(); event.stopPropagation(); }
@@ -310,11 +318,12 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         setDismissed(true);
     }, [markAsWatched]);
 
-    // Add to Trakt watchlist via stremio-core dispatch
+    // Add to Trakt watchlist via TraktBridge + stremio-core dispatch
     const onAddToWatchlist = React.useCallback((event) => {
         event.preventDefault();
         event.stopPropagation();
         if (!itemId) return;
+        // Dispatch to stremio-core (addon sync)
         core.transport.dispatch({
             action: 'Ctx',
             args: {
@@ -329,7 +338,14 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                 }
             }
         });
-        // Also track locally for immediate filtering
+        // Also sync directly to Trakt watchlist via TraktBridge
+        try {
+            const traktBridge = require('stremio/services/TraktBridge');
+            if (traktBridge.isConfigured()) {
+                traktBridge.addToWatchlist(itemId, type === 'series' ? 'series' : 'movie').catch(() => {});
+            }
+        } catch { /* silent */ }
+        // Local fallback
         try {
             const watchlist = JSON.parse(localStorage.getItem('stremio_watchlist') || '[]');
             if (!watchlist.includes(itemId)) {
@@ -340,11 +356,19 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         setDismissed(true);
     }, [itemId, type, name, poster, background, core]);
 
-    // "Not interested" — dismiss item from suggestion rows
+    // "Not interested" — dismiss item and sync to Trakt custom list
     const onNotInterested = React.useCallback((event) => {
         event.preventDefault();
         event.stopPropagation();
         if (!itemId) return;
+        // Sync to Trakt "Not Interested" list via TraktBridge
+        try {
+            const traktBridge = require('stremio/services/TraktBridge');
+            if (traktBridge.isConfigured()) {
+                traktBridge.addToNotInterested(itemId, type === 'series' ? 'series' : 'movie').catch(() => {});
+            }
+        } catch { /* silent */ }
+        // Local fallback
         try {
             const dismissed = JSON.parse(localStorage.getItem('stremio_not_interested') || '[]');
             if (!dismissed.includes(itemId)) {
@@ -353,7 +377,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
             }
         } catch { /* silent */ }
         setDismissed(true);
-    }, [itemId]);
+    }, [itemId, type]);
 
     // TMDB trailer fetch — primary source with stremio fallback
     const [trailerYtId, setTrailerYtId] = React.useState(null);
@@ -657,7 +681,10 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                             }}
                             aria-label={'Play in banner'}
                         >
-                            <Icon className={styles['card-trailer-btn-icon']} name={'chevron-up'} />
+                            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                                <polyline points="14,24 20,18 26,24" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+                            </svg>
                         </button>
                         <button
                             className={classnames(styles['card-trailer-btn'], styles['card-mute-btn'])}
@@ -667,7 +694,20 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                 if (trailerCtx) trailerCtx.toggleGlobalMute();
                             }}
                         >
-                            <MuteIcon muted={globalMuted} size={10} />
+                            <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                                <g transform="translate(10, 10)" fill="white">
+                                    <path d={SPEAKER_PATH} />
+                                    {globalMuted ? (
+                                        <path d="M13.28 7.22a.75.75 0 1 0-1.06 1.06L13.94 10l-1.72 1.72a.75.75 0 0 0 1.06 1.06L15 11.06l1.72 1.72a.75.75 0 1 0 1.06-1.06L16.06 10l1.72-1.72a.75.75 0 0 0-1.06-1.06L15 8.94l-1.72-1.72Z" />
+                                    ) : (
+                                        <React.Fragment>
+                                            <path d="M15.95 5.06a.75.75 0 0 0-1.06 1.06 5.5 5.5 0 0 1 0 7.78.75.75 0 0 0 1.06 1.06 7 7 0 0 0 0-9.9Z" />
+                                            <path d="M13.829 7.172a.75.75 0 0 0-1.06 1.06 2.5 2.5 0 0 1 0 3.536.75.75 0 0 0 1.06 1.06 4 4 0 0 0 0-5.656Z" />
+                                        </React.Fragment>
+                                    )}
+                                </g>
+                            </svg>
                         </button>
                     </div>
                     :
@@ -682,44 +722,48 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                 onClick={onAddToWatchlist}
                                 title="Add to watchlist"
                             >
-                                <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                                    <line x1="12" y1="5" x2="12" y2="19" />
-                                    <line x1="5" y1="12" x2="19" y2="12" />
+                                <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                                    <line x1="20" y1="13" x2="20" y2="27" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                    <line x1="13" y1="20" x2="27" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" />
                                 </svg>
                             </Button>
                             {
                                 itemId ?
                                     <Button
-                                        className={classnames(styles['hover-btn'], { [styles['hover-btn-watched']]: isWatched })}
+                                        className={styles['hover-btn']}
+                                        onClick={onNotInterested}
+                                        title="Not interested"
+                                    >
+                                        <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                                            <line x1="13" y1="20" x2="27" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                        </svg>
+                                    </Button>
+                                    :
+                                    null
+                            }
+                            {
+                                itemId ?
+                                    <Button
+                                        className={styles['hover-btn']}
                                         onClick={onToggleWatched}
                                         title={isWatched ? 'Unmark watched' : 'Mark as watched'}
                                     >
-                                        <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
-                                            <polyline points="4,12 10,18 20,6" />
+                                        <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <circle cx="20" cy="20" r="18" stroke={isWatched ? 'var(--primary-accent-color)' : 'rgba(255,255,255,0.5)'} strokeWidth="1.5" fill={isWatched ? 'var(--primary-accent-color)' : 'rgba(0,0,0,0.35)'} />
+                                            <polyline points="12,20 17,25 28,14" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                                         </svg>
                                     </Button>
                                     :
                                     null
                             }
                             <Button className={styles['hover-btn']} href={href} title="More info">
-                                <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                                    <polyline points="6,9 12,15 18,9" />
+                                <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                                    <polyline points="14,17 20,23 26,17" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
                                 </svg>
                             </Button>
-                            {
-                                itemId ?
-                                    <Button
-                                        className={classnames(styles['hover-btn'], styles['hover-btn-notinterested'])}
-                                        onClick={onNotInterested}
-                                        title="Not interested"
-                                    >
-                                        <svg className={styles['hover-btn-icon']} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">
-                                            <line x1="6" y1="12" x2="18" y2="12" />
-                                        </svg>
-                                    </Button>
-                                    :
-                                    null
-                            }
                         </div>
                         <div className={styles['hover-meta']}>
                             {

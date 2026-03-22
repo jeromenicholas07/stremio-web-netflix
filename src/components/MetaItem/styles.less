@@ -200,35 +200,28 @@
         .card-trailer-btn {
             position: absolute;
             z-index: 10;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             width: 18px;
             height: 18px;
-            border-radius: 50%;
-            border: 1px solid rgba(255, 255, 255, 0.4);
-            background-color: rgba(0, 0, 0, 0.5);
+            border: none;
+            background: none;
             cursor: pointer;
             padding: 0;
             margin: 0;
             outline: none;
             -webkit-appearance: none;
             opacity: 0;
-            transition: opacity 0.2s ease, border-color 0.15s ease, background-color 0.15s ease;
+            transition: opacity 0.2s ease;
 
-            &:hover {
-                border-color: white;
-                background-color: rgba(0, 0, 0, 0.7);
+            svg {
+                display: block;
+                width: 100%;
+                height: 100%;
+                opacity: 0.6;
+                transition: opacity 0.15s ease;
             }
 
-            .card-trailer-btn-icon {
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                width: 8px;
-                height: 8px;
-                color: white;
+            &:hover svg {
+                opacity: 1;
             }
         }
 
@@ -236,32 +229,12 @@
         .card-promote-btn {
             top: 0.35rem;
             left: 0.35rem;
-
-            .card-trailer-btn-icon {
-                width: 0.5rem;
-                height: 0.5rem;
-            }
         }
 
-        // Mute button — bottom-right of trailer, subtle to not obstruct
+        // Mute button — bottom-right of trailer
         .card-mute-btn {
             bottom: 0.35rem;
             right: 0.35rem;
-            border-color: rgba(255, 255, 255, 0.15);
-            background-color: rgba(0, 0, 0, 0.2);
-
-            .card-trailer-btn-icon {
-                opacity: 0.6;
-            }
-
-            &:hover {
-                border-color: rgba(255, 255, 255, 0.4);
-                background-color: rgba(0, 0, 0, 0.4);
-
-                .card-trailer-btn-icon {
-                    opacity: 1;
-                }
-            }
         }
     }
 
@@ -351,61 +324,35 @@
     }
 
     .hover-btn {
-        position: relative;
+        // Single SVG approach — circle border + icon in same coordinate space
+        // guarantees perfect centering regardless of parent transforms
         width: 1.4rem;
         height: 1.4rem;
         min-width: 1.4rem;
         min-height: 1.4rem;
         max-width: 1.4rem;
         max-height: 1.4rem;
-        border-radius: 50%;
-        border: 1.5px solid rgba(255, 255, 255, 0.5);
-        background-color: rgba(0, 0, 0, 0.35);
+        border: none;
+        background: none;
         cursor: pointer;
-        transition: border-color 0.15s ease, background-color 0.15s ease;
         padding: 0;
         margin: 0;
         outline: none;
         -webkit-appearance: none;
-        box-sizing: border-box;
         text-decoration: none;
         flex-grow: 0;
         flex-shrink: 0;
-        overflow: hidden;
+        transition: opacity 0.15s ease;
+        opacity: 0.6;
 
         &:hover {
-            border-color: white;
-            background-color: rgba(0, 0, 0, 0.55);
+            opacity: 1;
         }
 
-        .hover-btn-icon {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 0.6rem;
-            height: 0.6rem;
-            color: white;
-        }
-    }
-
-    .hover-btn-watched {
-        background-color: var(--primary-accent-color);
-        border-color: var(--primary-accent-color);
-
-        .hover-btn-icon {
-            color: white;
-        }
-
-        &:hover {
-            background-color: #b5070f;
-            border-color: #b5070f;
-        }
-    }
-
-    .hover-btn-notinterested {
-        &:hover {
-            border-color: rgba(255, 255, 255, 0.7);
+        svg {
+            display: block;
+            width: 100%;
+            height: 100%;
         }
     }
 

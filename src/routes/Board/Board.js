@@ -16,13 +16,16 @@ const styles = require('./styles');
 
 const THRESHOLD = 5;
 
-// Load dismissed/not-interested/rated/watchlisted item IDs from localStorage for filtering suggestion rows
+const traktBridge = require('stremio/services/TraktBridge');
+
+// Load dismissed/not-interested/rated/watchlisted item IDs from localStorage + TraktBridge
 function useDismissedItems() {
     const [dismissedSet, setDismissedSet] = React.useState(new Set());
 
     React.useEffect(() => {
         const load = () => {
             const ids = new Set();
+            // Local fallback data
             try {
                 const notInterested = JSON.parse(localStorage.getItem('stremio_not_interested') || '[]');
                 notInterested.forEach((id) => ids.add(id));
@@ -35,13 +38,30 @@ function useDismissedItems() {
                 const watchlist = JSON.parse(localStorage.getItem('stremio_watchlist') || '[]');
                 watchlist.forEach((id) => ids.add(id));
             } catch { /* */ }
+            // Merge with TraktBridge synced data
+            const traktDismissed = traktBridge.getDismissedIds();
+            traktDismissed.forEach((id) => ids.add(id));
             setDismissedSet(ids);
         };
         load();
+
         // Re-check when localStorage changes (from MetaItem dismiss actions)
         window.addEventListener('storage', load);
         const interval = setInterval(load, 5000); // poll for same-tab updates
-        return () => { window.removeEventListener('storage', load); clearInterval(interval); };
+
+        // Subscribe to TraktBridge updates
+        const unsub = traktBridge.onChange(load);
+
+        // Trigger initial Trakt sync
+        if (traktBridge.isConfigured()) {
+            traktBridge.syncAll().then(load);
+        }
+
+        return () => {
+            window.removeEventListener('storage', load);
+            clearInterval(interval);
+            unsub();
+        };
     }, []);
 
     return dismissedSet;
