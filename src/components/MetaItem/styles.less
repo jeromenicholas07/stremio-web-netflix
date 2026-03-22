@@ -12,6 +12,7 @@
                 z-index 0s 0.35s;
     z-index: 0;
     transform-origin: center center;
+    will-change: transform;
 
     // 16:9 landscape for all cards
     .poster-container {
@@ -151,6 +152,7 @@
         overflow: hidden;
         border-radius: 0.25rem 0.25rem 0 0;
         background: #141414;
+        will-change: width;
         transition: width 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0);
 
         // YouTube iframe fills the trailer layer exactly — no overscan, no cropping
@@ -333,9 +335,9 @@
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.8);
         z-index: 200;
         box-sizing: border-box;
+        will-change: width, left;
         transition: width 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0),
-                    left 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0),
-                    right 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0);
+                    left 0.5s cubic-bezier(0.25, 0.1, 0.25, 1.0);
     }
 
     .hover-buttons {

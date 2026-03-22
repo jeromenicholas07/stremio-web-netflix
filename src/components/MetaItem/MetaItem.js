@@ -472,19 +472,17 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
 
     const isTrailerPlaying = showTrailer && trailerYtId && isHovered;
 
-    // Smooth trailer width animation — mount at poster width, then expand
+    // Smooth trailer width animation — mount at poster width, then expand after layout settles
     React.useEffect(() => {
         if (isTrailerPlaying) {
             setTrailerMounted(false);
             let cancelled = false;
-            requestAnimationFrame(() => {
-                if (cancelled) return;
-                requestAnimationFrame(() => {
-                    if (cancelled) return;
-                    setTrailerMounted(true);
-                });
-            });
-            return () => { cancelled = true; };
+            // Wait one frame for the trailer layer to render at poster width,
+            // then trigger the CSS transition to target width
+            const timer = setTimeout(() => {
+                if (!cancelled) setTrailerMounted(true);
+            }, 50);
+            return () => { cancelled = true; clearTimeout(timer); };
         }
         setTrailerMounted(false);
     }, [isTrailerPlaying]);
@@ -501,6 +499,8 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     const expandedWidth = React.useMemo(() => {
         if (!isTrailerPlaying || !originalDimsRef.current) return null;
         const { width: posterW, height: posterH } = originalDimsRef.current;
+        // Container width includes padding (0.2rem each side)
+        const containerW = cardRef.current ? cardRef.current.offsetWidth : posterW;
         const overcrop = 0.015;
         const top = letterbox.top > 0 ? letterbox.top + overcrop : 0;
         const bottom = letterbox.bottom > 0 ? letterbox.bottom + overcrop : 0;
@@ -508,7 +508,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         const effectiveAR = totalBars > 0.01 ? videoAR / (1 - totalBars) : videoAR;
         const targetW = Math.ceil(posterH * effectiveAR);
         const currentW = trailerMounted ? targetW : posterW;
-        return { posterW, posterH, currentW };
+        return { posterW, posterH, currentW, containerW };
     }, [isTrailerPlaying, videoAR, letterbox, trailerMounted]);
 
     // Calculate trailer layer dimensions with edge-aware positioning
@@ -533,18 +533,22 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         return style;
     }, [expandedWidth, edgePosition]);
 
-    // Calculate hover-info style — uses identical centering method as trailer layer
+    // Calculate hover-info style — pixel-perfect alignment with trailer layer
+    // Trailer uses: left: 50% of container, translateX(-50% of own width)
+    // So trailer left edge = (containerW - currentW) / 2
+    // Hover-info is positioned with left/right relative to container
     const hoverInfoStyle = React.useMemo(() => {
         if (!expandedWidth) return undefined;
-        const { currentW } = expandedWidth;
+        const { currentW, containerW } = expandedWidth;
 
         if (edgePosition === 'left') {
             return { left: '0', right: 'auto', width: `${currentW}px` };
         } else if (edgePosition === 'right') {
             return { left: 'auto', right: '0', width: `${currentW}px` };
         }
-        // Match trailer layer: left: 50% + translateX(-50%) for identical centering
-        return { left: '50%', right: 'auto', width: `${currentW}px`, transform: 'translateX(-50%)' };
+        // Exact same calculation as CSS left:50% + translateX(-50%)
+        const leftPos = (containerW - currentW) / 2;
+        return { left: `${leftPos}px`, right: 'auto', width: `${currentW}px` };
     }, [expandedWidth, edgePosition]);
 
     // Calculate crop style to remove detected letterbox black bars
