@@ -10,10 +10,16 @@ const YouTubePlayer = require('stremio/components/YouTubePlayer');
 const { ICON_FOR_TYPE } = require('stremio/common/CONSTANTS');
 const { TrailerContext } = require('stremio/common/TrailerContext');
 const { useServices } = require('stremio/services');
-const { useToast } = require('stremio/common');
 const tmdbService = require('stremio/services/TMDBService');
 const traktBridge = require('stremio/services/TraktBridge');
 const styles = require('./styles');
+
+// Emit toast events so a top-level listener can display them via the ToastProvider.
+// This avoids using useToast() hook inside MetaItem which can cause hook-count issues
+// when MetaItem is wrapped by React.memo + multiple HOCs (LibItem, ContinueWatchingItem).
+function showToast(opts) {
+    window.dispatchEvent(new CustomEvent('stremio-toast', { detail: opts }));
+}
 
 let cardIdCounter = 0;
 
@@ -161,9 +167,8 @@ function pickBestTrailerFallback(trailerStreams) {
     return pool[0].ytId;
 }
 
-const MetaItem = React.memo(({ className, type, name, poster, posterShape, background, progress, newVideos, deepLinks, dataset, onPlayClick, watched, trailerStreams, releaseInfo, links, disableTrailerExpand, ...props }) => {
+const MetaItem = React.memo(({ className, type, name, poster, posterShape, background, progress, newVideos, deepLinks, dataset, onPlayClick, watched, trailerStreams, releaseInfo, links, disableTrailerExpand, onCWAction, rateMode, onRated, ...props }) => {
     const { core } = useServices();
-    const toast = useToast();
     const trailerCtx = React.useContext(TrailerContext);
     const [isHovered, setIsHovered] = React.useState(false);
     const [localWatched, setLocalWatched] = React.useState(null); // optimistic override
@@ -190,6 +195,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     // Letterbox detection — { top, bottom } as fractions
     const [letterbox, setLetterbox] = React.useState({ top: 0, bottom: 0 });
 
+    // Default click navigates to streams (for poster click → play)
     const href = React.useMemo(() => {
         return deepLinks ?
             typeof deepLinks.metaDetailsStreams === 'string' ?
@@ -204,6 +210,16 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                         null
             :
             null;
+    }, [deepLinks]);
+
+    // "More Info" navigates to details page with ?info=1 query param.
+    // This signals MetaDetails/StreamsList to NOT auto-pick a stream.
+    const infoHref = React.useMemo(() => {
+        const raw = deepLinks?.metaDetailsVideos ?? deepLinks?.metaDetailsStreams ?? null;
+        if (typeof raw !== 'string') return null;
+        // Append ?info=1 to signal "info mode" (no auto-pick)
+        const separator = raw.includes('?') ? '&' : '?';
+        return `${raw}${separator}info=1`;
     }, [deepLinks]);
 
     const playHref = React.useMemo(() => {
@@ -240,7 +256,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
 
     const isWatched = localWatched !== null ? localWatched : !!watched;
 
-    // Mark item as watched in stremio-core (Trakt addon syncs automatically)
+    // Mark item as watched in stremio-core (library + watched flag)
     const markAsWatched = React.useCallback(() => {
         if (!itemId) return;
         core.transport.dispatch({
@@ -266,6 +282,9 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         });
     }, [itemId, type, name, poster, background, core]);
 
+    // Ref to track if we already synced watched for this toggle (avoid double-sync)
+    const watchedSyncedRef = React.useRef(false);
+
     const onToggleWatched = React.useCallback((event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -284,102 +303,154 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
             return;
         }
 
-        // Show rating overlay — stop trailer so poster shows through blur
+        // Mark as watched immediately — Trakt syncs NOW, not after rating
+        setLocalWatched(true);
+        markAsWatched();
+        watchedSyncedRef.current = true;
+        if (traktBridge.isConnected()) {
+            const itemType = type === 'series' ? 'series' : 'movie';
+            traktBridge.markWatched(itemId, itemType, name).catch((err) => {
+                showToast({ type: 'error', title: 'Mark watched failed', message: err.message, timeout: 5000 });
+            });
+        }
+
+        // Show rating overlay — item stays visible until user rates or skips
         setShowTrailer(false);
         clearTimeout(trailerTimerRef.current);
         setShowRating(true);
         setHoverStar(0);
-    }, [itemId, isWatched, core]);
+    }, [itemId, isWatched, core, type, name, markAsWatched]);
 
     const onStarClick = React.useCallback((rating) => {
         setShowRating(false);
-        setLocalWatched(true);
-        markAsWatched();
         setDismissed(true);
-        // Sync rating to Trakt via TraktBridge (also keeps localStorage as fallback)
-        if (traktBridge.isConfigured()) {
+        // Dismiss from discovery rows now that the rating overlay is done
+        traktBridge.dismissWatched(itemId);
+        window.dispatchEvent(new Event('stremio-dismissed-updated'));
+        // Sync rating to Trakt (watched already synced in onToggleWatched)
+        if (traktBridge.isConnected()) {
             const itemType = type === 'series' ? 'series' : 'movie';
-            traktBridge.rateItem(itemId, itemType, rating).catch((err) => {
-                toast.show({ type: 'error', title: 'Trakt Rating Failed', message: err.message, timeout: 4000 });
+            traktBridge.rateItem(itemId, itemType, rating).then((result) => {
+                if (result.ok) {
+                    showToast({ type: 'success', title: `Rated ${rating}/5`, message: name || itemId, timeout: 3000 });
+                } else {
+                    showToast({ type: 'error', title: 'Rating failed', message: `Trakt API returned ${result.status}`, timeout: 5000 });
+                }
+            }).catch((err) => {
+                showToast({ type: 'error', title: 'Rating error', message: err.message, timeout: 5000 });
             });
-            traktBridge.markWatched(itemId, itemType).catch((err) => {
-                toast.show({ type: 'error', title: 'Trakt Watched Sync Failed', message: err.message, timeout: 4000 });
-            });
+        } else {
+            showToast({ type: 'error', title: 'Trakt not connected', message: 'Rating not synced — connect Trakt in Settings.', timeout: 5000 });
         }
-        // Also store locally as fallback
-        try {
-            const ratings = JSON.parse(localStorage.getItem('stremio_ratings') || '{}');
-            ratings[itemId] = rating;
-            localStorage.setItem('stremio_ratings', JSON.stringify(ratings));
-        } catch { /* silent */ }
-    }, [itemId, type, markAsWatched]);
+        if (typeof onCWAction === 'function') onCWAction('rated');
+    }, [itemId, type, name, onCWAction]);
 
     const onSkipRating = React.useCallback((event) => {
         if (event) { event.preventDefault(); event.stopPropagation(); }
         setShowRating(false);
-        setLocalWatched(true);
-        markAsWatched();
         setDismissed(true);
-    }, [markAsWatched]);
+        // Mark as dismissed in TraktBridge so it's filtered from all discovery rows
+        traktBridge.dismissWatched(itemId);
+        window.dispatchEvent(new Event('stremio-dismissed-updated'));
+        if (typeof onCWAction === 'function') onCWAction('skipped-rating');
+    }, [itemId, onCWAction]);
 
-    // Add to Trakt watchlist via TraktBridge + stremio-core dispatch
+    // Add to Trakt watchlist — also removes from Not Interested if present
     const onAddToWatchlist = React.useCallback((event) => {
         event.preventDefault();
         event.stopPropagation();
         if (!itemId) return;
-        // Dispatch to stremio-core (addon sync)
-        core.transport.dispatch({
-            action: 'Ctx',
-            args: {
-                action: 'AddToLibrary',
-                args: {
-                    id: itemId,
-                    type: type === 'series' ? 'series' : 'movie',
-                    name: name || '',
-                    poster: poster || '',
-                    posterShape: 'landscape',
-                    background: background || '',
-                }
-            }
-        });
-        // Also sync directly to Trakt watchlist via TraktBridge
-        if (traktBridge.isConfigured()) {
-            traktBridge.addToWatchlist(itemId, type === 'series' ? 'series' : 'movie').catch((err) => {
-                toast.show({ type: 'error', title: 'Trakt Watchlist Failed', message: err.message, timeout: 4000 });
+        const itemType = type === 'series' ? 'series' : 'movie';
+        if (!traktBridge.isConnected()) {
+            showToast({
+                type: 'error',
+                title: 'Trakt not connected',
+                message: 'Go to Settings → Modern UI → Trakt to connect your account.',
+                timeout: 5000,
             });
+            return;
         }
-        // Local fallback
-        try {
-            const watchlist = JSON.parse(localStorage.getItem('stremio_watchlist') || '[]');
-            if (!watchlist.includes(itemId)) {
-                watchlist.push(itemId);
-                localStorage.setItem('stremio_watchlist', JSON.stringify(watchlist));
+        // If moving from Not Interested → Watchlist, the item will be removed from
+        // the NI array optimistically by removeFromNotInterested, so we don't need
+        // setDismissed (which would wrongly dismiss the component reused at this index).
+        const isMovingFromNI = traktBridge._notInterestedIds.has(itemId);
+        if (isMovingFromNI) {
+            traktBridge.removeFromNotInterested(itemId, itemType).catch(() => {});
+        }
+        traktBridge.addToWatchlist(itemId, itemType, name).then((result) => {
+            if (result.ok) {
+                showToast({ type: 'success', title: 'Added to Watchlist', message: name || itemId, timeout: 3000 });
+                // Only dismiss from discovery rows — list moves are handled by array updates
+                if (!isMovingFromNI) {
+                    setDismissed(true);
+                }
+                window.dispatchEvent(new Event('stremio-dismissed-updated'));
+                if (typeof onCWAction === 'function') onCWAction('watchlist');
+            } else {
+                showToast({
+                    type: 'error',
+                    title: 'Failed to add to Watchlist',
+                    message: `Trakt API returned ${result.status}${result.data ? ': ' + JSON.stringify(result.data).slice(0, 150) : ''}`,
+                    timeout: 6000,
+                });
             }
-        } catch { /* silent */ }
-        setDismissed(true);
-    }, [itemId, type, name, poster, background, core]);
+        }).catch((err) => {
+            showToast({
+                type: 'error',
+                title: 'Watchlist error',
+                message: `${err.message} [${itemId}]`,
+                timeout: 6000,
+            });
+        });
+    }, [itemId, type, name, onCWAction]);
 
-    // "Not interested" — dismiss item and sync to Trakt custom list
+    // "Not interested" — also removes from Watchlist if present
     const onNotInterested = React.useCallback((event) => {
         event.preventDefault();
         event.stopPropagation();
         if (!itemId) return;
-        // Sync to Trakt "Not Interested" list via TraktBridge
-        if (traktBridge.isConfigured()) {
-            traktBridge.addToNotInterested(itemId, type === 'series' ? 'series' : 'movie').catch((err) => {
-                toast.show({ type: 'error', title: 'Trakt Not Interested Failed', message: err.message, timeout: 4000 });
+        const itemType = type === 'series' ? 'series' : 'movie';
+        if (!traktBridge.isConnected()) {
+            showToast({
+                type: 'error',
+                title: 'Trakt not connected',
+                message: 'Go to Settings → Modern UI → Trakt to connect your account.',
+                timeout: 5000,
             });
+            return;
         }
-        // Local fallback
-        try {
-            const dismissed = JSON.parse(localStorage.getItem('stremio_not_interested') || '[]');
-            if (!dismissed.includes(itemId)) {
-                dismissed.push(itemId);
-                localStorage.setItem('stremio_not_interested', JSON.stringify(dismissed));
+        // If moving from Watchlist → Not Interested, the item will be removed from
+        // the watchlist array optimistically, so we don't need setDismissed.
+        const isMovingFromWatchlist = traktBridge._watchlistIds.has(itemId);
+        if (isMovingFromWatchlist) {
+            traktBridge.removeFromWatchlist(itemId, itemType).catch(() => {});
+        }
+        traktBridge.addToNotInterested(itemId, itemType, name).then((result) => {
+            if (result.ok) {
+                showToast({ type: 'success', title: 'Marked as Not Interested', message: name || itemId, timeout: 3000 });
+                // Only dismiss from discovery rows — list moves are handled by array updates
+                if (!isMovingFromWatchlist) {
+                    setDismissed(true);
+                }
+                window.dispatchEvent(new Event('stremio-dismissed-updated'));
+                if (typeof onCWAction === 'function') onCWAction('not-interested');
+            } else {
+                showToast({
+                    type: 'error',
+                    title: 'Failed to mark Not Interested',
+                    message: `Trakt API returned ${result.status}${result.data ? ': ' + JSON.stringify(result.data).slice(0, 150) : ''}`,
+                    timeout: 6000,
+                });
             }
-        } catch { /* silent */ }
-        setDismissed(true);
-    }, [itemId, type]);
+        }).catch((err) => {
+            showToast({
+                type: 'error',
+                title: 'Not Interested error',
+                message: `${err.message} [${itemId}]`,
+                timeout: 6000,
+            });
+        });
+    }, [itemId, type, name, onCWAction]);
 
     // TMDB trailer fetch — primary source with stremio fallback
     const [trailerYtId, setTrailerYtId] = React.useState(null);
@@ -481,11 +552,19 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         if (trailerCtx) trailerCtx.clearActiveTrailer(cardIdRef.current);
     }, []);
 
+    // Stop trailer on navigation (hashchange) and on unmount
     React.useEffect(() => {
-        return () => {
+        const stopTrailer = () => {
             clearTimeout(hoverTimerRef.current);
             clearTimeout(trailerTimerRef.current);
+            setIsHovered(false);
+            setShowTrailer(false);
             if (trailerCtx) trailerCtx.clearActiveTrailer(cardIdRef.current);
+        };
+        window.addEventListener('hashchange', stopTrailer);
+        return () => {
+            window.removeEventListener('hashchange', stopTrailer);
+            stopTrailer();
         };
     }, []);
 
@@ -596,6 +675,70 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         };
     }, [letterbox]);
 
+    // ─── Rate Mode: blurred card with permanent star rating overlay ───
+    // Used for the "Watched (Not Rated)" row
+    const onRateModeRate = React.useCallback((rating) => {
+        if (!itemId) return;
+        const itemType = type === 'series' ? 'series' : 'movie';
+        // Push rating to Trakt (source of truth)
+        if (traktBridge.isConnected()) {
+            traktBridge.rateItem(itemId, itemType, rating).then((result) => {
+                if (result.ok) {
+                    showToast({ type: 'success', title: `Rated ${rating}/5`, message: name || itemId, timeout: 3000 });
+                } else {
+                    showToast({ type: 'error', title: 'Rating failed', message: `Trakt API returned ${result.status}`, timeout: 5000 });
+                }
+            }).catch((err) => {
+                showToast({ type: 'error', title: 'Rating error', message: err.message, timeout: 5000 });
+            });
+        } else {
+            showToast({ type: 'error', title: 'Trakt not connected', message: 'Rating not synced — connect Trakt in Settings.', timeout: 5000 });
+        }
+        setDismissed(true);
+        window.dispatchEvent(new Event('stremio-dismissed-updated'));
+        if (typeof onRated === 'function') onRated(itemId, rating);
+    }, [itemId, type, name, onRated]);
+
+    if (rateMode) {
+        return (
+            <div
+                ref={cardRef}
+                className={classnames(className, styles['meta-item-container'], styles['rate-mode'], {
+                    [styles['dismissed']]: dismissed,
+                })}
+            >
+                <div className={styles['poster-container']}>
+                    <div className={styles['poster-image-layer']} style={{ filter: 'blur(6px) brightness(0.4)' }}>
+                        <Image
+                            className={styles['poster-image']}
+                            src={thumbnailSrc}
+                            alt={' '}
+                            renderFallback={renderPosterFallback}
+                        />
+                    </div>
+                    <div className={styles['rate-mode-overlay']}>
+                        <div className={styles['rate-mode-title']}>{name}</div>
+                        <div className={styles['rating-stars']}>
+                            {[1, 2, 3, 4, 5].map((star) => (
+                                <button
+                                    key={star}
+                                    className={classnames(styles['rating-star'], {
+                                        [styles['rating-star-active']]: star <= hoverStar,
+                                    })}
+                                    onMouseEnter={() => setHoverStar(star)}
+                                    onMouseLeave={() => setHoverStar(0)}
+                                    onClick={(e) => { e.preventDefault(); e.stopPropagation(); onRateModeRate(star); }}
+                                >
+                                    {'\u2605'}
+                                </button>
+                            ))}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        );
+    }
+
     return (
         <div
             ref={cardRef}
@@ -648,6 +791,24 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                         :
                         null
                 }
+                {
+                    typeof onCWAction === 'function' && progress >= 90 && !isWatched ?
+                        <div className={styles['rate-this-badge']} onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            setShowTrailer(false);
+                            clearTimeout(trailerTimerRef.current);
+                            setShowRating(true);
+                            setHoverStar(0);
+                        }}>
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="#FFD700" xmlns="http://www.w3.org/2000/svg">
+                                <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+                            </svg>
+                            <span>Rate This</span>
+                        </div>
+                        :
+                        null
+                }
             </Button>
             {
                 isTrailerPlaying ?
@@ -661,6 +822,9 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                             style={trailerCropStyle}
                             overlayScale={0.28}
                         />
+                        {/* Click-capture overlay — intercepts clicks on the YouTube iframe
+                            (cross-origin iframes eat mouse events). Navigates same as poster. */}
+                        <a href={href} className={styles['trailer-click-capture']} aria-label={name || 'Play'} />
                         <button
                             className={classnames(styles['card-trailer-btn'], styles['card-promote-btn'])}
                             onClick={(e) => {
@@ -760,7 +924,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                     :
                                     null
                             }
-                            <Button className={styles['hover-btn']} href={href} title="More info">
+                            <Button className={styles['hover-btn']} href={infoHref} title="More info">
                                 <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
                                     <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
                                     <polyline points="14,17 20,23 26,17" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
