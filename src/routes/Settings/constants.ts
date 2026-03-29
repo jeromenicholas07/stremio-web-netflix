@@ -3,7 +3,7 @@ const SECTIONS = {
     PLAYER: 'player',
     INTERFACE: 'interface',
     STREAMING: 'streaming',
-    NETFLIX_UI: 'netflix_ui',
+    MODERN_UI: 'modern_ui',
     SHORTCUTS: 'shortcuts',
 };
 

@@ -25,6 +25,7 @@ const { default: SideDrawer } = require('./SideDrawer');
 const usePlayer = require('./usePlayer');
 const useStatistics = require('./useStatistics');
 const useVideo = require('./useVideo');
+const useWhisperSync = require('./useWhisperSync');
 const styles = require('./styles');
 const Video = require('./Video');
 const { default: Indicator } = require('./Indicator/Indicator');
@@ -270,6 +271,14 @@ const Player = ({ urlParams, queryParams }) => {
         onExtraSubtitlesDelayChanged(delay);
     }, [video.state.extraSubtitlesDelay, onExtraSubtitlesDelayChanged]);
 
+    const whisperSync = useWhisperSync(
+        video.state.extraSubtitlesTracks,
+        video.state.selectedExtraSubtitlesTrackId,
+        onExtraSubtitlesDelayChanged,
+        streamingServer.baseUrl || CONSTANTS.DEFAULT_STREAMING_SERVER_URL,
+        player.stream?.type === 'Ready' ? player.stream.content : null,
+    );
+
     const onSubtitlesSizeChanged = React.useCallback((size) => {
         video.setSubtitlesSize(size);
         streamStateChanged({ subtitleSize: size });
@@ -363,6 +372,10 @@ const Player = ({ urlParams, queryParams }) => {
         video.unload();
 
         if (player.selected && player.stream?.type === 'Ready' && streamingServer.settings?.type !== 'Loading') {
+            // Resolve streaming server URL: prefer core's URL, fall back to default
+            const serverURL = streamingServer.baseUrl
+                ? (casting ? streamingServer.baseUrl : (streamingServer.selected?.transportUrl || streamingServer.baseUrl))
+                : (services.shell.active ? CONSTANTS.DEFAULT_STREAMING_SERVER_URL : null);
             video.load({
                 stream: {
                     ...player.stream.content,
@@ -388,13 +401,7 @@ const Player = ({ urlParams, queryParams }) => {
                 assSubtitlesStyling: settings.assSubtitlesStyling,
                 videoMode: settings.videoMode,
                 platform: platform.name,
-                streamingServerURL: streamingServer.baseUrl ?
-                    casting ?
-                        streamingServer.baseUrl
-                        :
-                        streamingServer.selected.transportUrl
-                    :
-                    null,
+                streamingServerURL: serverURL,
                 seriesInfo: player.seriesInfo,
             }, {
                 chromecastTransport: services.chromecast.active ? services.chromecast.transport : null,
@@ -946,6 +953,7 @@ const Player = ({ urlParams, queryParams }) => {
                 onSeekRequested={onSeekRequested}
                 onToggleOptionsMenu={toggleOptionsMenu}
                 onToggleSubtitlesMenu={toggleSubtitlesMenu}
+                subtitlesSyncing={whisperSync.syncStatus !== whisperSync.SYNC_STATUS.IDLE && whisperSync.syncStatus !== whisperSync.SYNC_STATUS.DONE && whisperSync.syncStatus !== whisperSync.SYNC_STATUS.ERROR}
                 onToggleAudioMenu={toggleAudioMenu}
                 onToggleSpeedMenu={toggleSpeedMenu}
                 onToggleStatisticsMenu={toggleStatisticsMenu}
@@ -1009,6 +1017,12 @@ const Player = ({ urlParams, queryParams }) => {
                         onExtraSubtitlesOffsetChanged={onSubtitlesOffsetChanged}
                         onExtraSubtitlesDelayChanged={onExtraSubtitlesDelayChanged}
                         onExtraSubtitlesSizeChanged={onSubtitlesSizeChanged}
+                        syncStatus={whisperSync.syncStatus}
+                        syncProgress={whisperSync.syncProgress}
+                        syncError={whisperSync.syncError}
+                        syncResult={whisperSync.syncResult}
+                        onStartSync={whisperSync.startSync}
+                        onCancelSync={whisperSync.cancelSync}
                     />
                     :
                     null

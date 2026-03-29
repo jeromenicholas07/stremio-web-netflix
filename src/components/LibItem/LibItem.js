@@ -6,7 +6,7 @@ const PropTypes = require('prop-types');
 const MetaItem = require('stremio/components/MetaItem');
 const { t } = require('i18next');
 
-const LibItem = ({ _id, removable, notifications, watched, ...props }) => {
+const LibItem = ({ _id, removable, notifications, watched, onCWAction, ...props }) => {
 
     const { core } = useServices();
 
@@ -78,6 +78,8 @@ const LibItem = ({ _id, removable, notifications, watched, ...props }) => {
                                 }
                             }
                         });
+                        // If this is a CW item, also remove from continue watching
+                        if (typeof onCWAction === 'function') onCWAction('watched');
                     }
 
                     break;
@@ -98,6 +100,8 @@ const LibItem = ({ _id, removable, notifications, watched, ...props }) => {
                                 args: _id
                             }
                         });
+                        // If this is a CW item, also remove from continue watching
+                        if (typeof onCWAction === 'function') onCWAction('dismiss');
                     }
 
                     break;
@@ -111,6 +115,8 @@ const LibItem = ({ _id, removable, notifications, watched, ...props }) => {
                                 args: _id
                             }
                         });
+                        // If this is a CW item, also remove from continue watching
+                        if (typeof onCWAction === 'function') onCWAction('remove');
                     }
 
                     break;
@@ -137,6 +143,7 @@ const LibItem = ({ _id, removable, notifications, watched, ...props }) => {
             options={options}
             optionOnSelect={optionOnSelect}
             onPlayClick={onPlayClick}
+            onCWAction={onCWAction}
         />
     );
 };

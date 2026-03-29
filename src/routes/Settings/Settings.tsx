@@ -12,7 +12,7 @@ import General from './General';
 import Interface from './Interface';
 import Player from './Player';
 import Streaming from './Streaming';
-import NetflixUI from './NetflixUI';
+import ModernUI from './NetflixUI';
 import Shortcuts from './Shortcuts';
 import Info from './Info';
 import styles from './Settings.less';
@@ -28,7 +28,7 @@ const Settings = () => {
     const interfaceSectionRef = useRef<HTMLDivElement>(null);
     const playerSectionRef = useRef<HTMLDivElement>(null);
     const streamingServerSectionRef = useRef<HTMLDivElement>(null);
-    const netflixUISectionRef = useRef<HTMLDivElement>(null);
+    const modernUISectionRef = useRef<HTMLDivElement>(null);
     const shortcutsSectionRef = useRef<HTMLDivElement>(null);
 
     const sections = useMemo(() => ([
@@ -36,7 +36,7 @@ const Settings = () => {
         { ref: interfaceSectionRef, id: SECTIONS.INTERFACE },
         { ref: playerSectionRef, id: SECTIONS.PLAYER },
         { ref: streamingServerSectionRef, id: SECTIONS.STREAMING },
-        { ref: netflixUISectionRef, id: SECTIONS.NETFLIX_UI },
+        { ref: modernUISectionRef, id: SECTIONS.MODERN_UI },
         { ref: shortcutsSectionRef, id: SECTIONS.SHORTCUTS },
     ]), []);
 
@@ -115,8 +115,8 @@ const Settings = () => {
                         profile={profile}
                         streamingServer={streamingServer}
                     />
-                    <NetflixUI
-                        ref={netflixUISectionRef}
+                    <ModernUI
+                        ref={modernUISectionRef}
                     />
                     {
                         !platform.isMobile && <Shortcuts ref={shortcutsSectionRef} />

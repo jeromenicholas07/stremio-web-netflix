@@ -68,11 +68,17 @@ const ServicesToaster = () => {
                 timeout: 4000
             });
         };
+        // Listen for toast events dispatched from components that can't use useToast() directly
+        const onToastEvent = (event) => {
+            if (event.detail) toast.show(event.detail);
+        };
         core.transport.on('CoreEvent', onCoreEvent);
         dragAndDrop.on('error', onDragAndDropError);
+        window.addEventListener('stremio-toast', onToastEvent);
         return () => {
             core.transport.off('CoreEvent', onCoreEvent);
             dragAndDrop.off('error', onDragAndDropError);
+            window.removeEventListener('stremio-toast', onToastEvent);
         };
     }, []);
     return null;

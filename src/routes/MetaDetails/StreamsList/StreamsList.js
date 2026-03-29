@@ -34,10 +34,17 @@ function getAutoPickSettings() {
     } catch { return null; }
 }
 
+function isHDR(stream) {
+    const combined = ((stream.name || '') + ' ' + (stream.description || '')).toLowerCase();
+    return /hdr|dolby\s*vision|dv(?:\b|[^a-z])/i.test(combined);
+}
+
 function detectQuality(stream) {
     const name = (stream.name || '').toLowerCase();
     const desc = (stream.description || '').toLowerCase();
-    if (name.includes('4k') || name.includes('2160p') || desc.includes('2160p')) return '4k';
+    if (name.includes('4k') || name.includes('2160p') || desc.includes('2160p')) {
+        return isHDR(stream) ? '4k_hdr' : '4k';
+    }
     if (name.includes('1080p') || desc.includes('1080p')) return '1080p';
     if (name.includes('720p') || desc.includes('720p')) return '720p';
     if (name.includes('480p') || desc.includes('480p')) return '480p';
@@ -51,22 +58,18 @@ function matchesSource(stream, source) {
 }
 
 function scoreStream(stream, settings) {
-    const name = (stream.name || '').toLowerCase();
     const desc = (stream.description || '').toLowerCase();
-    const combined = name + ' ' + desc;
     let score = 0;
 
     const quality = detectQuality(stream);
     if (quality === settings.quality) score += 1000;
     else if (quality === settings.fallback) score += 500;
+    else if (quality === '4k_hdr') score += 450;
     else if (quality === '4k') score += 400;
     else if (quality === '1080p') score += 300;
     else if (quality === '720p') score += 200;
     else if (quality === '480p') score += 100;
     else score += 50; // unknown quality
-
-    // HDR bonus
-    if (/hdr|dolby\s*vision|dv/i.test(combined)) score += 50;
 
     // Seeder bonus (parsed from description like "👤 177")
     const seedMatch = desc.match(/👤\s*(\d+)/);
@@ -99,7 +102,7 @@ function pickBestStream(allStreams, settings) {
     return best;
 }
 
-const StreamsList = ({ className, video, type, onEpisodeSearch, ...props }) => {
+const StreamsList = ({ className, video, type, onEpisodeSearch, queryParams, ...props }) => {
     const { t } = useTranslation();
     const { core } = useServices();
     const platform = usePlatform();
@@ -188,6 +191,9 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, ...props }) => {
     React.useEffect(() => {
         if (autoPickTriggered.current) return;
         if (filteredStreams.length === 0) return;
+        // Don't auto-pick when user clicked "More Info" (info=1 query param).
+        // Auto-pick only fires when user clicked the poster/play action directly.
+        if (queryParams && queryParams.has('info')) return;
 
         const settings = getAutoPickSettings();
         if (!settings) return;
@@ -351,7 +357,8 @@ StreamsList.propTypes = {
     streams: PropTypes.arrayOf(PropTypes.object).isRequired,
     video: PropTypes.object,
     type: PropTypes.string,
-    onEpisodeSearch: PropTypes.func
+    onEpisodeSearch: PropTypes.func,
+    queryParams: PropTypes.instanceOf(URLSearchParams),
 };
 
 module.exports = StreamsList;

@@ -1,32 +1,5 @@
-.netflix-ui-badge {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    margin-bottom: 1.5rem;
-    padding: 0.6rem 1rem;
-    background: linear-gradient(135deg, rgba(229, 9, 20, 0.15) 0%, rgba(229, 9, 20, 0.05) 100%);
-    border: 1px solid rgba(229, 9, 20, 0.3);
-    border-radius: 0.5rem;
-
-    .badge-dot {
-        width: 0.5rem;
-        height: 0.5rem;
-        border-radius: 50%;
-        background-color: #e50914;
-        box-shadow: 0 0 6px rgba(229, 9, 20, 0.6);
-    }
-
-    .badge-text {
-        font-size: 0.8rem;
-        font-weight: 600;
-        color: rgba(255, 255, 255, 0.8);
-        letter-spacing: 0.02em;
-        text-transform: uppercase;
-    }
-}
-
-// --- Input + Test button side by side ---
-.input-with-button {
+// ─── Input row: flex row for input + button + status icon ───
+.input-row {
     display: flex;
     flex-direction: row;
     align-items: center;
@@ -37,74 +10,75 @@
 .text-input {
     flex: 1;
     min-width: 0;
-    height: 3rem;
-    padding: 0 1rem;
-    border-radius: 0.5rem;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    background-color: rgba(255, 255, 255, 0.06);
+    height: 2.8rem;
+    padding: 0 0.85rem;
+    border-radius: 0.4rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background-color: rgba(255, 255, 255, 0.05);
     color: var(--primary-foreground-color);
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     font-family: 'Courier New', monospace;
     outline: none;
     transition: border-color 0.2s ease, background-color 0.2s ease;
 
     &:focus {
-        border-color: #e50914;
-        background-color: rgba(255, 255, 255, 0.08);
+        border-color: #7b8fff;
+        background-color: rgba(255, 255, 255, 0.07);
     }
 
     &::placeholder {
-        color: rgba(255, 255, 255, 0.3);
+        color: rgba(255, 255, 255, 0.25);
+        font-family: inherit;
     }
 }
 
 .select-input {
     flex: 1;
     min-width: 0;
-    height: 3rem;
-    padding: 0 1rem;
-    border-radius: 0.5rem;
-    border: 1px solid rgba(255, 255, 255, 0.15);
-    background-color: rgba(255, 255, 255, 0.06);
+    height: 2.8rem;
+    padding: 0 0.85rem;
+    border-radius: 0.4rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background-color: rgba(255, 255, 255, 0.05);
     color: var(--primary-foreground-color);
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     outline: none;
     cursor: pointer;
     appearance: none;
     -webkit-appearance: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23999' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23666' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
     background-repeat: no-repeat;
-    background-position: right 1rem center;
+    background-position: right 0.85rem center;
     transition: border-color 0.2s ease;
 
     &:focus {
-        border-color: #e50914;
+        border-color: #7b8fff;
     }
 
     option {
-        background-color: #181818;
+        background-color: #1a1a1a;
         color: var(--primary-foreground-color);
     }
 }
 
-// --- Test button ---
-.test-btn {
+// ─── Action button (Test / Sync) ───
+.action-btn {
     flex: none;
-    height: 3rem;
-    padding: 0 1.2rem;
-    border-radius: 0.5rem;
-    border: 1px solid rgba(229, 9, 20, 0.4);
-    background-color: rgba(229, 9, 20, 0.15);
-    color: #e50914;
-    font-size: 0.85rem;
+    height: 2.8rem;
+    padding: 0 1rem;
+    border-radius: 0.4rem;
+    border: 1px solid rgba(123, 143, 255, 0.3);
+    background-color: rgba(123, 143, 255, 0.08);
+    color: #7b8fff;
+    font-size: 0.8rem;
     font-weight: 600;
     cursor: pointer;
     white-space: nowrap;
     transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
 
     &:hover {
-        background-color: #e50914;
-        border-color: #e50914;
+        background-color: #7b8fff;
+        border-color: #7b8fff;
         color: white;
     }
 
@@ -114,155 +88,314 @@
     }
 }
 
-// --- Test results ---
-.test-result-loading,
-.test-result-success,
-.test-result-error {
-    margin-top: 0.6rem;
-    padding: 0.6rem 0.75rem;
-    border-radius: 0.4rem;
-    font-size: 0.8rem;
-    line-height: 1.4;
-    width: 100%;
-}
-
-.test-result-loading {
-    background-color: rgba(255, 255, 255, 0.04);
-    border: 1px solid rgba(255, 255, 255, 0.1);
-    color: rgba(255, 255, 255, 0.6);
-}
-
-.test-result-success {
-    background-color: rgba(70, 211, 105, 0.08);
-    border: 1px solid rgba(70, 211, 105, 0.3);
-    color: #46d369;
-}
-
-.test-result-error {
-    background-color: rgba(229, 9, 20, 0.08);
-    border: 1px solid rgba(229, 9, 20, 0.3);
-    color: #e55;
-}
-
-.test-result-message {
-    display: flex;
+// ─── Status icon with tooltip ───
+.status-icon-wrap {
+    position: relative;
+    display: inline-flex;
     align-items: center;
-    gap: 0.4rem;
-    font-weight: 600;
-    margin-bottom: 0.2rem;
+    flex: none;
+    cursor: default;
 }
 
-.test-detail {
-    padding-left: 1.2rem;
-    color: rgba(255, 255, 255, 0.5);
-    font-size: 0.75rem;
-    font-family: 'Courier New', monospace;
-    line-height: 1.5;
-}
-
-.test-spinner {
+.status-spinner {
     display: inline-block;
-    width: 0.8rem;
-    height: 0.8rem;
-    border: 2px solid rgba(255, 255, 255, 0.2);
-    border-top-color: rgba(255, 255, 255, 0.7);
+    width: 0.9rem;
+    height: 0.9rem;
+    border: 2px solid rgba(255, 255, 255, 0.15);
+    border-top-color: #7b8fff;
     border-radius: 50%;
     animation: spin 0.6s linear infinite;
 }
 
-.test-check {
+.status-check {
     color: #46d369;
     font-weight: 700;
-    font-size: 0.9rem;
+    font-size: 1rem;
+    line-height: 1;
 }
 
-.test-x {
+.status-x {
     color: #e55;
     font-weight: 700;
-    font-size: 0.9rem;
+    font-size: 1rem;
+    line-height: 1;
+}
+
+.status-tooltip {
+    position: absolute;
+    bottom: calc(100% + 6px);
+    right: 0;
+    padding: 0.4rem 0.6rem;
+    background-color: #2a2a2a;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 0.3rem;
+    color: rgba(255, 255, 255, 0.85);
+    font-size: 0.72rem;
+    font-family: 'Courier New', monospace;
+    white-space: nowrap;
+    z-index: 100;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+    pointer-events: none;
+    animation: tooltip-in 0.12s ease-out;
+
+    &::after {
+        content: '';
+        position: absolute;
+        top: 100%;
+        right: 0.5rem;
+        border: 4px solid transparent;
+        border-top-color: #2a2a2a;
+    }
+}
+
+@keyframes tooltip-in {
+    from { opacity: 0; transform: translateY(3px); }
+    to { opacity: 1; transform: translateY(0); }
 }
 
 @keyframes spin {
     to { transform: rotate(360deg); }
 }
 
-// --- Toggle button ---
-.toggle-label {
-    flex: 1;
-    font-size: 0.85rem;
-    color: rgba(255, 255, 255, 0.5);
-    line-height: 1.4;
-}
-
-.toggle-btn-on,
-.toggle-btn-off {
+// ─── Toggle button ───
+.toggle-on,
+.toggle-off {
     flex: none;
-    height: 2.2rem;
-    min-width: 3.5rem;
-    padding: 0 0.8rem;
-    border-radius: 0.4rem;
+    height: 2rem;
+    min-width: 3.2rem;
+    padding: 0 0.7rem;
+    border-radius: 0.35rem;
     border: 1px solid;
-    font-size: 0.8rem;
+    font-size: 0.75rem;
     font-weight: 700;
     cursor: pointer;
-    letter-spacing: 0.05em;
+    letter-spacing: 0.04em;
     transition: all 0.15s ease;
 }
 
-.toggle-btn-on {
-    background-color: rgba(70, 211, 105, 0.15);
-    border-color: rgba(70, 211, 105, 0.4);
+.toggle-on {
+    background-color: rgba(70, 211, 105, 0.12);
+    border-color: rgba(70, 211, 105, 0.35);
     color: #46d369;
 
     &:hover {
-        background-color: rgba(70, 211, 105, 0.25);
+        background-color: rgba(70, 211, 105, 0.2);
     }
 }
 
-.toggle-btn-off {
-    background-color: rgba(255, 255, 255, 0.06);
-    border-color: rgba(255, 255, 255, 0.15);
-    color: rgba(255, 255, 255, 0.4);
+.toggle-off {
+    background-color: rgba(255, 255, 255, 0.04);
+    border-color: rgba(255, 255, 255, 0.12);
+    color: rgba(255, 255, 255, 0.35);
 
     &:hover {
-        border-color: rgba(255, 255, 255, 0.3);
-        color: rgba(255, 255, 255, 0.6);
+        border-color: rgba(255, 255, 255, 0.25);
+        color: rgba(255, 255, 255, 0.5);
     }
 }
 
-// --- Section divider ---
-.section-divider {
-    width: 100%;
-    padding: 0.6rem 0;
-    margin-top: 1rem;
-    margin-bottom: 0.5rem;
-    font-size: 0.7rem;
-    font-weight: 600;
-    color: rgba(255, 255, 255, 0.35);
-    text-transform: uppercase;
-    letter-spacing: 0.08em;
-    border-top: 1px solid rgba(255, 255, 255, 0.08);
+// ─── Option description text ───
+.option-desc {
+    flex: 1;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.4);
+    line-height: 1.4;
 }
 
-// --- Saved toast ---
+// ─── Hint text below input ───
+.hint {
+    margin-top: 0.3rem;
+    font-size: 0.7rem;
+    color: rgba(123, 143, 255, 0.6);
+}
+
+// ─── Section divider ───
+.section-divider {
+    width: 100%;
+    padding: 0.5rem 0;
+    margin-top: 1.2rem;
+    margin-bottom: 0.3rem;
+    font-size: 0.65rem;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.3);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    border-top: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+// ─── Saved toast ───
 .saved-toast {
     position: fixed;
     bottom: 2rem;
     right: 2rem;
-    padding: 0.6rem 1.2rem;
+    padding: 0.5rem 1rem;
     background-color: #46d369;
     color: #141414;
-    font-size: 0.85rem;
+    font-size: 0.8rem;
     font-weight: 600;
-    border-radius: 0.4rem;
+    border-radius: 0.35rem;
     z-index: 9999;
     animation: fadeInOut 1.5s ease forwards;
-    box-shadow: 0 4px 16px rgba(70, 211, 105, 0.3);
+    box-shadow: 0 4px 12px rgba(70, 211, 105, 0.3);
 }
 
 @keyframes fadeInOut {
-    0% { opacity: 0; transform: translateY(10px); }
+    0% { opacity: 0; transform: translateY(8px); }
     15% { opacity: 1; transform: translateY(0); }
     80% { opacity: 1; }
     100% { opacity: 0; }
+}
+
+// ─── Trakt OAuth Section ───
+.trakt-auth-section {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: 100%;
+}
+
+.connect-btn {
+    height: 2.8rem;
+    padding: 0 1.5rem;
+    border-radius: 0.4rem;
+    border: 1px solid rgba(237, 29, 36, 0.4);
+    background: linear-gradient(135deg, rgba(237, 29, 36, 0.15) 0%, rgba(237, 29, 36, 0.08) 100%);
+    color: #ed1d24;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    letter-spacing: 0.02em;
+    align-self: flex-start;
+
+    &:hover {
+        background: linear-gradient(135deg, rgba(237, 29, 36, 0.25) 0%, rgba(237, 29, 36, 0.15) 100%);
+        border-color: rgba(237, 29, 36, 0.6);
+        box-shadow: 0 2px 12px rgba(237, 29, 36, 0.2);
+    }
+}
+
+.disconnect-btn {
+    height: 2.2rem;
+    padding: 0 1rem;
+    border-radius: 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    background-color: rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.4);
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.15s ease;
+    align-self: flex-start;
+
+    &:hover {
+        border-color: rgba(229, 85, 85, 0.4);
+        color: #e55;
+        background-color: rgba(229, 85, 85, 0.08);
+    }
+}
+
+.cancel-btn {
+    height: 2.2rem;
+    padding: 0 1rem;
+    border-radius: 0.35rem;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    background-color: rgba(255, 255, 255, 0.04);
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    align-self: flex-start;
+    transition: all 0.15s ease;
+
+    &:hover {
+        border-color: rgba(255, 255, 255, 0.25);
+        color: rgba(255, 255, 255, 0.7);
+    }
+}
+
+// ─── Device Code Display ───
+.device-code-box {
+    padding: 1rem 1.2rem;
+    background-color: rgba(255, 255, 255, 0.03);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.5rem;
+    text-align: center;
+}
+
+.device-code-instruction {
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.5);
+    margin-bottom: 0.75rem;
+    line-height: 1.5;
+}
+
+.device-code-display {
+    font-size: 2rem;
+    font-weight: 700;
+    font-family: 'Courier New', monospace;
+    color: #7b8fff;
+    letter-spacing: 0.3em;
+    padding: 0.5rem 1rem;
+    background-color: rgba(123, 143, 255, 0.06);
+    border: 1px dashed rgba(123, 143, 255, 0.25);
+    border-radius: 0.4rem;
+    cursor: pointer;
+    display: inline-block;
+    transition: all 0.15s ease;
+    user-select: all;
+
+    &:hover {
+        background-color: rgba(123, 143, 255, 0.12);
+        border-color: rgba(123, 143, 255, 0.4);
+        box-shadow: 0 0 15px rgba(123, 143, 255, 0.15);
+    }
+}
+
+.device-code-hint {
+    margin-top: 0.5rem;
+    font-size: 0.65rem;
+    color: rgba(255, 255, 255, 0.25);
+}
+
+.auth-link {
+    color: #7b8fff;
+    text-decoration: none;
+    font-weight: 600;
+
+    &:hover {
+        text-decoration: underline;
+    }
+}
+
+.auth-waiting {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.8rem;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.auth-error {
+    font-size: 0.78rem;
+    color: #e55;
+    padding: 0.4rem 0.6rem;
+    background-color: rgba(229, 85, 85, 0.08);
+    border: 1px solid rgba(229, 85, 85, 0.2);
+    border-radius: 0.3rem;
+}
+
+// ─── Connected State ───
+.connected-info {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.7);
+}
+
+.connected-username {
+    strong {
+        color: #46d369;
+    }
 }

@@ -10,6 +10,38 @@ const styles = require('./styles');
 const { t } = require('i18next');
 const { default: Stepper } = require('./Stepper');
 
+const SYNC_STATUS = {
+    IDLE: 'idle',
+    DOWNLOADING: 'downloading',
+    EXTRACTING: 'extracting',
+    TRANSCRIBING: 'transcribing',
+    ALIGNING: 'aligning',
+    DONE: 'done',
+    ERROR: 'error',
+};
+
+const getSyncLabel = (syncStatus, syncProgress, syncError, syncResult) => {
+    switch (syncStatus) {
+        case SYNC_STATUS.DOWNLOADING:
+            return `Downloading model${syncProgress > 0 ? ` ${syncProgress}%` : '...'}`;
+        case SYNC_STATUS.EXTRACTING:
+            return 'Extracting audio...';
+        case SYNC_STATUS.TRANSCRIBING:
+            return 'Transcribing...';
+        case SYNC_STATUS.ALIGNING:
+            return 'Aligning...';
+        case SYNC_STATUS.DONE: {
+            const delay = syncResult?.offset || 0;
+            const sign = delay >= 0 ? '+' : '';
+            return `Subtitles synced (${sign}${(delay / 1000).toFixed(1)}s offset applied)`;
+        }
+        case SYNC_STATUS.ERROR:
+            return syncError || 'Sync failed';
+        default:
+            return 'Auto Sync';
+    }
+};
+
 const ORIGIN_PRIORITIES = {
     'LOCAL': 3,
     'EMBEDDED': 2,
@@ -237,6 +269,34 @@ const SubtitlesMenu = React.memo((props) => {
                         disabled={(props.selectedSubtitlesTrackId && props.subtitlesOffset === null) || (props.selectedExtraSubtitlesTrackId && props.extraSubtitlesOffset === null)}
                         onChange={onSubtitlesOffsetChanged}
                     />
+                    <div className={styles['auto-sync-container']}>
+                        {
+                            props.syncStatus !== SYNC_STATUS.IDLE && props.syncStatus !== SYNC_STATUS.DONE && props.syncStatus !== SYNC_STATUS.ERROR ?
+                                <Button
+                                    className={classnames(styles['sync-button'], styles['sync-cancel'])}
+                                    onClick={props.onCancelSync}
+                                    disabled={!props.selectedExtraSubtitlesTrackId}
+                                >
+                                    <div className={styles['sync-label']}>
+                                        {getSyncLabel(props.syncStatus, props.syncProgress, props.syncError, props.syncResult)}
+                                    </div>
+                                    <div className={styles['sync-cancel-label']}>{t('BUTTON_CANCEL')}</div>
+                                </Button>
+                                :
+                                <Button
+                                    className={classnames(styles['sync-button'], {
+                                        [styles['sync-done']]: props.syncStatus === SYNC_STATUS.DONE,
+                                        [styles['sync-error']]: props.syncStatus === SYNC_STATUS.ERROR,
+                                    })}
+                                    onClick={props.onStartSync}
+                                    disabled={!props.selectedExtraSubtitlesTrackId}
+                                >
+                                    <div className={styles['sync-label']}>
+                                        {getSyncLabel(props.syncStatus, props.syncProgress, props.syncError, props.syncResult)}
+                                    </div>
+                                </Button>
+                        }
+                    </div>
                 </div>
             </div>
         </div>
@@ -271,7 +331,13 @@ SubtitlesMenu.propTypes = {
     onSubtitlesSizeChanged: PropTypes.func,
     onExtraSubtitlesOffsetChanged: PropTypes.func,
     onExtraSubtitlesDelayChanged: PropTypes.func,
-    onExtraSubtitlesSizeChanged: PropTypes.func
+    onExtraSubtitlesSizeChanged: PropTypes.func,
+    syncStatus: PropTypes.string,
+    syncProgress: PropTypes.number,
+    syncError: PropTypes.string,
+    syncResult: PropTypes.object,
+    onStartSync: PropTypes.func,
+    onCancelSync: PropTypes.func
 };
 
 module.exports = SubtitlesMenu;

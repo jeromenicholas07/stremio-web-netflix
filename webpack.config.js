@@ -38,11 +38,13 @@ module.exports = (env, argv) => ({
     devtool: argv.mode === 'production' ? 'source-map' : 'eval-source-map',
     entry: {
         main: './src/index.js',
-        worker: './node_modules/@stremio/stremio-core-web/worker.js'
+        worker: './node_modules/@stremio/stremio-core-web/worker.js',
+        whisperWorker: './src/workers/whisperWorker.js'
     },
     output: {
         path: path.join(__dirname, 'build'),
         filename: `${COMMIT_HASH}/scripts/[name].js`,
+        publicPath: '/',
         clean: true,
     },
     module: {
@@ -181,6 +183,12 @@ module.exports = (env, argv) => ({
             'stremio-router': path.resolve(__dirname, 'src', 'router')
         }
     },
+    ignoreWarnings: [
+        {
+            module: /@huggingface\/transformers/,
+            message: /Critical dependency/,
+        },
+    ],
     devServer: {
         host: '0.0.0.0',
         port: 8080,
@@ -189,6 +197,31 @@ module.exports = (env, argv) => ({
         server: 'http',
         liveReload: false,
         allowedHosts: 'all',
+        client: false,
+        proxy: [
+            {
+                context: ['/trakt-api'],
+                target: 'https://api.trakt.tv',
+                pathRewrite: { '^/trakt-api': '' },
+                changeOrigin: true,
+                secure: true,
+                headers: {
+                    'User-Agent': 'Stremio-Web/5.0',
+                },
+                onProxyReq: (proxyReq) => {
+                    // Remove headers that trigger Cloudflare challenge
+                    proxyReq.removeHeader('origin');
+                    proxyReq.removeHeader('referer');
+                },
+            },
+            {
+                context: ['/streaming-server'],
+                target: 'http://127.0.0.1:11470',
+                pathRewrite: { '^/streaming-server': '' },
+                changeOrigin: true,
+                secure: false,
+            },
+        ],
     },
     optimization: {
         minimize: true,

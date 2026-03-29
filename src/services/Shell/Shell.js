@@ -59,9 +59,10 @@ function Shell() {
             active = true;
             error = null;
             starting = false;
+            console.log('[Shell] transport initialized successfully, active:', active);
             onStateChanged();
         } catch (e) {
-            console.error(e);
+            console.error('[Shell] transport init FAILED:', e);
             active = false;
             error = new Error('Failed to initialize shell transport', { cause: e });
             starting = false;

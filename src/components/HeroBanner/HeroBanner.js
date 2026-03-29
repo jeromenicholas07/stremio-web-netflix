@@ -65,6 +65,33 @@ const HeroBanner = React.memo(({ items }) => {
         return items.filter((item) => item.background || item.poster).slice(0, 10);
     }, [items]);
 
+    // Fetch logos from TMDB for items that don't already have one
+    const [logoCache, setLogoCache] = React.useState({});
+    React.useEffect(() => {
+        if (featuredItems.length === 0) return;
+        let cancelled = false;
+        const fetchLogos = async () => {
+            const updates = {};
+            const promises = featuredItems.map(async (item) => {
+                if (item.logo || logoCache[item.id]) return; // Already has logo
+                try {
+                    const resolved = await tmdbService.resolveTmdbId(item.id, item.type);
+                    if (!resolved || cancelled) return;
+                    const logoUrl = await tmdbService.getLogoUrl(resolved.tmdbId, resolved.mediaType);
+                    if (logoUrl && !cancelled) {
+                        updates[item.id] = logoUrl;
+                    }
+                } catch { /* silent */ }
+            });
+            await Promise.all(promises);
+            if (!cancelled && Object.keys(updates).length > 0) {
+                setLogoCache((prev) => ({ ...prev, ...updates }));
+            }
+        };
+        fetchLogos();
+        return () => { cancelled = true; };
+    }, [featuredItems]);
+
     // When a promoted item arrives, jump to index 0 (where it's prepended)
     const promotedItem = trailerCtx ? trailerCtx.promotedItem : null;
     React.useEffect(() => {
@@ -253,10 +280,13 @@ const HeroBanner = React.memo(({ items }) => {
 
             <div className={styles['hero-content']}>
                 {
-                    typeof item.logo === 'string' && item.logo.length > 0 ?
-                        <Image className={styles['hero-logo']} src={item.logo} alt={item.name || ''} />
-                        :
-                        <h1 className={styles['hero-title']}>{item.name}</h1>
+                    (() => {
+                        const logoUrl = item.logo || logoCache[item.id];
+                        return typeof logoUrl === 'string' && logoUrl.length > 0 ?
+                            <Image className={styles['hero-logo']} src={logoUrl} alt={item.name || ''} />
+                            :
+                            <h1 className={styles['hero-title']}>{item.name}</h1>;
+                    })()
                 }
                 {
                     typeof item.description === 'string' && item.description.length > 0 ?

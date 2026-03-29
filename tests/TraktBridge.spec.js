@@ -74,6 +74,7 @@ function makeTraktShow(imdbId, tmdbId, title, year = 2020) {
     };
 }
 
+// /sync/watched format (cached aggregate — used for _watchedIds dismissed set)
 function makeWatchedMovie(imdbId, tmdbId, title, watchedAt = '2026-03-28T10:00:00.000Z') {
     const m = makeTraktMovie(imdbId, tmdbId, title);
     return { ...m, plays: 1, last_watched_at: watchedAt };
@@ -82,6 +83,17 @@ function makeWatchedMovie(imdbId, tmdbId, title, watchedAt = '2026-03-28T10:00:0
 function makeWatchedShow(imdbId, tmdbId, title, watchedAt = '2026-03-28T10:00:00.000Z') {
     const s = makeTraktShow(imdbId, tmdbId, title);
     return { ...s, plays: 1, last_watched_at: watchedAt };
+}
+
+// /sync/history format (real-time — used for _watchedItemsData)
+function makeHistoryMovie(imdbId, tmdbId, title, watchedAt = '2026-03-28T10:00:00.000Z') {
+    const m = makeTraktMovie(imdbId, tmdbId, title);
+    return { ...m, watched_at: watchedAt, action: 'watch', type: 'movie' };
+}
+
+function makeHistoryShow(imdbId, tmdbId, title, watchedAt = '2026-03-28T10:00:00.000Z') {
+    const s = makeTraktShow(imdbId, tmdbId, title);
+    return { ...s, watched_at: watchedAt, action: 'watch', type: 'episode' };
 }
 
 function makeRatingMovie(imdbId, tmdbId, title, rating = 8) {
@@ -109,18 +121,30 @@ function makeNIEntry(imdbId, tmdbId, title, isShow = false, listedAt = '2026-03-
     return { ...base, listed_at: listedAt };
 }
 
-// Builds a complete mock API response map for _doSync
+// Builds a complete mock API response map for _doSync.
+// historyMovies/historyShows default to the same items as watchedMovies/watchedShows
+// converted to history format, so existing tests work without changes.
 function buildSyncResponses({
     ratedMovies = [], ratedShows = [],
     watchedMovies = [], watchedShows = [],
+    historyMovies = null, historyShows = null,
     watchlistMovies = [], watchlistShows = [],
     niItems = [], lists = [],
 } = {}) {
+    // Auto-convert watched format to history format if not explicitly provided
+    const hMovies = historyMovies !== null ? historyMovies : watchedMovies.map((w) => ({
+        ...w, watched_at: w.last_watched_at, action: 'watch', type: 'movie',
+    }));
+    const hShows = historyShows !== null ? historyShows : watchedShows.map((w) => ({
+        ...w, watched_at: w.last_watched_at, action: 'watch', type: 'episode',
+    }));
     return {
         '/sync/ratings/movies': ratedMovies,
         '/sync/ratings/shows': ratedShows,
         '/sync/watched/movies': watchedMovies,
         '/sync/watched/shows': watchedShows,
+        '/sync/history/movies': hMovies,
+        '/sync/history/shows': hShows,
         '/sync/watchlist/movies': watchlistMovies,
         '/sync/watchlist/shows': watchlistShows,
         '/users/me/lists/not-interested/items': niItems,
@@ -131,7 +155,9 @@ function buildSyncResponses({
 // Set up fetch mock to return specific responses per path
 function mockFetch(responseMap) {
     fetchHandler = (url, opts) => {
-        const path = url.replace(/^.*\/trakt-api/, '').replace(/^https:\/\/api\.trakt\.tv/, '');
+        const fullPath = url.replace(/^.*\/trakt-api/, '').replace(/^https:\/\/api\.trakt\.tv/, '');
+        // Strip query params for matching (e.g. /sync/history/movies?limit=500 → /sync/history/movies)
+        const path = fullPath.split('?')[0];
         if (responseMap[path] !== undefined) {
             const data = responseMap[path];
             if (data === 'FAIL') return Promise.resolve(make404Response());
@@ -160,6 +186,7 @@ function resetBridge() {
     traktBridge._notInterestedItemsData = [];
     traktBridge._ratedImdbIds = new Set();
     traktBridge._ratedTmdbIds = new Set();
+    traktBridge._pendingWatchedItems = new Map();
     traktBridge._devicePollTimer = null;
     traktBridge._devicePollAbort = null;
     clearTimeout(traktBridge._refreshTimer_watchlist);
@@ -661,6 +688,83 @@ describe('markWatched', () => {
             expect(result.some((i) => i.id === 'tt0903747' && i.type === 'series')).toBe(true);
         });
     });
+
+    describe('rollback on API failure', () => {
+        test('item removed from _watchedItemsData if API fails', async () => {
+            mockFetch({ '/sync/history': 'FAIL' });
+            await traktBridge.markWatched('tt0110912', 'movie', 'Pulp Fiction');
+            expect(traktBridge._watchedItemsData.some((i) => i.id === 'tt0110912')).toBe(false);
+            expect(traktBridge.getWatchedNotRated().some((i) => i.id === 'tt0110912')).toBe(false);
+        });
+
+        test('notify called on rollback so UI updates', async () => {
+            mockFetch({ '/sync/history': 'FAIL' });
+            const fn = jest.fn();
+            traktBridge.onChange(fn);
+            await traktBridge.markWatched('tt0110912', 'movie', 'Pulp Fiction');
+            // Called at least twice: once for optimistic add, once for rollback
+            expect(fn.mock.calls.length).toBeGreaterThanOrEqual(2);
+        });
+
+        test('pending item cleared on API failure', async () => {
+            mockFetch({ '/sync/history': 'FAIL' });
+            await traktBridge.markWatched('tt0110912', 'movie', 'Pulp Fiction');
+            expect(traktBridge._pendingWatchedItems.has('tt0110912')).toBe(false);
+        });
+    });
+
+    describe('pending items survive refresh', () => {
+        test('item stays in Watched (Not Rated) after page refresh if API not yet propagated', async () => {
+            await traktBridge.markWatched('tt0110912', 'movie', 'Pulp Fiction');
+            // Page refresh where API does NOT yet return Pulp Fiction
+            await simulatePageRefresh(buildSyncResponses({
+                watchedMovies: [], // API hasn't propagated yet
+                ratedMovies: [],
+            }));
+            // Pending item should survive the refresh
+            const unrated = traktBridge.getWatchedNotRated();
+            expect(unrated.some((i) => i.id === 'tt0110912')).toBe(true);
+        });
+
+        test('pending item cleared once API confirms it', async () => {
+            await traktBridge.markWatched('tt0110912', 'movie', 'Pulp Fiction');
+            expect(traktBridge._pendingWatchedItems.has('tt0110912')).toBe(true);
+            // Refresh where API now returns the item
+            await simulatePageRefresh(buildSyncResponses({
+                watchedMovies: [makeWatchedMovie('tt0110912', 680, 'Pulp Fiction')],
+                ratedMovies: [],
+            }));
+            expect(traktBridge._pendingWatchedItems.has('tt0110912')).toBe(false);
+            // Item still shows (now from API, not pending)
+            expect(traktBridge.getWatchedNotRated().some((i) => i.id === 'tt0110912')).toBe(true);
+        });
+    });
+
+    describe('history vs watched API propagation (regression)', () => {
+        test('item in /sync/history but NOT in /sync/watched still shows in Watched (Not Rated)', async () => {
+            // Simulates Trakt API propagation delay: POST /sync/history succeeds,
+            // /sync/history/movies returns the item, but /sync/watched/movies does NOT yet.
+            await simulatePageRefresh(buildSyncResponses({
+                watchedMovies: [], // /sync/watched hasn't propagated
+                historyMovies: [makeHistoryMovie('tt1130884', 27205, 'Shutter Island')],
+                ratedMovies: [],
+            }));
+            const unrated = traktBridge.getWatchedNotRated();
+            expect(unrated.some((i) => i.id === 'tt1130884')).toBe(true);
+            expect(unrated.find((i) => i.id === 'tt1130884').name).toBe('Shutter Island');
+        });
+
+        test('item in both /sync/history and /sync/watched is not duplicated', async () => {
+            await simulatePageRefresh(buildSyncResponses({
+                watchedMovies: [makeWatchedMovie('tt1130884', 27205, 'Shutter Island')],
+                historyMovies: [makeHistoryMovie('tt1130884', 27205, 'Shutter Island')],
+                ratedMovies: [],
+            }));
+            const unrated = traktBridge.getWatchedNotRated();
+            const count = unrated.filter((i) => i.id === 'tt1130884').length;
+            expect(count).toBe(1);
+        });
+    });
 });
 
 // ─── 10. rateItem ───
@@ -724,6 +828,31 @@ describe('rateItem', () => {
         }));
         expect(traktBridge.getWatchedNotRated().some((i) => i.id === 'tt0111161')).toBe(false);
         expect(traktBridge._ratedImdbIds.has('tt0111161')).toBe(true);
+    });
+
+    test('rollback on API failure — item reappears in Watched (Not Rated)', async () => {
+        mockFetch({ '/sync/ratings': 'FAIL' });
+        await traktBridge.rateItem('tt0111161', 'movie', 4);
+        // Rating failed — item should NOT be in rated sets
+        expect(traktBridge._ratedIds.has('tt0111161')).toBe(false);
+        expect(traktBridge._ratedImdbIds.has('tt0111161')).toBe(false);
+        // Item should still be in Watched (Not Rated)
+        expect(traktBridge.getWatchedNotRated().some((i) => i.id === 'tt0111161')).toBe(true);
+    });
+
+    test('rollback on API failure — item not in dismissed', async () => {
+        mockFetch({ '/sync/ratings': 'FAIL' });
+        await traktBridge.rateItem('tt0111161', 'movie', 4);
+        // Since rating failed, item should not be dismissed via rating
+        expect(traktBridge.isItemDismissed('tt0111161')).toBe(false);
+    });
+
+    test('rollback on API failure with TMDB ID', async () => {
+        await traktBridge.markWatched('tmdb:550', 'movie', 'Fight Club');
+        mockFetch({ '/sync/ratings': 'FAIL' });
+        await traktBridge.rateItem('tmdb:550', 'movie', 4);
+        expect(traktBridge._ratedTmdbIds.has(550)).toBe(false);
+        expect(traktBridge.getWatchedNotRated().some((i) => i.id === 'tmdb:550')).toBe(true);
     });
 });
 
@@ -884,23 +1013,23 @@ describe('_doSync / page refresh', () => {
 // ─── 14. _refreshWatchedData ───
 
 describe('_refreshWatchedData', () => {
-    test('updates _watchedItemsData from API', async () => {
+    test('updates _watchedItemsData from history API', async () => {
         mockFetch({
-            '/sync/watched/movies': [makeWatchedMovie('tt0001', 100, 'MovieA')],
-            '/sync/watched/shows': [makeWatchedShow('tt0002', 200, 'ShowA')],
+            '/sync/history/movies': [makeHistoryMovie('tt0001', 100, 'MovieA')],
+            '/sync/history/shows': [makeHistoryShow('tt0002', 200, 'ShowA')],
             '/sync/ratings/movies': [],
             '/sync/ratings/shows': [],
         });
         await traktBridge._refreshWatchedData();
         expect(traktBridge._watchedItemsData).toHaveLength(2);
-        expect(traktBridge._watchedIds.has('tt0001')).toBe(true);
-        expect(traktBridge._watchedIds.has('tt0002')).toBe(true);
+        expect(traktBridge._watchedItemsData.some((i) => i.id === 'tt0001')).toBe(true);
+        expect(traktBridge._watchedItemsData.some((i) => i.id === 'tt0002')).toBe(true);
     });
 
     test('updates rated IDs from API', async () => {
         mockFetch({
-            '/sync/watched/movies': [],
-            '/sync/watched/shows': [],
+            '/sync/history/movies': [],
+            '/sync/history/shows': [],
             '/sync/ratings/movies': [makeRatingMovie('tt0001', 100, 'RatedA')],
             '/sync/ratings/shows': [makeRatingShow('tt0002', 200, 'RatedB')],
         });
@@ -912,9 +1041,11 @@ describe('_refreshWatchedData', () => {
     test('rebuilds dismissed and notifies', async () => {
         const fn = jest.fn();
         traktBridge.onChange(fn);
+        // Add item to _watchedIds first so it shows in dismissed
+        traktBridge._watchedIds.add('tt0001');
         mockFetch({
-            '/sync/watched/movies': [makeWatchedMovie('tt0001', 100, 'A')],
-            '/sync/watched/shows': [],
+            '/sync/history/movies': [makeHistoryMovie('tt0001', 100, 'A')],
+            '/sync/history/shows': [],
             '/sync/ratings/movies': [],
             '/sync/ratings/shows': [],
         });

@@ -1,32 +1,11 @@
-import React, { forwardRef, useState, useCallback, useEffect } from 'react';
+import React, { forwardRef, useState, useCallback, useEffect, useRef } from 'react';
 import { Section, Option } from '../components';
 import styles from './NetflixUI.less';
 
-const { useToast, useProfile } = require('stremio/common');
+const { useToast } = require('stremio/common');
+const traktBridge = require('stremio/services/TraktBridge');
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
-const TRAKT_API = 'https://api.trakt.tv';
-
-async function traktFetch(path: string, clientId: string, token: string, options: any = {}) {
-    const res = await fetch(`${TRAKT_API}${path}`, {
-        ...options,
-        headers: {
-            'Content-Type': 'application/json',
-            'trakt-api-version': '2',
-            'trakt-api-key': clientId,
-            'Authorization': `Bearer ${token}`,
-            ...options.headers,
-        },
-    });
-    if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new Error(`Trakt ${res.status}: ${text.slice(0, 200)}`);
-    }
-    if (res.status === 204) return {};
-    const ct = res.headers.get('content-type') || '';
-    if (ct.includes('json')) return res.json();
-    return {};
-}
 
 function getSetting(key: string, fallback: string): string {
     try { return localStorage.getItem(key) || fallback; }
@@ -64,6 +43,7 @@ const REC_SOURCES = [
 ];
 
 const QUALITY_OPTIONS = [
+    { value: '4k_hdr', label: '4K HDR (2160p)' },
     { value: '4k', label: '4K (2160p)' },
     { value: '1080p', label: '1080p' },
     { value: '720p', label: '720p' },
@@ -79,14 +59,44 @@ const SOURCE_OPTIONS = [
     { value: 'any', label: 'Any Source' },
 ];
 
-type TestResult = {
-    status: 'idle' | 'loading' | 'success' | 'error';
-    message: string;
-    details?: string[];
+type TestStatus = 'idle' | 'loading' | 'success' | 'error';
+
+// ─── Inline status icon with tooltip on hover ───
+const StatusIcon = ({ status, tooltip }: { status: TestStatus; tooltip: string }) => {
+    const [showTip, setShowTip] = useState(false);
+    const tipRef = useRef<HTMLDivElement>(null);
+
+    if (status === 'idle') return null;
+
+    return (
+        <span
+            className={styles['status-icon-wrap']}
+            onMouseEnter={() => setShowTip(true)}
+            onMouseLeave={() => setShowTip(false)}
+        >
+            {status === 'loading' && <span className={styles['status-spinner']} />}
+            {status === 'success' && <span className={styles['status-check']}>&#10003;</span>}
+            {status === 'error' && <span className={styles['status-x']}>&#10007;</span>}
+            {showTip && tooltip && (
+                <div ref={tipRef} className={styles['status-tooltip']}>
+                    {tooltip}
+                </div>
+            )}
+        </span>
+    );
 };
 
-const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
+// ─── Trakt Device Auth States ───
+type TraktAuthState =
+    | { phase: 'disconnected' }
+    | { phase: 'requesting' } // Getting device code
+    | { phase: 'waiting'; userCode: string; verificationUrl: string } // Waiting for user
+    | { phase: 'connected'; username: string };
+
+const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     const toast = useToast();
+
+    // ─── State ───
     const [tmdbKey, setTmdbKey] = useState(() => getSetting('tmdb_api_key', 'b06102636e7efd95cfc1676d0d78c70a'));
     const [trailerSource, setTrailerSource] = useState(() => getSetting('netflix_ui_trailer_source', 'tmdb'));
     const [trailerLang, setTrailerLang] = useState(() => getSetting('netflix_ui_trailer_lang', 'en'));
@@ -97,151 +107,127 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
     const [autoPickSource, setAutoPickSource] = useState(() => getSetting('netflix_ui_autopick_source', 'realdebrid'));
     const [saved, setSaved] = useState(false);
 
-    // Trakt integration state
-    const profile = useProfile();
-    const stremioTraktToken = profile?.auth?.user?.trakt?.access_token || '';
-    const [traktClientId, setTraktClientId] = useState(() => getSetting('trakt_client_id', '67bffdb0ebe7ee9ffda2192bf2a463d7a9f36da83325fd94e04552052ad7372c'));
-    const [traktToken, setTraktToken] = useState(() => getSetting('trakt_access_token', ''));
-    const [traktNotInterestedSlug, setTraktNotInterestedSlug] = useState(() => getSetting('trakt_not_interested_slug', ''));
+    // Trakt auth state
+    const [authState, setAuthState] = useState<TraktAuthState>(() => {
+        if (traktBridge.isConnected()) {
+            return { phase: 'connected', username: traktBridge.getUsername() || 'connected' };
+        }
+        return { phase: 'disconnected' };
+    });
+    const [authError, setAuthError] = useState('');
 
-    // The effective token: manual override takes priority, then Stremio's built-in token
-    const effectiveTraktToken = traktToken || stremioTraktToken;
-    const [traktLists, setTraktLists] = useState<any[]>([]);
-    const [traktTest, setTraktTest] = useState<TestResult>({ status: 'idle', message: '' });
-    const [traktSyncResult, setTraktSyncResult] = useState<TestResult>({ status: 'idle', message: '' });
-    const [traktRateTest, setTraktRateTest] = useState<TestResult>({ status: 'idle', message: '' });
+    // Trakt client credentials
+    const [traktClientId, setTraktClientId] = useState(() => traktBridge.getClientId());
+    const [traktClientSecret, setTraktClientSecret] = useState(() => traktBridge.getClientSecret());
 
-    // Test results
-    const [apiTest, setApiTest] = useState<TestResult>({ status: 'idle', message: '' });
-    const [trailerTest, setTrailerTest] = useState<TestResult>({ status: 'idle', message: '' });
-    const [recTest, setRecTest] = useState<TestResult>({ status: 'idle', message: '' });
+    // Sync status
+    const [syncStatus, setSyncStatus] = useState<TestStatus>('idle');
+    const [syncTip, setSyncTip] = useState('');
+
+    // TMDB test status
+    const [tmdbStatus, setTmdbStatus] = useState<TestStatus>('idle');
+    const [tmdbTip, setTmdbTip] = useState('');
+    const [trailerStatus, setTrailerStatus] = useState<TestStatus>('idle');
+    const [trailerTip, setTrailerTip] = useState('');
+    const [recStatus, setRecStatus] = useState<TestStatus>('idle');
+    const [recTip, setRecTip] = useState('');
 
     const flashSaved = useCallback(() => {
         setSaved(true);
         setTimeout(() => setSaved(false), 1500);
     }, []);
 
-    // ─── Trakt handlers ───
+    // Verify stored token on mount
+    useEffect(() => {
+        if (traktBridge.isConnected() && authState.phase === 'connected') {
+            traktBridge.testConnection().then((result) => {
+                if (result.ok && result.user?.username) {
+                    setAuthState({ phase: 'connected', username: result.user.username });
+                } else if (!result.ok && result.message?.includes('expired')) {
+                    setAuthState({ phase: 'disconnected' });
+                }
+            });
+        }
+    }, []);
+
+    // ─── Trakt OAuth: Device Code Flow ───
+    const startTraktAuth = useCallback(async () => {
+        setAuthError('');
+        setAuthState({ phase: 'requesting' });
+
+        try {
+            const deviceData = await traktBridge.startDeviceAuth();
+            // deviceData: { device_code, user_code, verification_url, expires_in, interval }
+
+            setAuthState({
+                phase: 'waiting',
+                userCode: deviceData.user_code,
+                verificationUrl: deviceData.verification_url,
+            });
+
+            // Open Trakt activation page in new tab
+            window.open(deviceData.verification_url, '_blank');
+
+            // Start polling
+            await traktBridge.pollDeviceAuth(
+                deviceData.device_code,
+                deviceData.interval,
+                deviceData.expires_in,
+                (status: string) => {
+                    if (status === 'success') {
+                        // Fetch username
+                        traktBridge.testConnection().then((result) => {
+                            const username = result.user?.username || 'connected';
+                            setAuthState({ phase: 'connected', username });
+                        });
+                    }
+                }
+            );
+
+            // If we get here, auth succeeded
+            const result = await traktBridge.testConnection();
+            const username = result.user?.username || 'connected';
+            setAuthState({ phase: 'connected', username });
+
+            // Auto-sync after connecting
+            try { await traktBridge.syncAll(true); } catch { /* */ }
+
+        } catch (err: any) {
+            setAuthError(err.message);
+            setAuthState({ phase: 'disconnected' });
+        }
+    }, []);
+
+    const cancelTraktAuth = useCallback(() => {
+        traktBridge.cancelDevicePoll();
+        setAuthState({ phase: 'disconnected' });
+        setAuthError('');
+    }, []);
+
+    const disconnectTrakt = useCallback(() => {
+        traktBridge.disconnect();
+        setAuthState({ phase: 'disconnected' });
+        setAuthError('');
+        setSyncStatus('idle');
+        setSyncTip('');
+    }, []);
+
+    // ─── Trakt Client Credentials ───
     const onTraktClientIdChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value.trim();
         setTraktClientId(val);
-        setSetting('trakt_client_id', val);
+        traktBridge.setClientId(val);
         flashSaved();
     }, []);
 
-    const onTraktTokenChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    const onTraktClientSecretChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value.trim();
-        setTraktToken(val);
-        setSetting('trakt_access_token', val);
+        setTraktClientSecret(val);
+        traktBridge.setClientSecret(val);
         flashSaved();
     }, []);
 
-    const onTraktNotInterestedSlugChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-        const val = e.target.value;
-        setTraktNotInterestedSlug(val);
-        setSetting('trakt_not_interested_slug', val);
-        flashSaved();
-    }, []);
-
-    const testTraktConnection = useCallback(async () => {
-        setTraktTest({ status: 'loading', message: 'Testing Trakt connection...' });
-        try {
-            const data: any = await traktFetch('/users/settings', traktClientId, effectiveTraktToken);
-            const user = data?.user;
-            setTraktTest({
-                status: 'success',
-                message: `Connected as ${user?.username || 'unknown'}`,
-                details: [
-                    `Username: ${user?.username || 'N/A'}`,
-                    `Name: ${user?.name || 'N/A'}`,
-                    `VIP: ${user?.vip ? 'Yes' : 'No'}`,
-                ],
-            });
-            // Fetch user lists after successful connection
-            try {
-                const lists: any = await traktFetch(`/users/${user?.username || 'me'}/lists`, traktClientId, effectiveTraktToken);
-                if (Array.isArray(lists)) setTraktLists(lists);
-            } catch { /* silent */ }
-        } catch (err: any) {
-            setTraktTest({ status: 'error', message: err.message });
-            toast.show({ type: 'error', title: 'Trakt Connection Failed', message: err.message, timeout: 5000 });
-        }
-    }, [traktClientId, effectiveTraktToken]);
-
-    const syncTraktData = useCallback(async () => {
-        setTraktSyncResult({ status: 'loading', message: 'Syncing from Trakt...' });
-        try {
-            const [ratingsMovies, ratingsShows, watchedMovies, watchedShows]: any[] = await Promise.all([
-                traktFetch('/sync/ratings/movies', traktClientId, effectiveTraktToken).catch(() => []),
-                traktFetch('/sync/ratings/shows', traktClientId, effectiveTraktToken).catch(() => []),
-                traktFetch('/sync/watched/movies', traktClientId, effectiveTraktToken).catch(() => []),
-                traktFetch('/sync/watched/shows', traktClientId, effectiveTraktToken).catch(() => []),
-            ]);
-            const ratedCount = (Array.isArray(ratingsMovies) ? ratingsMovies.length : 0) + (Array.isArray(ratingsShows) ? ratingsShows.length : 0);
-            const watchedCount = (Array.isArray(watchedMovies) ? watchedMovies.length : 0) + (Array.isArray(watchedShows) ? watchedShows.length : 0);
-
-            // Also trigger TraktBridge sync if available
-            try {
-                const tb = require('stremio/services/TraktBridge');
-                await tb.syncAll(true);
-            } catch { /* silent */ }
-
-            setTraktSyncResult({
-                status: 'success',
-                message: 'Synced successfully',
-                details: [
-                    `Rated items: ${ratedCount}`,
-                    `Watched items: ${watchedCount}`,
-                ],
-            });
-        } catch (err: any) {
-            setTraktSyncResult({ status: 'error', message: err.message });
-            toast.show({ type: 'error', title: 'Trakt Sync Failed', message: err.message, timeout: 5000 });
-        }
-    }, [traktClientId, effectiveTraktToken]);
-
-    const testTraktRate = useCallback(async () => {
-        setTraktRateTest({ status: 'loading', message: 'Testing rating API access...' });
-        try {
-            const ratingsRes: any = await traktFetch('/sync/ratings/movies', traktClientId, effectiveTraktToken);
-            const existing = Array.isArray(ratingsRes) ? ratingsRes.find((r: any) => r.movie?.ids?.imdb === 'tt1375666') : null;
-
-            if (existing) {
-                setTraktRateTest({
-                    status: 'success',
-                    message: 'Rating read/write works',
-                    details: [
-                        `Inception is rated: ${existing.rating}/10`,
-                        `Rated at: ${existing.rated_at}`,
-                        'Rating API is functional ✓',
-                    ],
-                });
-            } else {
-                setTraktRateTest({
-                    status: 'success',
-                    message: 'Rating API is accessible',
-                    details: [
-                        'Inception is not yet rated',
-                        `Total movie ratings found: ${Array.isArray(ratingsRes) ? ratingsRes.length : 0}`,
-                        'Rating API is functional ✓',
-                    ],
-                });
-            }
-        } catch (err: any) {
-            setTraktRateTest({ status: 'error', message: err.message });
-            toast.show({ type: 'error', title: 'Trakt Rating Test Failed', message: err.message, timeout: 5000 });
-        }
-    }, [traktClientId, effectiveTraktToken]);
-
-    // Load Trakt lists on mount if configured
-    useEffect(() => {
-        if (traktClientId && effectiveTraktToken) {
-            traktFetch('/users/me/lists', traktClientId, effectiveTraktToken)
-                .then((lists: any) => { if (Array.isArray(lists)) setTraktLists(lists); })
-                .catch(() => {});
-        }
-    }, [traktClientId, effectiveTraktToken]);
-
+    // ─── Handlers ───
     const onTmdbKeyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value.trim();
         setTmdbKey(val);
@@ -292,268 +278,252 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
         flashSaved();
     }, []);
 
-    // --- Test: TMDB API Connection ---
-    const testApiConnection = useCallback(async () => {
-        setApiTest({ status: 'loading', message: 'Testing API connection...' });
+    // ─── Sync Trakt Data ───
+    const syncTraktData = useCallback(async () => {
+        if (!traktBridge.isConnected()) {
+            setSyncStatus('error');
+            setSyncTip('Not connected to Trakt');
+            return;
+        }
+        setSyncStatus('loading');
+        setSyncTip('Syncing...');
+        try {
+            await traktBridge.syncAll(true);
+            const rated = traktBridge._ratedIds.size;
+            const watched = traktBridge._watchedIds.size;
+            setSyncStatus('success');
+            setSyncTip(`Synced ${rated} rated, ${watched} watched`);
+        } catch (err: any) {
+            setSyncStatus('error');
+            setSyncTip(err.message);
+        }
+    }, []);
+
+    // ─── Test: TMDB API ───
+    const testTmdbApi = useCallback(async () => {
+        setTmdbStatus('loading');
+        setTmdbTip('Testing...');
         try {
             const res = await fetch(`${TMDB_BASE}/configuration?api_key=${tmdbKey}`);
-            if (!res.ok) {
-                setApiTest({ status: 'error', message: `API returned ${res.status}: ${res.statusText}` });
-                return;
-            }
-            const data = await res.json();
-            setApiTest({
-                status: 'success',
-                message: 'API key is valid',
-                details: [
-                    `Image base URL: ${data.images?.secure_base_url || 'N/A'}`,
-                    `Poster sizes: ${(data.images?.poster_sizes || []).join(', ')}`,
-                ],
-            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            setTmdbStatus('success');
+            setTmdbTip('API key is valid');
         } catch (err: any) {
-            setApiTest({ status: 'error', message: `Connection failed: ${err.message}` });
+            setTmdbStatus('error');
+            setTmdbTip(err.message);
         }
     }, [tmdbKey]);
 
-    // --- Test: Trailer Fetch ---
+    // ─── Test: Trailer Fetch ───
     const testTrailerFetch = useCallback(async () => {
-        setTrailerTest({ status: 'loading', message: 'Fetching trailer for "Inception" (tt1375666)...' });
+        setTrailerStatus('loading');
+        setTrailerTip('Testing...');
         try {
-            // Step 1: Find TMDB ID from IMDB ID
             const findRes = await fetch(`${TMDB_BASE}/find/tt1375666?api_key=${tmdbKey}&external_source=imdb_id`);
-            if (!findRes.ok) throw new Error(`Find API returned ${findRes.status}`);
+            if (!findRes.ok) throw new Error(`Find API: ${findRes.status}`);
             const findData = await findRes.json();
             const tmdbId = findData.movie_results?.[0]?.id;
-            if (!tmdbId) throw new Error('Could not find TMDB ID for Inception');
+            if (!tmdbId) throw new Error('Could not resolve TMDB ID');
 
-            // Step 2: Fetch videos
             const vidRes = await fetch(`${TMDB_BASE}/movie/${tmdbId}?api_key=${tmdbKey}&append_to_response=videos&language=${trailerLang}`);
-            if (!vidRes.ok) throw new Error(`Videos API returned ${vidRes.status}`);
+            if (!vidRes.ok) throw new Error(`Videos API: ${vidRes.status}`);
             const vidData = await vidRes.json();
-            const videos = vidData.videos?.results || [];
-            const trailers = videos.filter((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
-            const allYt = videos.filter((v: any) => v.site === 'YouTube');
+            const trailers = (vidData.videos?.results || []).filter((v: any) => v.type === 'Trailer' && v.site === 'YouTube');
 
-            if (trailers.length === 0 && allYt.length === 0) {
-                setTrailerTest({
-                    status: 'error',
-                    message: 'No YouTube trailers found',
-                    details: [`Total videos returned: ${videos.length}`, `Types: ${[...new Set(videos.map((v: any) => v.type))].join(', ')}`],
-                });
-                return;
-            }
+            if (trailers.length === 0) throw new Error('No trailers found for Inception');
 
-            const best = trailers[0] || allYt[0];
-            setTrailerTest({
-                status: 'success',
-                message: `Found ${trailers.length} trailer(s), ${allYt.length} total YouTube videos`,
-                details: [
-                    `Best match: "${best.name}"`,
-                    `Type: ${best.type} | Official: ${best.official ? 'Yes' : 'No'} | Lang: ${best.iso_639_1}`,
-                    `YouTube ID: ${best.key}`,
-                    `URL: https://youtube.com/watch?v=${best.key}`,
-                ],
-            });
+            setTrailerStatus('success');
+            setTrailerTip(`Found ${trailers.length} trailer(s) — "${trailers[0].name}"`);
         } catch (err: any) {
-            setTrailerTest({ status: 'error', message: err.message });
+            setTrailerStatus('error');
+            setTrailerTip(err.message);
         }
     }, [tmdbKey, trailerLang]);
 
-    // --- Test: Recommendations ---
+    // ─── Test: Recommendations ───
     const testRecommendations = useCallback(async () => {
-        setRecTest({ status: 'loading', message: 'Fetching recommendations for "Inception"...' });
+        setRecStatus('loading');
+        setRecTip('Testing...');
         try {
             const findRes = await fetch(`${TMDB_BASE}/find/tt1375666?api_key=${tmdbKey}&external_source=imdb_id`);
-            if (!findRes.ok) throw new Error(`Find API returned ${findRes.status}`);
+            if (!findRes.ok) throw new Error(`Find API: ${findRes.status}`);
             const findData = await findRes.json();
             const tmdbId = findData.movie_results?.[0]?.id;
-            if (!tmdbId) throw new Error('Could not find TMDB ID');
+            if (!tmdbId) throw new Error('Could not resolve TMDB ID');
 
             const recRes = await fetch(`${TMDB_BASE}/movie/${tmdbId}/recommendations?api_key=${tmdbKey}&language=${trailerLang}`);
-            if (!recRes.ok) throw new Error(`Recommendations API returned ${recRes.status}`);
+            if (!recRes.ok) throw new Error(`Recommendations API: ${recRes.status}`);
             const recData = await recRes.json();
             const results = recData.results || [];
 
-            if (results.length === 0) {
-                setRecTest({ status: 'error', message: 'No recommendations returned' });
-                return;
-            }
+            if (results.length === 0) throw new Error('No recommendations returned');
 
-            setRecTest({
-                status: 'success',
-                message: `Found ${results.length} recommendations`,
-                details: results.slice(0, 5).map((r: any, i: number) =>
-                    `${i + 1}. ${r.title || r.name} (${(r.release_date || r.first_air_date || '').substring(0, 4)}) — ${r.vote_average?.toFixed(1)}/10`
-                ),
-            });
+            setRecStatus('success');
+            setRecTip(`Found ${results.length} recommendations`);
         } catch (err: any) {
-            setRecTest({ status: 'error', message: err.message });
+            setRecStatus('error');
+            setRecTip(err.message);
         }
     }, [tmdbKey, trailerLang]);
 
-    const renderTestResult = (result: TestResult) => {
-        if (result.status === 'idle') return null;
-        return (
-            <div className={styles[`test-result-${result.status}`]}>
-                <div className={styles['test-result-message']}>
-                    {result.status === 'loading' && <span className={styles['test-spinner']} />}
-                    {result.status === 'success' && <span className={styles['test-check']}>&#10003;</span>}
-                    {result.status === 'error' && <span className={styles['test-x']}>&#10007;</span>}
-                    {result.message}
-                </div>
-                {result.details && result.details.map((d, i) => (
-                    <div key={i} className={styles['test-detail']}>{d}</div>
-                ))}
-            </div>
-        );
-    };
+    // ─── Copy user code to clipboard ───
+    const copyCode = useCallback((code: string) => {
+        navigator.clipboard?.writeText(code).then(() => {
+            toast?.show?.({ type: 'success', title: 'Code copied to clipboard' });
+        }).catch(() => {});
+    }, []);
 
     return (
-        <Section ref={ref} label={'Netflix UI'}>
-            <div className={styles['netflix-ui-badge']}>
-                <span className={styles['badge-dot']} />
-                <span className={styles['badge-text']}>Custom Netflix UI Settings</span>
-            </div>
-
-            {/* ─── Trakt Integration ─── */}
+        <Section ref={ref} label={'Modern UI'}>
+            {/* ─── Trakt ─── */}
             <div className={styles['section-divider']}>Trakt Integration</div>
 
-            <Option label={'Trakt Client ID'}>
-                <div className={styles['input-with-button']}>
+            <Option label={'Account'}>
+                {authState.phase === 'disconnected' && (
+                    <div className={styles['trakt-auth-section']}>
+                        <button
+                            className={styles['connect-btn']}
+                            onClick={startTraktAuth}
+                        >
+                            Connect to Trakt
+                        </button>
+                        {authError && (
+                            <div className={styles['auth-error']}>{authError}</div>
+                        )}
+                    </div>
+                )}
+
+                {authState.phase === 'requesting' && (
+                    <div className={styles['trakt-auth-section']}>
+                        <div className={styles['auth-waiting']}>
+                            <span className={styles['status-spinner']} />
+                            <span>Requesting authorization code...</span>
+                        </div>
+                    </div>
+                )}
+
+                {authState.phase === 'waiting' && (
+                    <div className={styles['trakt-auth-section']}>
+                        <div className={styles['device-code-box']}>
+                            <div className={styles['device-code-instruction']}>
+                                Go to <a href={authState.verificationUrl} target="_blank" rel="noopener noreferrer" className={styles['auth-link']}>{authState.verificationUrl}</a> and enter:
+                            </div>
+                            <div
+                                className={styles['device-code-display']}
+                                onClick={() => copyCode(authState.userCode)}
+                                title="Click to copy"
+                            >
+                                {authState.userCode}
+                            </div>
+                            <div className={styles['device-code-hint']}>Click code to copy • Waiting for authorization...</div>
+                        </div>
+                        <div className={styles['auth-waiting']}>
+                            <span className={styles['status-spinner']} />
+                            <span>Waiting for you to authorize on Trakt...</span>
+                        </div>
+                        <button className={styles['cancel-btn']} onClick={cancelTraktAuth}>
+                            Cancel
+                        </button>
+                    </div>
+                )}
+
+                {authState.phase === 'connected' && (
+                    <div className={styles['trakt-auth-section']}>
+                        <div className={styles['connected-info']}>
+                            <span className={styles['status-check']}>&#10003;</span>
+                            <span className={styles['connected-username']}>
+                                Connected as <strong>{authState.username}</strong>
+                            </span>
+                        </div>
+                        <button className={styles['disconnect-btn']} onClick={disconnectTrakt}>
+                            Disconnect
+                        </button>
+                    </div>
+                )}
+            </Option>
+
+            {authState.phase === 'connected' && (
+                <Option label={'Sync'}>
+                    <div className={styles['input-row']}>
+                        <span className={styles['option-desc']}>Pull ratings, watched &amp; watchlist from Trakt</span>
+                        <button
+                            className={styles['action-btn']}
+                            onClick={syncTraktData}
+                            disabled={syncStatus === 'loading'}
+                        >
+                            {syncStatus === 'loading' ? 'Syncing...' : 'Sync Now'}
+                        </button>
+                        <StatusIcon status={syncStatus} tooltip={syncTip} />
+                    </div>
+                </Option>
+            )}
+
+            <Option label={'Client ID'}>
+                <div className={styles['input-row']}>
                     <input
                         type="text"
                         className={styles['text-input']}
                         value={traktClientId}
                         onChange={onTraktClientIdChange}
-                        placeholder="Trakt OAuth Client ID"
+                        placeholder="Trakt Client ID..."
                         spellCheck={false}
                     />
                 </div>
             </Option>
 
-            <Option label={'Trakt Access Token'}>
-                <div className={styles['input-with-button']}>
+            <Option label={'Client Secret'}>
+                <div className={styles['input-row']}>
                     <input
                         type="password"
                         className={styles['text-input']}
-                        value={traktToken}
-                        onChange={onTraktTokenChange}
-                        placeholder={stremioTraktToken ? 'Auto-detected from Stremio login' : 'Your Trakt OAuth Bearer token...'}
+                        value={traktClientSecret}
+                        onChange={onTraktClientSecretChange}
+                        placeholder="Trakt Client Secret..."
                         spellCheck={false}
                     />
-                    <button
-                        className={styles['test-btn']}
-                        onClick={testTraktConnection}
-                        disabled={traktTest.status === 'loading'}
-                    >
-                        {traktTest.status === 'loading' ? 'Testing...' : 'Test'}
-                    </button>
-                </div>
-                {renderTestResult(traktTest)}
-            </Option>
-
-            <Option label={'Not Interested List'}>
-                <div className={styles['input-with-button']}>
-                    {traktLists.length > 0 ? (
-                        <select className={styles['select-input']} value={traktNotInterestedSlug} onChange={onTraktNotInterestedSlugChange}>
-                            <option value="">Select a list...</option>
-                            {traktLists.map((list: any) => (
-                                <option key={list.ids?.slug || list.ids?.trakt} value={list.ids?.slug || ''}>
-                                    {list.name} ({list.item_count} items)
-                                </option>
-                            ))}
-                        </select>
-                    ) : (
-                        <input
-                            type="text"
-                            className={styles['text-input']}
-                            value={traktNotInterestedSlug}
-                            onChange={(e) => {
-                                const val = e.target.value.trim();
-                                setTraktNotInterestedSlug(val);
-                                setSetting('trakt_not_interested_slug', val);
-                                traktBridge.setNotInterestedListSlug(val);
-                                flashSaved();
-                            }}
-                            placeholder="List slug (e.g. not-interested-list)..."
-                            spellCheck={false}
-                        />
-                    )}
                 </div>
             </Option>
 
-            <Option label={'Trakt Sync'}>
-                <div className={styles['input-with-button']}>
-                    <div className={styles['toggle-label']}>
-                        Sync ratings, watched &amp; watchlist from Trakt
-                    </div>
-                    <button
-                        className={styles['test-btn']}
-                        onClick={syncTraktData}
-                        disabled={traktSyncResult.status === 'loading'}
-                    >
-                        {traktSyncResult.status === 'loading' ? 'Syncing...' : 'Sync Now'}
-                    </button>
-                </div>
-                {renderTestResult(traktSyncResult)}
-            </Option>
-
-            <Option label={'Test Rating API'}>
-                <div className={styles['input-with-button']}>
-                    <div className={styles['toggle-label']}>
-                        Verify read/write access to Trakt ratings
-                    </div>
-                    <button
-                        className={styles['test-btn']}
-                        onClick={testTraktRate}
-                        disabled={traktRateTest.status === 'loading'}
-                    >
-                        {traktRateTest.status === 'loading' ? 'Testing...' : 'Test Ratings'}
-                    </button>
-                </div>
-                {renderTestResult(traktRateTest)}
-            </Option>
-
-            {/* ─── TMDB & Trailer Settings ─── */}
-            <div className={styles['section-divider']}>TMDB &amp; Trailers</div>
+            {/* ─── Content ─── */}
+            <div className={styles['section-divider']}>Content &amp; Discovery</div>
 
             <Option label={'TMDB API Key'}>
-                <div className={styles['input-with-button']}>
+                <div className={styles['input-row']}>
                     <input
                         type="text"
                         className={styles['text-input']}
                         value={tmdbKey}
                         onChange={onTmdbKeyChange}
-                        placeholder="Enter TMDB API key..."
+                        placeholder="TMDB API key..."
                         spellCheck={false}
                     />
                     <button
-                        className={styles['test-btn']}
-                        onClick={testApiConnection}
-                        disabled={apiTest.status === 'loading'}
+                        className={styles['action-btn']}
+                        onClick={testTmdbApi}
+                        disabled={tmdbStatus === 'loading'}
                     >
-                        {apiTest.status === 'loading' ? 'Testing...' : 'Test'}
+                        Test
                     </button>
+                    <StatusIcon status={tmdbStatus} tooltip={tmdbTip} />
                 </div>
-                {renderTestResult(apiTest)}
             </Option>
 
             <Option label={'Trailer Source'}>
-                <div className={styles['input-with-button']}>
+                <div className={styles['input-row']}>
                     <select className={styles['select-input']} value={trailerSource} onChange={onTrailerSourceChange}>
                         {TRAILER_SOURCES.map((s) => (
                             <option key={s.value} value={s.value}>{s.label}</option>
                         ))}
                     </select>
                     <button
-                        className={styles['test-btn']}
+                        className={styles['action-btn']}
                         onClick={testTrailerFetch}
-                        disabled={trailerTest.status === 'loading'}
+                        disabled={trailerStatus === 'loading'}
                     >
-                        {trailerTest.status === 'loading' ? 'Testing...' : 'Test'}
+                        Test
                     </button>
+                    <StatusIcon status={trailerStatus} tooltip={trailerTip} />
                 </div>
-                {renderTestResult(trailerTest)}
             </Option>
 
             <Option label={'Trailer Language'}>
@@ -564,31 +534,32 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
                 </select>
             </Option>
 
-            <Option label={'Recommendations Source'}>
-                <div className={styles['input-with-button']}>
+            <Option label={'Recommendations'}>
+                <div className={styles['input-row']}>
                     <select className={styles['select-input']} value={recSource} onChange={onRecSourceChange}>
                         {REC_SOURCES.map((s) => (
                             <option key={s.value} value={s.value}>{s.label}</option>
                         ))}
                     </select>
                     <button
-                        className={styles['test-btn']}
+                        className={styles['action-btn']}
                         onClick={testRecommendations}
-                        disabled={recTest.status === 'loading'}
+                        disabled={recStatus === 'loading'}
                     >
-                        {recTest.status === 'loading' ? 'Testing...' : 'Test'}
+                        Test
                     </button>
+                    <StatusIcon status={recStatus} tooltip={recTip} />
                 </div>
-                {renderTestResult(recTest)}
             </Option>
 
+            {/* ─── Playback ─── */}
+            <div className={styles['section-divider']}>Playback</div>
+
             <Option label={'Auto-Pick Stream'}>
-                <div className={styles['input-with-button']}>
-                    <div className={styles['toggle-label']}>
-                        Automatically select and play the best available stream
-                    </div>
+                <div className={styles['input-row']}>
+                    <span className={styles['option-desc']}>Automatically select the best available stream</span>
                     <button
-                        className={autoPickEnabled ? styles['toggle-btn-on'] : styles['toggle-btn-off']}
+                        className={autoPickEnabled ? styles['toggle-on'] : styles['toggle-off']}
                         onClick={onAutoPickToggle}
                     >
                         {autoPickEnabled ? 'ON' : 'OFF'}
@@ -624,9 +595,9 @@ const NetflixUI = forwardRef<HTMLDivElement>((_, ref) => {
                 </>
             )}
 
-            {saved && <div className={styles['saved-toast']}>Settings saved</div>}
+            {saved && <div className={styles['saved-toast']}>Saved</div>}
         </Section>
     );
 });
 
-export default NetflixUI;
+export default ModernUI;

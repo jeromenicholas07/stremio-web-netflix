@@ -23,6 +23,7 @@
 
         .control-bar-button {
             flex: none;
+            position: relative;
             width: 3.5rem;
             height: 4rem;
             display: flex;
@@ -46,6 +47,22 @@
                 height: 2.2rem;
                 color: #fff;
             }
+
+            .sync-badge {
+                position: absolute;
+                top: 0.5rem;
+                right: 0.3rem;
+                width: 0.55rem;
+                height: 0.55rem;
+                border-radius: 100%;
+                background-color: var(--secondary-accent-color);
+                animation: sync-pulse 1.2s ease-in-out infinite;
+            }
+        }
+
+        @keyframes sync-pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.3; }
         }
 
         .volume-slider {

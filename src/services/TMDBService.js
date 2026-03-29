@@ -20,6 +20,7 @@ const GENRE_MAP = {
 class TMDBService {
     constructor() {
         this._cache = new Map();
+        this._imdbCache = new Map(); // tmdbId → imdbId
     }
 
     // --- Settings stored in localStorage ---
@@ -143,6 +144,10 @@ class TMDBService {
         return null;
     }
 
+    async getDetails(tmdbId, mediaType = 'movie') {
+        return await this._fetch(`/${mediaType}/${tmdbId}`);
+    }
+
     async getRecommendations(tmdbId, mediaType = 'movie') {
         const data = await this._fetch(`/${mediaType}/${tmdbId}/recommendations`);
         if (!data?.results) return [];
@@ -189,6 +194,44 @@ class TMDBService {
         const data = await this._fetch(`/discover/${mediaType}`, params);
         if (!data?.results) return [];
         return data.results;
+    }
+
+    // Resolve TMDB ID → IMDB ID via external_ids endpoint (cached)
+    async getImdbId(tmdbId, mediaType = 'movie') {
+        const cacheKey = `${mediaType}:${tmdbId}`;
+        if (this._imdbCache.has(cacheKey)) return this._imdbCache.get(cacheKey);
+        try {
+            const data = await this._fetch(`/${mediaType}/${tmdbId}/external_ids`);
+            const imdbId = data?.imdb_id || null;
+            this._imdbCache.set(cacheKey, imdbId);
+            return imdbId;
+        } catch {
+            return null;
+        }
+    }
+
+    // Enrich an array of Stremio items (from mapToStremioItem) with IMDB IDs.
+    // Resolves TMDB IDs → IMDB IDs in parallel, updates id and deepLinks.
+    async enrichWithImdbIds(items) {
+        const toResolve = items.filter((item) => item.id && item.id.startsWith('tmdb:'));
+        if (toResolve.length === 0) return items;
+
+        await Promise.all(toResolve.map(async (item) => {
+            const tmdbIdStr = item.id.replace('tmdb:', '');
+            const mediaType = item.type === 'series' ? 'tv' : 'movie';
+            const imdbId = await this.getImdbId(tmdbIdStr, mediaType);
+            if (imdbId) {
+                item._tmdbId = item.id; // preserve original TMDB ID
+                item.id = imdbId;
+                item.deepLinks = {
+                    metaDetailsVideos: `#/metadetails/${item.type}/${imdbId}`,
+                    metaDetailsStreams: `#/metadetails/${item.type}/${imdbId}`,
+                    player: null,
+                };
+            }
+        }));
+
+        return items;
     }
 
     // Map a TMDB item to Stremio-compatible format
@@ -292,6 +335,46 @@ class TMDBService {
         const data = await this._fetch(`/${mediaType}/${tmdbId}`, { append_to_response: 'videos' });
         if (!data?.videos?.results) return [];
         return data.videos.results.filter(v => v.type === 'Trailer' && v.site === 'YouTube');
+    }
+
+    /**
+     * Get the title logo URL for a TMDB item.
+     * Uses TMDB /images endpoint — returns English PNG logos.
+     * Returns null if no logo is found.
+     */
+    async getLogoUrl(tmdbId, mediaType = 'movie') {
+        try {
+            const data = await this._fetch(`/${mediaType}/${tmdbId}/images`, {
+                include_image_language: 'en,null',
+            });
+            const logos = data?.logos || [];
+            if (logos.length === 0) return null;
+            // Prefer English PNG logos, sorted by vote_average descending
+            const sorted = logos
+                .filter((l) => l.file_path)
+                .sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
+            if (sorted.length === 0) return null;
+            return `${TMDB_IMAGE_BASE}/w500${sorted[0].file_path}`;
+        } catch {
+            return null;
+        }
+    }
+
+    /**
+     * Resolve the TMDB ID for a given item (handles both tmdb: and tt prefixes).
+     * Returns { tmdbId, mediaType } or null.
+     */
+    async resolveTmdbId(itemId, itemType) {
+        if (!itemId) return null;
+        const tmdbMatch = itemId.match(/^tmdb:(\d+)$/);
+        if (tmdbMatch) {
+            return { tmdbId: parseInt(tmdbMatch[1], 10), mediaType: itemType === 'series' ? 'tv' : 'movie' };
+        }
+        if (/^tt/.test(itemId)) {
+            const found = await this.findByImdbId(itemId);
+            if (found) return { tmdbId: found.id, mediaType: found.type };
+        }
+        return null;
     }
 
 }

@@ -138,6 +138,40 @@
             font-weight: 700;
             color: white;
         }
+
+        .rate-this-badge {
+            position: absolute;
+            top: 0.4rem;
+            left: 0.4rem;
+            z-index: 3;
+            display: flex;
+            align-items: center;
+            gap: 0.3rem;
+            padding: 0.25rem 0.6rem;
+            background: linear-gradient(135deg, rgba(255, 215, 0, 0.9) 0%, rgba(255, 165, 0, 0.9) 100%);
+            border-radius: 0.25rem;
+            font-size: 0.65rem;
+            font-weight: 700;
+            color: #1a1a1a;
+            cursor: pointer;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+            box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4);
+            animation: rate-pulse 2s ease-in-out infinite;
+
+            &:hover {
+                transform: scale(1.05);
+                box-shadow: 0 3px 10px rgba(255, 215, 0, 0.5);
+            }
+
+            svg {
+                flex-shrink: 0;
+            }
+        }
+
+        @keyframes rate-pulse {
+            0%, 100% { box-shadow: 0 2px 6px rgba(0, 0, 0, 0.4); }
+            50% { box-shadow: 0 2px 10px rgba(255, 215, 0, 0.6); }
+        }
     }
 
     // ─── Trailer layer ───
@@ -162,6 +196,22 @@
             left: 0;
             width: 100%;
             height: 100%;
+        }
+
+        // Transparent click-capture overlay — sits above the YouTube iframe
+        // to intercept clicks (iframe is cross-origin and eats mouse events).
+        // Navigates to the same destination as the poster card.
+        .trailer-click-capture {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            z-index: 5; // above iframe, below buttons (z-index: 10)
+            cursor: pointer;
+            background: transparent;
+            display: block;
+            text-decoration: none;
         }
 
         // Initial cover — hides YouTube title/share/watermark on startup,
@@ -480,6 +530,39 @@
 
         &:hover {
             color: rgba(255, 255, 255, 0.6);
+        }
+    }
+
+    // ─── Rate Mode — blurred poster with star rating overlay ───
+    &.rate-mode {
+        .poster-container {
+            cursor: default;
+        }
+
+        .rate-mode-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 0.3rem;
+            z-index: 2;
+        }
+
+        .rate-mode-title {
+            font-size: 0.65rem;
+            font-weight: 600;
+            color: #e5e5e5;
+            text-align: center;
+            max-width: 90%;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
         }
     }
 

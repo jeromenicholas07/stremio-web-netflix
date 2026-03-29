@@ -186,6 +186,7 @@ const MetaDetails = ({ urlParams, queryParams }) => {
                             video={video}
                             type={streamPath.type}
                             onEpisodeSearch={handleEpisodeSearch}
+                            queryParams={queryParams}
                         />
                         :
                         metaPath !== null ?

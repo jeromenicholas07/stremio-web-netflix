@@ -29,6 +29,8 @@ class TraktBridge {
         this._notInterestedItemsData = []; // { id, imdbId, tmdbId, name, type, year, listedAt }
         this._ratedImdbIds = new Set();
         this._ratedTmdbIds = new Set();
+        // Items marked watched locally but not yet confirmed by API
+        this._pendingWatchedItems = new Map(); // id → item data
         // Device auth polling
         this._devicePollTimer = null;
         this._devicePollAbort = null;
@@ -477,18 +479,26 @@ class TraktBridge {
         else if (tmdb) item.ids = { tmdb: parseInt(tmdb, 10) };
         else throw new Error('Invalid item ID');
 
+        // Optimistic: add to rated sets BEFORE API call so item leaves Watched (Not Rated) immediately
+        this._ratedIds.add(itemId);
+        if (imdb) this._ratedImdbIds.add(imdb);
+        if (tmdb) this._ratedTmdbIds.add(parseInt(tmdb, 10));
+        this._rebuildDismissed();
+        this._notify();
+
         const traktType = type === 'series' ? 'shows' : 'movies';
         const result = await this._post('/sync/ratings', { [traktType]: [item] });
 
         if (result.ok) {
-            this._ratedIds.add(itemId);
-            const { imdb: imdbId, tmdb: tmdbId } = this._parseId(itemId);
-            if (imdbId) this._ratedImdbIds.add(imdbId);
-            if (tmdbId) this._ratedTmdbIds.add(parseInt(tmdbId, 10));
-            this._rebuildDismissed();
-            this._notify();
             // Delayed refresh to sync watched/rated data from Trakt
             this._scheduleRefresh('watched');
+        } else {
+            // Rollback: remove from rated sets so item reappears in Watched (Not Rated)
+            this._ratedIds.delete(itemId);
+            if (imdb) this._ratedImdbIds.delete(imdb);
+            if (tmdb) this._ratedTmdbIds.delete(parseInt(tmdb, 10));
+            this._rebuildDismissed();
+            this._notify();
         }
         return result;
     }
@@ -645,26 +655,37 @@ class TraktBridge {
         // before the API returns.
         // Don't add to _watchedIds — that triggers _rebuildDismissed which would
         // filter the item from discovery rows and unmount the rating overlay.
+        const pendingItem = {
+            id: itemId,
+            imdbId: imdb || null,
+            tmdbId: tmdb ? parseInt(tmdb, 10) : null,
+            name: itemName || '',
+            type: type === 'series' ? 'series' : 'movie',
+            year: null,
+            watchedAt: now,
+        };
+
         const alreadyExists = this._watchedItemsData.some((w) => w.id === itemId);
         if (!alreadyExists) {
-            this._watchedItemsData.unshift({
-                id: itemId,
-                imdbId: imdb || null,
-                tmdbId: tmdb ? parseInt(tmdb, 10) : null,
-                name: itemName || '',
-                type: type === 'series' ? 'series' : 'movie',
-                year: null,
-                watchedAt: now,
-            });
+            this._watchedItemsData.unshift(pendingItem);
         }
+        // Track as pending so refreshes don't wipe it before API confirms
+        this._pendingWatchedItems.set(itemId, pendingItem);
         this._notify();
 
         const traktType = type === 'series' ? 'shows' : 'movies';
         const result = await this._post('/sync/history', { [traktType]: [item] });
 
         if (result.ok) {
-            // Delayed refresh to sync full watched data (including movies) from Trakt
+            // Delayed refresh to sync full watched data (including movies) from Trakt.
+            // Pending item stays until the refresh confirms it from the API.
             this._scheduleRefresh('watched');
+        } else {
+            // Rollback: remove the optimistically-added item so it doesn't linger in
+            // Watched (Not Rated) when the API didn't actually persist it
+            this._pendingWatchedItems.delete(itemId);
+            this._watchedItemsData = this._watchedItemsData.filter((w) => w.id !== itemId);
+            this._notify();
         }
         return result;
     }
@@ -689,11 +710,16 @@ class TraktBridge {
             await this._ensureNotInterestedList();
 
             const notInterestedSlug = this.getNotInterestedListSlug();
-            const [ratingsMovies, ratingsShows, watchedMovies, watchedShows, watchlistMovies, watchlistShows, notInterestedItems] = await Promise.all([
+            // Use /sync/history (real-time) for watched items data, and /sync/watched
+            // (cached aggregate) for dismissed IDs. The history endpoint reflects new
+            // markWatched calls immediately, while /sync/watched can lag behind.
+            const [ratingsMovies, ratingsShows, watchedMovies, watchedShows, historyMovies, historyShows, watchlistMovies, watchlistShows, notInterestedItems] = await Promise.all([
                 this._fetch('/sync/ratings/movies').catch(() => []),
                 this._fetch('/sync/ratings/shows').catch(() => []),
                 this._fetch('/sync/watched/movies').catch(() => []),
                 this._fetch('/sync/watched/shows').catch(() => []),
+                this._fetch('/sync/history/movies?limit=500').catch(() => []),
+                this._fetch('/sync/history/shows?limit=500').catch(() => []),
                 this._fetch('/sync/watchlist/movies').catch(() => []),
                 this._fetch('/sync/watchlist/shows').catch(() => []),
                 notInterestedSlug
@@ -805,33 +831,34 @@ class TraktBridge {
             this._notInterestedIds = newNotInterested;
             this._notInterestedItemsData = niItems;
 
-            // Build full watched items data for the "watched not rated" row
+            // Build full watched items data from /sync/history (real-time).
+            // History returns individual events; deduplicate by ID, keeping most recent.
             const watchedItems = [];
             const seenIds = new Set();
-            (Array.isArray(watchedMovies) ? watchedMovies : []).forEach((w) => {
-                const imdbId = w.movie?.ids?.imdb;
-                const tmdbId = w.movie?.ids?.tmdb;
+            (Array.isArray(historyMovies) ? historyMovies : []).forEach((h) => {
+                const imdbId = h.movie?.ids?.imdb;
+                const tmdbId = h.movie?.ids?.tmdb;
                 const id = imdbId || (tmdbId ? `tmdb:${tmdbId}` : null);
                 if (!id || seenIds.has(id)) return;
                 seenIds.add(id);
                 watchedItems.push({
                     id, imdbId: imdbId || null, tmdbId: tmdbId || null,
-                    name: w.movie?.title || '', type: 'movie',
-                    year: w.movie?.year || null,
-                    watchedAt: w.last_watched_at || w.watched_at || null,
+                    name: h.movie?.title || '', type: 'movie',
+                    year: h.movie?.year || null,
+                    watchedAt: h.watched_at || null,
                 });
             });
-            (Array.isArray(watchedShows) ? watchedShows : []).forEach((w) => {
-                const imdbId = w.show?.ids?.imdb;
-                const tmdbId = w.show?.ids?.tmdb;
+            (Array.isArray(historyShows) ? historyShows : []).forEach((h) => {
+                const imdbId = h.show?.ids?.imdb;
+                const tmdbId = h.show?.ids?.tmdb;
                 const id = imdbId || (tmdbId ? `tmdb:${tmdbId}` : null);
                 if (!id || seenIds.has(id)) return;
                 seenIds.add(id);
                 watchedItems.push({
                     id, imdbId: imdbId || null, tmdbId: tmdbId || null,
-                    name: w.show?.title || '', type: 'series',
-                    year: w.show?.year || null,
-                    watchedAt: w.last_watched_at || w.watched_at || null,
+                    name: h.show?.title || '', type: 'series',
+                    year: h.show?.year || null,
+                    watchedAt: h.watched_at || null,
                 });
             });
             watchedItems.sort((a, b) => {
@@ -840,6 +867,16 @@ class TraktBridge {
                 if (!b.watchedAt) return -1;
                 return new Date(b.watchedAt) - new Date(a.watchedAt);
             });
+
+            // Merge pending items that the API hasn't returned yet
+            for (const [pendingId, pendingItem] of this._pendingWatchedItems) {
+                if (seenIds.has(pendingId)) {
+                    this._pendingWatchedItems.delete(pendingId);
+                } else {
+                    watchedItems.unshift(pendingItem);
+                }
+            }
+
             this._watchedItemsData = watchedItems;
 
             this._rebuildDismissed();
@@ -998,9 +1035,10 @@ class TraktBridge {
 
     async _refreshWatchedData() {
         try {
-            const [watchedMovies, watchedShows, ratingsMovies, ratingsShows] = await Promise.all([
-                this._fetch('/sync/watched/movies').catch(() => []),
-                this._fetch('/sync/watched/shows').catch(() => []),
+            // Use /sync/history (real-time) for watched items data.
+            const [historyMovies, historyShows, ratingsMovies, ratingsShows] = await Promise.all([
+                this._fetch('/sync/history/movies?limit=500').catch(() => []),
+                this._fetch('/sync/history/shows?limit=500').catch(() => []),
                 this._fetch('/sync/ratings/movies').catch(() => []),
                 this._fetch('/sync/ratings/shows').catch(() => []),
             ]);
@@ -1021,38 +1059,33 @@ class TraktBridge {
             this._ratedImdbIds = ratedImdb;
             this._ratedTmdbIds = ratedTmdb;
 
-            // Rebuild watched IDs + item data
-            const newWatched = new Set();
+            // Rebuild watched items from history (deduplicated, most recent first)
             const watchedItems = [];
             const seenIds = new Set();
-            (Array.isArray(watchedMovies) ? watchedMovies : []).forEach((w) => {
-                const imdbId = w.movie?.ids?.imdb;
-                const tmdbId = w.movie?.ids?.tmdb;
+            (Array.isArray(historyMovies) ? historyMovies : []).forEach((h) => {
+                const imdbId = h.movie?.ids?.imdb;
+                const tmdbId = h.movie?.ids?.tmdb;
                 const id = imdbId || (tmdbId ? `tmdb:${tmdbId}` : null);
-                if (imdbId) newWatched.add(imdbId);
-                if (tmdbId) newWatched.add(`tmdb:${tmdbId}`);
                 if (!id || seenIds.has(id)) return;
                 seenIds.add(id);
                 watchedItems.push({
                     id, imdbId: imdbId || null, tmdbId: tmdbId || null,
-                    name: w.movie?.title || '', type: 'movie',
-                    year: w.movie?.year || null,
-                    watchedAt: w.last_watched_at || w.watched_at || null,
+                    name: h.movie?.title || '', type: 'movie',
+                    year: h.movie?.year || null,
+                    watchedAt: h.watched_at || null,
                 });
             });
-            (Array.isArray(watchedShows) ? watchedShows : []).forEach((w) => {
-                const imdbId = w.show?.ids?.imdb;
-                const tmdbId = w.show?.ids?.tmdb;
+            (Array.isArray(historyShows) ? historyShows : []).forEach((h) => {
+                const imdbId = h.show?.ids?.imdb;
+                const tmdbId = h.show?.ids?.tmdb;
                 const id = imdbId || (tmdbId ? `tmdb:${tmdbId}` : null);
-                if (imdbId) newWatched.add(imdbId);
-                if (tmdbId) newWatched.add(`tmdb:${tmdbId}`);
                 if (!id || seenIds.has(id)) return;
                 seenIds.add(id);
                 watchedItems.push({
                     id, imdbId: imdbId || null, tmdbId: tmdbId || null,
-                    name: w.show?.title || '', type: 'series',
-                    year: w.show?.year || null,
-                    watchedAt: w.last_watched_at || w.watched_at || null,
+                    name: h.show?.title || '', type: 'series',
+                    year: h.show?.year || null,
+                    watchedAt: h.watched_at || null,
                 });
             });
             watchedItems.sort((a, b) => {
@@ -1061,7 +1094,16 @@ class TraktBridge {
                 if (!b.watchedAt) return -1;
                 return new Date(b.watchedAt) - new Date(a.watchedAt);
             });
-            this._watchedIds = newWatched;
+
+            // Merge pending items not yet in API
+            for (const [pendingId, pendingItem] of this._pendingWatchedItems) {
+                if (seenIds.has(pendingId)) {
+                    this._pendingWatchedItems.delete(pendingId);
+                } else {
+                    watchedItems.unshift(pendingItem);
+                }
+            }
+
             this._watchedItemsData = watchedItems;
             this._rebuildDismissed();
             this._notify();

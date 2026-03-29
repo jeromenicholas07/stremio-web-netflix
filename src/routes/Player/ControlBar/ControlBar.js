@@ -35,6 +35,7 @@ const ControlBar = ({
     onVolumeChangeRequested,
     onSeekRequested,
     onToggleSubtitlesMenu,
+    subtitlesSyncing,
     onToggleAudioMenu,
     onToggleSpeedMenu,
     onToggleSideDrawer,
@@ -164,6 +165,7 @@ const ControlBar = ({
                     </Button>
                     <Button className={classnames(styles['control-bar-button'], { 'disabled': !Array.isArray(subtitlesTracks) || subtitlesTracks.length === 0 })} tabIndex={-1} onMouseDown={onSubtitlesButtonMouseDown} onClick={onToggleSubtitlesMenu}>
                         <Icon className={styles['icon']} name={'subtitles'} />
+                        {subtitlesSyncing ? <div className={styles['sync-badge']} /> : null}
                     </Button>
                     <Button className={classnames(styles['control-bar-button'], { 'disabled': !Array.isArray(audioTracks) || audioTracks.length === 0 })} tabIndex={-1} onMouseDown={onAudioButtonMouseDown} onClick={onToggleAudioMenu}>
                         <Icon className={styles['icon']} name={'audio-tracks'} />
@@ -208,6 +210,7 @@ ControlBar.propTypes = {
     onVolumeChangeRequested: PropTypes.func,
     onSeekRequested: PropTypes.func,
     onToggleSubtitlesMenu: PropTypes.func,
+    subtitlesSyncing: PropTypes.bool,
     onToggleAudioMenu: PropTypes.func,
     onToggleSpeedMenu: PropTypes.func,
     onToggleSideDrawer: PropTypes.func,

@@ -115,7 +115,69 @@
         }
 
         .stepper {
-            padding: 0 1.5rem 1rem;
+            padding: 0 1.5rem 0.5rem;
+        }
+
+        .auto-sync-container {
+            padding: 0.5rem 1.5rem 0.75rem;
+
+            .sync-button {
+                display: flex;
+                flex-direction: column;
+                align-items: center;
+                justify-content: center;
+                width: 100%;
+                min-height: 2.5rem;
+                padding: 0.4rem 1rem;
+                border-radius: var(--border-radius);
+                background-color: var(--overlay-color);
+                cursor: pointer;
+                transition: background-color 0.15s ease;
+
+                &:hover {
+                    background-color: var(--secondary-accent-color);
+                }
+
+                &:global(.disabled) {
+                    opacity: 0.4;
+                    pointer-events: none;
+                }
+
+                .sync-label {
+                    font-size: 1rem;
+                    font-weight: 600;
+                    color: var(--primary-foreground-color);
+                    text-align: center;
+                }
+
+                .sync-cancel-label {
+                    font-size: 0.8rem;
+                    color: var(--color-placeholder-text);
+                    margin-top: 0.2rem;
+                }
+            }
+
+            .sync-cancel {
+                background-color: var(--overlay-color);
+
+                &:hover {
+                    background-color: @color-primary-dark1;
+                }
+            }
+
+            .sync-done {
+                .sync-label {
+                    color: var(--secondary-accent-color);
+                }
+            }
+
+            .sync-error {
+                .sync-label {
+                    color: #e57373;
+                    font-size: 0.85rem;
+                    font-weight: 500;
+                }
+            }
         }
     }
 }

@@ -97,6 +97,15 @@ const useTraktRecommendations = () => {
                 setRows(results);
                 setLoading(false);
             }
+
+            // Enrich items with IMDB IDs in background (so detail pages work with addons)
+            for (const row of results) {
+                if (cancelled) break;
+                await tmdbService.enrichWithImdbIds(row.items);
+            }
+            if (!cancelled) {
+                setRows([...results]); // trigger re-render with updated IDs
+            }
         };
 
         fetchRows();

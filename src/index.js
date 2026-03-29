@@ -5,6 +5,24 @@ if (typeof process.env.SENTRY_DSN === 'string') {
     Sentry.init({ dsn: process.env.SENTRY_DSN });
 }
 
+// The Stremio shell (stremio-shell-ng.exe) injects a script that calls initShellComm()
+// on page load to establish communication with the Qt WebChannel transport.
+// Define it early so it's available when the shell's load handler fires.
+// The actual Shell service initialization happens later in React (App.js → shell.start()),
+// but this prevents the ReferenceError from the shell's injected script.
+window.initShellComm = function() {
+    // Shell transport is initialized by Shell.start() in App.js.
+    // This stub satisfies the shell's load-time check.
+};
+
+// Clean up deprecated localStorage keys — Trakt is now the single source of truth
+try {
+    localStorage.removeItem('stremio_watchlist');
+    localStorage.removeItem('stremio_not_interested');
+    localStorage.removeItem('stremio_ratings');
+    localStorage.removeItem('stremio_dismissed_names');
+} catch { /* */ }
+
 const Bowser = require('bowser');
 const browser = Bowser.parse(window.navigator?.userAgent || '');
 if (browser?.platform?.type === 'desktop') {

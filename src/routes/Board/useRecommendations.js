@@ -55,6 +55,15 @@ const useRecommendations = () => {
                 setRecommendations(results);
                 setLoading(false);
             }
+
+            // Enrich items with IMDB IDs in background (so detail pages work with addons)
+            for (const rec of results) {
+                if (cancelled) break;
+                await tmdbService.enrichWithImdbIds(rec.items);
+            }
+            if (!cancelled) {
+                setRecommendations([...results]);
+            }
         };
 
         fetchRecs();
