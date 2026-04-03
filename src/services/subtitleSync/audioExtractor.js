@@ -182,7 +182,17 @@ function buildMediaUrl(ssUrl, streamContent) {
 
 function getFetchBase(ssUrl) {
     try {
-        if (new URL(ssUrl).origin === window.location.origin) return '';
+        const ssOrigin = new URL(ssUrl).origin;
+        // Same origin — no prefix needed (e.g. dev mode where SS is the page origin)
+        if (ssOrigin === window.location.origin) return '';
+        // Check if the webpack dev server proxy is available by seeing if we're
+        // on localhost (dev). Otherwise use the streaming server URL directly
+        // (e.g. GitHub Pages or Stremio Shell with remote webui-url).
+        if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
+            return '/streaming-server';
+        }
+        // Direct access — used by Stremio Shell / hosted deployments
+        return ssUrl.replace(/\/$/, '');
     } catch (_) { /* */ }
     return '/streaming-server';
 }
