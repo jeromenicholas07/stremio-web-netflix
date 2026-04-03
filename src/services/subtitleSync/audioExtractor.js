@@ -180,19 +180,21 @@ function buildMediaUrl(ssUrl, streamContent) {
     throw new Error('Could not determine media URL for audio extraction');
 }
 
+const CORS_PROXY_PORT = 12470;
+
 function getFetchBase(ssUrl) {
     try {
         const ssOrigin = new URL(ssUrl).origin;
         // Same origin — no prefix needed (e.g. dev mode where SS is the page origin)
         if (ssOrigin === window.location.origin) return '';
-        // Check if the webpack dev server proxy is available by seeing if we're
-        // on localhost (dev). Otherwise use the streaming server URL directly
-        // (e.g. GitHub Pages or Stremio Shell with remote webui-url).
+        // Localhost dev server — use webpack proxy
         if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
             return '/streaming-server';
         }
-        // Direct access — used by Stremio Shell / hosted deployments
-        return ssUrl.replace(/\/$/, '');
+        // Remote origin (GitHub Pages, Stremio Shell with remote webui-url):
+        // Use the CORS proxy on port 12470 which forwards to the streaming
+        // server on 11470 with proper Access-Control headers.
+        return `http://127.0.0.1:${CORS_PROXY_PORT}`;
     } catch (_) { /* */ }
     return '/streaming-server';
 }
