@@ -196,31 +196,65 @@ async function fetchAndParseSubtitles(track) {
 }
 
 /**
- * Finds the best time offsets to start extracting audio, ranked by
- * subtitle density (most dialogue-packed regions first).
+ * Finds the best time offsets to extract audio, ranked by subtitle density.
  *
- * Returns an array of start times (in seconds) for chunks of `chunkDurationSec`.
- * Prefers regions with the most subtitle cues, skipping sparse/silent areas.
+ * Divides the subtitle timeline into non-overlapping windows, scores each
+ * by the number of cues it contains, then picks the densest windows while
+ * keeping them in chronological order. This lets us sample dialogue-rich
+ * regions from anywhere in the video (beginning, middle, end) while
+ * respecting the HLS transcoder's sequential processing requirement.
  */
 function findBestChunkOffsets(cues, chunkDurationSec, maxChunks) {
     if (!cues || cues.length === 0) return [0];
 
-    // Start from the first subtitle cue (or 0 if it's within the first minute).
-    // Use consecutive, non-overlapping chunks so each request only needs
-    // the transcoder to advance by one chunk — no big seeks.
     const firstCueSec = Math.floor(cues[0].start / 1000);
-    const startSec = firstCueSec <= 60 ? 0 : Math.max(0, firstCueSec - 5);
+    const lastCueSec = Math.ceil(cues[cues.length - 1].end / 1000);
+    const startSec = Math.max(0, firstCueSec - 2);
+    const totalSpan = lastCueSec - startSec;
 
-    const offsets = [];
-    for (let i = 0; i < maxChunks; i++) {
-        offsets.push(startSec + i * chunkDurationSec);
+    // If the subtitle span is short, just use consecutive chunks from the start
+    if (totalSpan <= chunkDurationSec * maxChunks) {
+        const offsets = [];
+        for (let i = 0; i < maxChunks; i++) {
+            const off = startSec + i * chunkDurationSec;
+            if (off > lastCueSec) break;
+            offsets.push(off);
+        }
+        return offsets.length > 0 ? offsets : [startSec];
     }
-    return offsets;
+
+    // Build windows covering the full subtitle range
+    const windows = [];
+    for (let t = startSec; t < lastCueSec; t += chunkDurationSec) {
+        const winStart = t;
+        const winEnd = t + chunkDurationSec;
+        const winStartMs = winStart * 1000;
+        const winEndMs = winEnd * 1000;
+        let count = 0;
+        for (const cue of cues) {
+            if (cue.end > winStartMs && cue.start < winEndMs) count++;
+        }
+        windows.push({ offset: winStart, density: count });
+    }
+
+    // Sort by density descending, pick the top N
+    const ranked = [...windows].sort((a, b) => b.density - a.density);
+    const selected = new Set();
+    for (const win of ranked) {
+        if (selected.size >= maxChunks) break;
+        if (win.density === 0) continue;
+        selected.add(win.offset);
+    }
+
+    // Return in chronological order so the transcoder processes sequentially
+    const offsets = [...selected].sort((a, b) => a - b);
+    return offsets.length > 0 ? offsets : [startSec];
 }
 
 module.exports = {
     parseSubtitles,
     computeOffset,
+    findBestMatch,
     fetchAndParseSubtitles,
     findBestChunkOffsets,
     MIN_MATCHES_FOR_CONFIDENCE,

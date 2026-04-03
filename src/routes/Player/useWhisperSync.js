@@ -1,6 +1,6 @@
 const React = require('react');
 const { createAudioSession } = require('stremio/services/subtitleSync/audioExtractor');
-const { computeOffset, fetchAndParseSubtitles, findBestChunkOffsets, MIN_MATCHES_FOR_CONFIDENCE } = require('stremio/services/subtitleSync/subtitleAligner');
+const { computeOffset, findBestMatch: findBestMatchExport, fetchAndParseSubtitles, findBestChunkOffsets, MIN_MATCHES_FOR_CONFIDENCE } = require('stremio/services/subtitleSync/subtitleAligner');
 
 const SYNC_STATUS = {
     IDLE: 'idle',
@@ -13,7 +13,7 @@ const SYNC_STATUS = {
 };
 
 const CHUNK_DURATION = 15;
-const MAX_CHUNK_ATTEMPTS = 5;
+const MAX_CHUNK_ATTEMPTS = 8;
 const MAX_RETRIES = 3;
 
 const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, setSubtitlesDelay, streamingServerUrl, streamContent) => {
@@ -110,14 +110,18 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 session = await createAudioSession(streamingServerUrl, streamContent);
                 if (cancelledRef.current) return;
 
-                // Consecutive chunk offsets starting from the first subtitle cue
+                // Density-ranked chunk offsets in chronological order — samples
+                // the most dialogue-rich regions from anywhere in the video
                 const chunkOffsets = findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
 
                 // Create worker once per sync attempt — model stays loaded across chunks
                 const worker = createWorker();
 
-                // Try chunks in order — each chunk is consecutive so the
-                // transcoder only needs to advance by one chunk at a time
+                // Accumulate matches across ALL chunks instead of per-chunk.
+                // This lets us build confidence even when individual chunks
+                // only produce 1-2 matches.
+                const allOffsets = [];
+
                 for (let attempt = 0; attempt < chunkOffsets.length; attempt++) {
                     if (cancelledRef.current) return;
 
@@ -138,10 +142,33 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                         audioData.startTime * 1000,
                     );
 
-                    if (result.matchCount >= MIN_MATCHES_FOR_CONFIDENCE) {
-                        const delayMs = Math.round(result.offset);
+                    // Collect individual match offsets from this chunk
+                    if (result.matchCount > 0) {
+                        // Re-derive the raw offsets from this chunk's transcription
+                        for (const chunk of transcription.chunks) {
+                            if (!chunk.text || !chunk.timestamp || chunk.timestamp[0] == null) continue;
+                            const whisperStartMs = audioData.startTime * 1000 + chunk.timestamp[0] * 1000;
+                            const match = findBestMatchExport(chunk.text, cues);
+                            if (match) {
+                                allOffsets.push(whisperStartMs - match.start);
+                            }
+                        }
+                    }
+
+                    if (allOffsets.length >= MIN_MATCHES_FOR_CONFIDENCE) {
+                        const sorted = [...allOffsets].sort((a, b) => a - b);
+                        const mid = Math.floor(sorted.length / 2);
+                        const medianOffset = sorted.length % 2 !== 0
+                            ? sorted[mid]
+                            : (sorted[mid - 1] + sorted[mid]) / 2;
+                        const delayMs = Math.round(medianOffset);
                         setSubtitlesDelay(delayMs);
-                        setSyncResult(result);
+                        setSyncResult({
+                            offset: medianOffset,
+                            confidence: allOffsets.length / Math.max(allOffsets.length + 1, 1),
+                            matchCount: allOffsets.length,
+                            totalChunks: attempt + 1,
+                        });
                         setSyncStatus(SYNC_STATUS.DONE);
                         session.close();
                         return;
@@ -149,9 +176,15 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
 
                     // Last chunk — move on to retry
                     if (attempt === chunkOffsets.length - 1) {
-                        lastError = `Low confidence: only ${result.matchCount} matches found. ` +
+                        lastError = `Low confidence: only ${allOffsets.length} matches found. ` +
                             'Subtitle language may not match audio.';
-                        setSyncResult(result);
+                        setSyncResult({
+                            offset: allOffsets.length > 0
+                                ? allOffsets.sort((a, b) => a - b)[Math.floor(allOffsets.length / 2)]
+                                : 0,
+                            matchCount: allOffsets.length,
+                            totalChunks: chunkOffsets.length,
+                        });
                     }
                 }
 
