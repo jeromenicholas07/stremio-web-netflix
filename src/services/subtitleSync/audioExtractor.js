@@ -180,8 +180,6 @@ function buildMediaUrl(ssUrl, streamContent) {
     throw new Error('Could not determine media URL for audio extraction');
 }
 
-const CORS_PROXY_PORT = 12470;
-
 function getFetchBase(ssUrl) {
     try {
         const ssOrigin = new URL(ssUrl).origin;
@@ -191,10 +189,10 @@ function getFetchBase(ssUrl) {
         if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
             return '/streaming-server';
         }
-        // Remote origin (GitHub Pages, Stremio Shell with remote webui-url):
-        // Use the CORS proxy on port 12470 which forwards to the streaming
-        // server on 11470 with proper Access-Control headers.
-        return `http://127.0.0.1:${CORS_PROXY_PORT}`;
+        // Remote origin (GitHub Pages, Stremio Shell with --disable-web-security):
+        // Talk directly to the streaming server. CORS is disabled via the
+        // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS env var set by the launcher.
+        return ssUrl.replace(/\/$/, '');
     } catch (_) { /* */ }
     return '/streaming-server';
 }
