@@ -36,7 +36,9 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
             workerRef.current.terminate();
         }
         const origin = window.location.origin;
-        const scriptUrl = `${origin}/${process.env.COMMIT_HASH}/scripts/whisperWorker.js`;
+        // Use webpack's publicPath so the URL is correct on both localhost and GitHub Pages
+        const publicPath = __webpack_public_path__ || '/';
+        const scriptUrl = `${origin}${publicPath}${process.env.COMMIT_HASH}/scripts/whisperWorker.js`;
         const shim = 'if(typeof document==="undefined"){globalThis.document={baseURI:"' + origin + '/",currentScript:null};}';
         const blob = new Blob(
             [shim + 'importScripts("' + scriptUrl + '");'],
