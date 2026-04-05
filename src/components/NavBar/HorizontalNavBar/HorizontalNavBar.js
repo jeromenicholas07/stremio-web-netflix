@@ -12,9 +12,7 @@ const styles = require('./styles');
 
 const NAV_LINKS = [
     { id: 'board', label: 'Home', href: '#/' },
-    { id: 'discover', label: 'TV Shows', href: '#/discover' },
-    { id: 'library', label: 'Movies', href: '#/library' },
-    { id: 'calendar', label: 'My List', href: '#/calendar' },
+    { id: 'mylist', label: 'My List', href: '#/mylist' },
 ];
 
 const HorizontalNavBar = React.memo(({ className, route, query, title, backButton, searchBar, fullscreenButton, navMenu, ...props }) => {
@@ -54,13 +52,13 @@ const HorizontalNavBar = React.memo(({ className, route, query, title, backButto
                         <Icon className={styles['icon']} name={'chevron-back'} />
                     </Button>
                     :
-                    <div className={styles['logo-container']}>
+                    <Button className={styles['logo-container']} href={'#/'} tabIndex={-1}>
                         <Image
                             className={styles['logo']}
                             src={require('/assets/images/stremio_symbol.png')}
                             alt={' '}
                         />
-                    </div>
+                    </Button>
             }
             {
                 !backButton ?

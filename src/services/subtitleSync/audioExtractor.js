@@ -41,19 +41,29 @@ async function fetchSegmentWithRetry(url, maxRetries) {
 async function createAudioSession(streamingServerUrl, streamContent) {
     const ssUrl = streamingServerUrl.replace(/\/$/, '');
     const fetchBase = getFetchBase(ssUrl);
-    const mediaUrl = buildMediaUrl(ssUrl, streamContent);
+    // mediaURL must point at the streaming server's own address (it fetches from itself)
+    const mediaUrl = await buildMediaUrl(ssUrl, streamContent, fetchBase);
 
     const id = 'whisper_' + Math.random().toString(36).slice(2);
     const qp = new URLSearchParams();
     qp.set('mediaURL', mediaUrl);
+    // Video codec is required — the HLS transcoder needs it even for audio-only extraction
+    qp.append('videoCodecs', 'h264');
     qp.append('audioCodecs', 'aac');
     qp.set('maxAudioChannels', '1');
 
     const masterUrl = `${fetchBase}/hlsv2/${id}/master.m3u8?${qp}`;
 
     // ── Master playlist ──
+    // eslint-disable-next-line no-console
+    console.log('[WhisperSync] HLS master:', masterUrl, '| mediaURL:', mediaUrl);
     const masterResp = await fetchWithTimeout(masterUrl, {}, 60000);
-    if (!masterResp.ok) throw new Error(`Transcode failed (${masterResp.status})`);
+    if (!masterResp.ok) {
+        const body = await masterResp.text().catch(function () { return ''; });
+        // eslint-disable-next-line no-console
+        console.error('[WhisperSync] Transcode failed:', masterResp.status, body.substring(0, 200));
+        throw new Error(`Transcode failed (${masterResp.status}): ${body.substring(0, 100)}`);
+    }
     const masterText = await masterResp.text();
 
     // Extract audio playlist URI
@@ -153,46 +163,109 @@ async function createAudioSession(streamingServerUrl, streamContent) {
 /**
  * Builds the mediaURL for the HLS transcoder.
  *
- * For torrents: streaming server's own torrent endpoint.
- * For HTTP streams: route through the streaming server's proxy so ffmpeg
- * reads from localhost. This avoids redirect/auth issues with debrid URLs
- * and lets the streaming server reuse its existing connection to the CDN.
+ * Mirrors the official convertStream + createTorrent logic from
+ * @stremio/stremio-video so the streaming server handles it the same way.
  */
-function buildMediaUrl(ssUrl, streamContent) {
+async function buildMediaUrl(ssUrl, streamContent, fetchBase) {
     if (streamContent && typeof streamContent.infoHash === 'string') {
-        const idx = streamContent.fileIdx != null && isFinite(streamContent.fileIdx)
-            ? streamContent.fileIdx : 0;
-        return `${ssUrl}/${encodeURIComponent(streamContent.infoHash)}/${encodeURIComponent(idx)}`;
+        return await resolveTorrentUrl(ssUrl, streamContent, fetchBase);
     }
 
     if (streamContent && typeof streamContent.url === 'string') {
         if (streamContent.url.startsWith('magnet:')) {
             const m = streamContent.url.match(/btih:([a-fA-F0-9]{40})/i)
                 || streamContent.url.match(/btih:([a-zA-Z2-7]{32})/i);
-            if (m) return `${ssUrl}/${encodeURIComponent(m[1].toLowerCase())}/0`;
+            if (m) {
+                return await resolveTorrentUrl(ssUrl, {
+                    infoHash: m[1].toLowerCase(),
+                    fileIdx: null,
+                }, fetchBase);
+            }
         }
         if (streamContent.url.startsWith('http')) {
-            const parsed = new URL(streamContent.url);
-            return `${ssUrl}/proxy/d=${encodeURIComponent(parsed.origin)}${parsed.pathname}${parsed.search}`;
+            return buildProxyUrl(ssUrl, streamContent);
         }
     }
 
     throw new Error('Could not determine media URL for audio extraction');
 }
 
+/**
+ * Resolve torrent URL — calls /create if fileIdx is unknown to get the
+ * correct file index, matching how @stremio/stremio-video does it.
+ */
+async function resolveTorrentUrl(ssUrl, streamContent, fetchBase) {
+    const infoHash = streamContent.infoHash;
+    const fileIdx = streamContent.fileIdx;
+
+    if (fileIdx != null && isFinite(fileIdx)) {
+        return `${ssUrl}/${encodeURIComponent(infoHash)}/${encodeURIComponent(fileIdx)}`;
+    }
+
+    // fileIdx unknown — ask the server to resolve it
+    // Use fetchBase for the HTTP request (CORS proxy), but return ssUrl-based URL
+    // because mediaURL tells the streaming server where to fetch from (itself)
+    try {
+        const createUrl = `${fetchBase}/${encodeURIComponent(infoHash)}/create`;
+        const resp = await fetchWithTimeout(createUrl, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({
+                torrent: { infoHash },
+                guessFileIdx: {},
+            }),
+        }, 30000);
+        if (resp.ok) {
+            const data = await resp.json();
+            const idx = data.guessedFileIdx != null ? data.guessedFileIdx : 0;
+            return `${ssUrl}/${encodeURIComponent(infoHash)}/${encodeURIComponent(idx)}`;
+        }
+    } catch (_) { /* fall through to default */ }
+
+    return `${ssUrl}/${encodeURIComponent(infoHash)}/0`;
+}
+
+/**
+ * Build proxy URL for HTTP streams, including request/response headers
+ * from behaviorHints (needed for debrid services with auth tokens).
+ */
+function buildProxyUrl(ssUrl, streamContent) {
+    const parsed = new URL(streamContent.url);
+    const proxyParams = new URLSearchParams();
+    proxyParams.set('d', parsed.origin);
+
+    // Include proxy headers if the stream provides them (debrid auth, etc.)
+    const proxyHeaders = streamContent.behaviorHints && streamContent.behaviorHints.proxyHeaders;
+    if (proxyHeaders) {
+        if (proxyHeaders.request) {
+            Object.entries(proxyHeaders.request).forEach(function (entry) {
+                proxyParams.append('h', entry[0] + ':' + entry[1]);
+            });
+        }
+        if (proxyHeaders.response) {
+            Object.entries(proxyHeaders.response).forEach(function (entry) {
+                proxyParams.append('r', entry[0] + ':' + entry[1]);
+            });
+        }
+    }
+
+    return `${ssUrl}/proxy/${proxyParams.toString()}${parsed.pathname}${parsed.search}`;
+}
+
 function getFetchBase(ssUrl) {
     try {
         const ssOrigin = new URL(ssUrl).origin;
-        // Same origin — no prefix needed (e.g. dev mode where SS is the page origin)
+        // Same origin — no prefix needed
         if (ssOrigin === window.location.origin) return '';
-        // Localhost dev server — use webpack proxy
+        // Localhost — use webpack dev server proxy
         if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1') {
             return '/streaming-server';
         }
-        // Remote origin (GitHub Pages, Stremio Shell with --disable-web-security):
-        // Talk directly to the streaming server. CORS is disabled via the
-        // WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS env var set by the launcher.
-        return ssUrl.replace(/\/$/, '');
+        // Remote origin (GitHub Pages / Stremio Shell with remote webui-url):
+        // Route through the CORS proxy on port 12470. The launcher bat file
+        // starts a PowerShell-based proxy automatically — no setup needed.
+        const ssUrlObj = new URL(ssUrl);
+        return `http://${ssUrlObj.hostname}:12470`;
     } catch (_) { /* */ }
     return '/streaming-server';
 }

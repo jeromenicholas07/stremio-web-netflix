@@ -1,0 +1,51 @@
+@import (reference) '~@stremio/stremio-colors/less/stremio-colors.less';
+@import (reference) '~stremio/common/screen-sizes.less';
+
+.mylist-container {
+    height: calc(100% - var(--safe-area-inset-bottom));
+    background-color: transparent;
+
+    .mylist-content {
+        width: 100%;
+        height: 100%;
+        overflow-y: auto;
+        padding-top: var(--top-overlay-size);
+
+        .page-title {
+            font-size: 2rem;
+            font-weight: 700;
+            color: #ffffff;
+            padding: 1rem 3.5rem 0.5rem;
+        }
+
+        .connect-message,
+        .empty-message {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 4rem 3.5rem;
+            font-size: 1.1rem;
+            color: #808080;
+        }
+
+        .list-row {
+            margin-bottom: 0.5rem;
+        }
+    }
+}
+
+@media only screen and (max-width: @minimum) {
+    .mylist-container {
+        .mylist-content {
+            .page-title {
+                padding: 1rem 1rem 0.5rem;
+                font-size: 1.5rem;
+            }
+
+            .connect-message,
+            .empty-message {
+                padding: 3rem 1rem;
+            }
+        }
+    }
+}
