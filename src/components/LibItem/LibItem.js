@@ -11,7 +11,7 @@ const LibItem = ({ _id, removable, notifications, watched, onCWAction, ...props 
     const { core } = useServices();
 
     const newVideos = React.useMemo(() => {
-        const count = notifications.items?.[_id]?.length ?? 0;
+        const count = notifications && notifications.items ? (notifications.items[_id]?.length ?? 0) : 0;
         return Math.min(Math.max(count, 0), 99);
     }, [_id, notifications]);
 

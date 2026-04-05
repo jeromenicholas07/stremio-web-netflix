@@ -39,6 +39,11 @@ const YouTubePlayer = React.forwardRef(({ ytId, muted, paused, onEnded, onPlayin
         setReady(false);
 
         const holderDiv = document.createElement('div');
+        holderDiv.style.position = 'absolute';
+        holderDiv.style.top = '0';
+        holderDiv.style.left = '0';
+        holderDiv.style.width = '100%';
+        holderDiv.style.height = '100%';
         containerRef.current.innerHTML = '';
         containerRef.current.appendChild(holderDiv);
 
@@ -46,6 +51,8 @@ const YouTubePlayer = React.forwardRef(({ ytId, muted, paused, onEnded, onPlayin
             if (destroyedRef.current) return;
 
             const player = new YT.Player(holderDiv, {
+                width: '100%',
+                height: '100%',
                 videoId: ytId,
                 playerVars: {
                     autoplay: 1,
