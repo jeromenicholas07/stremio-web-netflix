@@ -19,6 +19,9 @@ const MyList = () => {
     const continueWatchingPreview = useContinueWatchingPreview();
     const isConnected = traktBridge.isConnected();
 
+    const cwItems = continueWatchingPreview && Array.isArray(continueWatchingPreview.items)
+        ? continueWatchingPreview.items : [];
+
     return (
         <MainNavBars className={styles['mylist-container']} route={'mylist'}>
             <div className={styles['mylist-content']} data-scroll-container>
@@ -30,7 +33,7 @@ const MyList = () => {
                     </div>
                 )}
 
-                {continueWatchingPreview.items.length > 0 && (
+                {cwItems.length > 0 && (
                     <MetaRow
                         className={classnames(styles['list-row'], 'animation-fade-in')}
                         title={'Continue Watching'}
@@ -69,7 +72,7 @@ const MyList = () => {
                     />
                 )}
 
-                {isConnected && watchlistItems.length === 0 && watchedNotRatedItems.length === 0 && notInterestedItems.length === 0 && continueWatchingPreview.items.length === 0 && (
+                {isConnected && watchlistItems.length === 0 && watchedNotRatedItems.length === 0 && notInterestedItems.length === 0 && cwItems.length === 0 && (
                     <div className={styles['empty-message']}>
                         <p>Your lists are empty. Start watching content and it will appear here.</p>
                     </div>
