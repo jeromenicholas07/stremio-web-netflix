@@ -29,6 +29,8 @@ if "%SHELL_PATH%"=="" (
 )
 
 :: Start the CORS proxy (PowerShell, runs in background)
+:: Forwards all requests to streaming server on 11470, adding CORS headers.
+:: Handles POST bodies, Content-Type, and error responses.
 start /min "StremioProxy" powershell -NoProfile -WindowStyle Hidden -Command ^
   "$ErrorActionPreference='SilentlyContinue';" ^
   "$l=[System.Net.HttpListener]::new();" ^
@@ -48,6 +50,12 @@ start /min "StremioProxy" powershell -NoProfile -WindowStyle Hidden -Command ^
   "    $w=[System.Net.HttpWebRequest]::Create($u);" ^
   "    $w.Method=$q.HttpMethod; $w.Timeout=120000;" ^
   "    $w.ServicePoint.Expect100Continue=$false;" ^
+  "    if($q.ContentType){$w.ContentType=$q.ContentType}" ^
+  "    if($q.HttpMethod -ne 'GET' -and $q.HttpMethod -ne 'HEAD' -and $q.ContentLength64 -gt 0){" ^
+  "      $rs=$w.GetRequestStream();" ^
+  "      $q.InputStream.CopyTo($rs);" ^
+  "      $rs.Close()" ^
+  "    }" ^
   "    $p=$w.GetResponse();" ^
   "    $r.AddHeader('Access-Control-Allow-Origin','*');" ^
   "    $r.ContentType=$p.ContentType;" ^
