@@ -28,6 +28,17 @@ if "%SHELL_PATH%"=="" (
     exit /b 1
 )
 
+:: Start the audio extraction sidecar (Node.js, port 12471)
+:: Provides fast FFmpeg-based audio extraction for WhisperSync.
+:: Falls back to HLS extraction if Node.js is not available.
+where node >nul 2>&1
+if %errorlevel% equ 0 (
+    start /min "StremioAudioExtract" node "%~dp0audio-extract-server.js"
+    echo  Audio extract server started on port 12471
+) else (
+    echo  Node.js not found — audio extraction will use HLS fallback
+)
+
 :: Start the CORS proxy (PowerShell, runs in background)
 :: Forwards all requests to streaming server on 11470, adding CORS headers.
 :: Handles POST bodies, Content-Type, and error responses.
@@ -84,6 +95,7 @@ timeout /t 1 /nobreak >nul
 :: Launch Stremio Shell
 "%SHELL_PATH%" --webui-url=https://jeromenicholas07.github.io/stremio-web-netflix/
 
-:: When shell closes, kill the proxy
+:: When shell closes, kill the proxy and audio extract server
 taskkill /fi "windowtitle eq StremioProxy" /f >nul 2>&1
+taskkill /fi "windowtitle eq StremioAudioExtract" /f >nul 2>&1
 powershell -NoProfile -Command "Get-Process powershell | Where-Object {$_.MainWindowTitle -eq 'StremioProxy'} | Stop-Process -Force" >nul 2>&1

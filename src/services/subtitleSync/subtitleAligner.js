@@ -237,17 +237,19 @@ function findBestChunkOffsets(cues, chunkDurationSec, maxChunks) {
         windows.push({ offset: winStart, density: count });
     }
 
-    // Sort by density descending, pick the top N
+    // Sort by density descending, pick the top N.
+    // Return in density order (densest first) — the direct FFmpeg extraction
+    // path can seek to any position instantly, so chronological order is not
+    // required. Processing the densest regions first maximises the chance of
+    // reaching confidence in the first batch.
     const ranked = [...windows].sort((a, b) => b.density - a.density);
-    const selected = new Set();
+    const offsets = [];
     for (const win of ranked) {
-        if (selected.size >= maxChunks) break;
+        if (offsets.length >= maxChunks) break;
         if (win.density === 0) continue;
-        selected.add(win.offset);
+        offsets.push(win.offset);
     }
 
-    // Return in chronological order so the transcoder processes sequentially
-    const offsets = [...selected].sort((a, b) => a - b);
     return offsets.length > 0 ? offsets : [startSec];
 }
 

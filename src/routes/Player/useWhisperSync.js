@@ -1,6 +1,17 @@
 const React = require('react');
-const { createAudioSession } = require('stremio/services/subtitleSync/audioExtractor');
-const { computeOffset, findBestMatch: findBestMatchExport, fetchAndParseSubtitles, findBestChunkOffsets, MIN_MATCHES_FOR_CONFIDENCE } = require('stremio/services/subtitleSync/subtitleAligner');
+const {
+    checkExtractServer,
+    extractBatch,
+    resolveMediaUrl,
+    createAudioSession,
+} = require('stremio/services/subtitleSync/audioExtractor');
+const {
+    computeOffset,
+    findBestMatch: findBestMatchExport,
+    fetchAndParseSubtitles,
+    findBestChunkOffsets,
+    MIN_MATCHES_FOR_CONFIDENCE,
+} = require('stremio/services/subtitleSync/subtitleAligner');
 
 const SYNC_STATUS = {
     IDLE: 'idle',
@@ -12,9 +23,10 @@ const SYNC_STATUS = {
     ERROR: 'error',
 };
 
-const CHUNK_DURATION = 15;
-const MAX_CHUNK_ATTEMPTS = 8;
-const MAX_RETRIES = 3;
+const CHUNK_DURATION = 5;           // seconds per chunk (was 15)
+const MAX_CHUNK_ATTEMPTS = 8;       // max chunks to try
+const BATCH_SIZE = 3;               // parallel fetches per batch
+const MAX_RETRIES = 3;              // full pipeline retries (HLS fallback only)
 
 const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, setSubtitlesDelay, streamingServerUrl, streamContent) => {
     const [syncStatus, setSyncStatus] = React.useState(SYNC_STATUS.IDLE);
@@ -84,16 +96,129 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         });
     }, []);
 
-    const runSync = React.useCallback(async () => {
-        const track = getSelectedTrack();
-        if (!track || !streamContent || !streamingServerUrl) return;
+    // ── Collect matches from a transcription result ──
+    const collectMatches = React.useCallback((transcription, audioData, cues) => {
+        const offsets = [];
+        for (const chunk of transcription.chunks) {
+            if (!chunk.text || !chunk.timestamp || chunk.timestamp[0] == null) continue;
+            const whisperStartMs = audioData.startTime * 1000 + chunk.timestamp[0] * 1000;
+            const match = findBestMatchExport(chunk.text, cues);
+            if (match) {
+                offsets.push(whisperStartMs - match.start);
+            }
+        }
+        return offsets;
+    }, []);
 
-        cancelledRef.current = false;
+    // ── Compute and apply the final offset from accumulated matches ──
+    const applyOffset = React.useCallback((allOffsets, totalChunksProcessed) => {
+        const sorted = [...allOffsets].sort((a, b) => a - b);
+        const mid = Math.floor(sorted.length / 2);
+        const medianOffset = sorted.length % 2 !== 0
+            ? sorted[mid]
+            : (sorted[mid - 1] + sorted[mid]) / 2;
+        const delayMs = Math.round(medianOffset);
+        setSubtitlesDelay(delayMs);
+        setSyncResult({
+            offset: medianOffset,
+            confidence: allOffsets.length / Math.max(allOffsets.length + 1, 1),
+            matchCount: allOffsets.length,
+            totalChunks: totalChunksProcessed,
+        });
+        setSyncStatus(SYNC_STATUS.DONE);
+    }, [setSubtitlesDelay]);
+
+    // ══════════════════════════════════════════════════════════════
+    //  Direct extraction path — batch-of-3, parallel fetch, fast
+    // ══════════════════════════════════════════════════════════════
+
+    const runDirectSync = React.useCallback(async (cues) => {
+        if (cancelledRef.current) return;
+
         setSyncStatus(SYNC_STATUS.EXTRACTING);
-        setSyncProgress(0);
-        setSyncError(null);
-        setSyncResult(null);
 
+        const resolved = await resolveMediaUrl(streamingServerUrl, streamContent);
+        const mediaUrl = resolved.url;
+        const mediaHeaders = resolved.headers;
+        if (cancelledRef.current) return;
+
+        // Density-ordered chunk offsets (densest regions first)
+        const chunkOffsets = findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
+
+        // Split into batches of BATCH_SIZE
+        const batches = [];
+        for (let i = 0; i < chunkOffsets.length; i += BATCH_SIZE) {
+            batches.push(chunkOffsets.slice(i, i + BATCH_SIZE));
+        }
+
+        // Create worker once — model stays loaded across all chunks
+        const worker = createWorker();
+        const allOffsets = [];
+        let totalChunksProcessed = 0;
+
+        for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
+            if (cancelledRef.current) return;
+
+            const batch = batches[batchIdx];
+            const batchChunks = batch.map(function (offset) {
+                return { start: offset, duration: CHUNK_DURATION };
+            });
+
+            // ── Parallel fetch: all chunks in this batch at once ──
+            setSyncStatus(SYNC_STATUS.EXTRACTING);
+            // eslint-disable-next-line no-console
+            console.log(
+                '[WhisperSync] Batch', batchIdx + 1, '/', batches.length,
+                '— extracting', batchChunks.length, 'chunks at offsets:',
+                batch.map(function (o) { return o + 's'; }).join(', '),
+            );
+            const audioResults = await extractBatch(mediaUrl, batchChunks, mediaHeaders);
+            if (cancelledRef.current) return;
+
+            // ── Sequential transcribe + align per chunk ──
+            for (let i = 0; i < audioResults.length; i++) {
+                if (cancelledRef.current) return;
+
+                const audioData = audioResults[i];
+                const transcription = await transcribeAudio(worker, audioData);
+                if (cancelledRef.current) return;
+
+                setSyncStatus(SYNC_STATUS.ALIGNING);
+                const matchOffsets = collectMatches(transcription, audioData, cues);
+                allOffsets.push.apply(allOffsets, matchOffsets);
+                totalChunksProcessed++;
+
+                // eslint-disable-next-line no-console
+                console.log(
+                    '[WhisperSync]   Chunk', totalChunksProcessed, '(@' + audioData.startTime + 's):',
+                    matchOffsets.length, 'matches — total:', allOffsets.length,
+                );
+            }
+
+            // ── Early stop: enough confidence? ──
+            if (allOffsets.length >= MIN_MATCHES_FOR_CONFIDENCE) {
+                // eslint-disable-next-line no-console
+                console.log('[WhisperSync] Confidence reached after', totalChunksProcessed, 'chunks');
+                applyOffset(allOffsets, totalChunksProcessed);
+                return;
+            }
+        }
+
+        // All batches exhausted
+        if (allOffsets.length > 0) {
+            // eslint-disable-next-line no-console
+            console.log('[WhisperSync] Low confidence — applying best effort with', allOffsets.length, 'matches');
+            applyOffset(allOffsets, totalChunksProcessed);
+        } else {
+            throw new Error('No matches found. Subtitle language may not match audio.');
+        }
+    }, [streamingServerUrl, streamContent, createWorker, transcribeAudio, collectMatches, applyOffset]);
+
+    // ══════════════════════════════════════════════════════════════
+    //  HLS fallback path — sequential, original algorithm
+    // ══════════════════════════════════════════════════════════════
+
+    const runHlsSync = React.useCallback(async (cues) => {
         let lastError = null;
 
         for (let retry = 0; retry < MAX_RETRIES; retry++) {
@@ -101,33 +226,22 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
 
             let session = null;
             try {
-                // Parse subtitle cues
-                const cues = await fetchAndParseSubtitles(track);
-                if (cancelledRef.current) return;
-                if (!cues.length) throw new Error('No subtitle cues found');
-
                 setSyncStatus(SYNC_STATUS.EXTRACTING);
 
-                // Create audio session (fetches HLS playlist + init segment once)
                 session = await createAudioSession(streamingServerUrl, streamContent);
                 if (cancelledRef.current) return;
 
-                // Density-ranked chunk offsets in chronological order — samples
-                // the most dialogue-rich regions from anywhere in the video
+                // For HLS fallback, chunks must be chronological (transcoder is sequential)
                 const chunkOffsets = findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
+                const chronological = [...chunkOffsets].sort(function (a, b) { return a - b; });
 
-                // Create worker once per sync attempt — model stays loaded across chunks
                 const worker = createWorker();
-
-                // Accumulate matches across ALL chunks instead of per-chunk.
-                // This lets us build confidence even when individual chunks
-                // only produce 1-2 matches.
                 const allOffsets = [];
 
-                for (let attempt = 0; attempt < chunkOffsets.length; attempt++) {
+                for (let attempt = 0; attempt < chronological.length; attempt++) {
                     if (cancelledRef.current) return;
 
-                    const startTime = chunkOffsets[attempt];
+                    const startTime = chronological[attempt];
                     setSyncStatus(SYNC_STATUS.EXTRACTING);
 
                     const audioData = await session.getChunk(startTime, CHUNK_DURATION);
@@ -138,54 +252,24 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
 
                     setSyncStatus(SYNC_STATUS.ALIGNING);
 
-                    const result = computeOffset(
-                        transcription.chunks,
-                        cues,
-                        audioData.startTime * 1000,
-                    );
-
-                    // Collect individual match offsets from this chunk
-                    if (result.matchCount > 0) {
-                        // Re-derive the raw offsets from this chunk's transcription
-                        for (const chunk of transcription.chunks) {
-                            if (!chunk.text || !chunk.timestamp || chunk.timestamp[0] == null) continue;
-                            const whisperStartMs = audioData.startTime * 1000 + chunk.timestamp[0] * 1000;
-                            const match = findBestMatchExport(chunk.text, cues);
-                            if (match) {
-                                allOffsets.push(whisperStartMs - match.start);
-                            }
-                        }
-                    }
+                    const matchOffsets = collectMatches(transcription, audioData, cues);
+                    allOffsets.push.apply(allOffsets, matchOffsets);
 
                     if (allOffsets.length >= MIN_MATCHES_FOR_CONFIDENCE) {
-                        const sorted = [...allOffsets].sort((a, b) => a - b);
-                        const mid = Math.floor(sorted.length / 2);
-                        const medianOffset = sorted.length % 2 !== 0
-                            ? sorted[mid]
-                            : (sorted[mid - 1] + sorted[mid]) / 2;
-                        const delayMs = Math.round(medianOffset);
-                        setSubtitlesDelay(delayMs);
-                        setSyncResult({
-                            offset: medianOffset,
-                            confidence: allOffsets.length / Math.max(allOffsets.length + 1, 1),
-                            matchCount: allOffsets.length,
-                            totalChunks: attempt + 1,
-                        });
-                        setSyncStatus(SYNC_STATUS.DONE);
+                        applyOffset(allOffsets, attempt + 1);
                         session.close();
                         return;
                     }
 
-                    // Last chunk — move on to retry
-                    if (attempt === chunkOffsets.length - 1) {
-                        lastError = `Low confidence: only ${allOffsets.length} matches found. ` +
+                    if (attempt === chronological.length - 1) {
+                        lastError = 'Low confidence: only ' + allOffsets.length + ' matches found. ' +
                             'Subtitle language may not match audio.';
                         setSyncResult({
                             offset: allOffsets.length > 0
-                                ? allOffsets.sort((a, b) => a - b)[Math.floor(allOffsets.length / 2)]
+                                ? allOffsets.sort(function (a, b) { return a - b; })[Math.floor(allOffsets.length / 2)]
                                 : 0,
                             matchCount: allOffsets.length,
-                            totalChunks: chunkOffsets.length,
+                            totalChunks: chronological.length,
                         });
                     }
                 }
@@ -197,19 +281,56 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 lastError = error.message || 'Sync failed';
             }
 
-            // Brief pause before retry
             if (retry < MAX_RETRIES - 1) {
                 setSyncStatus(SYNC_STATUS.EXTRACTING);
-                await new Promise((r) => setTimeout(r, 2000));
+                await new Promise(function (r) { setTimeout(r, 2000); });
             }
         }
 
-        // All retries exhausted
         if (!cancelledRef.current) {
-            setSyncStatus(SYNC_STATUS.ERROR);
-            setSyncError(lastError || 'Sync failed after multiple attempts');
+            throw new Error(lastError || 'Sync failed after multiple attempts');
         }
-    }, [streamingServerUrl, streamContent, getSelectedTrack, createWorker, setSubtitlesDelay, transcribeAudio]);
+    }, [streamingServerUrl, streamContent, createWorker, transcribeAudio, collectMatches, applyOffset]);
+
+    // ══════════════════════════════════════════════════════════════
+    //  Main entry point — picks the best available extraction path
+    // ══════════════════════════════════════════════════════════════
+
+    const runSync = React.useCallback(async () => {
+        const track = getSelectedTrack();
+        if (!track || !streamContent || !streamingServerUrl) return;
+
+        cancelledRef.current = false;
+        setSyncStatus(SYNC_STATUS.EXTRACTING);
+        setSyncProgress(0);
+        setSyncError(null);
+        setSyncResult(null);
+
+        try {
+            // Parse subtitle cues
+            const cues = await fetchAndParseSubtitles(track);
+            if (cancelledRef.current) return;
+            if (!cues.length) throw new Error('No subtitle cues found');
+
+            // Prefer direct FFmpeg extraction (fast, seekable, parallel batches)
+            const directAvailable = await checkExtractServer();
+
+            if (directAvailable) {
+                // eslint-disable-next-line no-console
+                console.log('[WhisperSync] Using direct FFmpeg extraction (sidecar on :12471)');
+                await runDirectSync(cues);
+            } else {
+                // eslint-disable-next-line no-console
+                console.log('[WhisperSync] Sidecar unavailable — falling back to HLS extraction');
+                await runHlsSync(cues);
+            }
+        } catch (error) {
+            if (!cancelledRef.current) {
+                setSyncStatus(SYNC_STATUS.ERROR);
+                setSyncError(error.message || 'Sync failed');
+            }
+        }
+    }, [streamingServerUrl, streamContent, getSelectedTrack, runDirectSync, runHlsSync]);
 
     const startSync = React.useCallback(() => {
         runSync();

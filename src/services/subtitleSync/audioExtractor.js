@@ -1,5 +1,6 @@
 const TARGET_SAMPLE_RATE = 16000;
 const FETCH_TIMEOUT_MS = 30000;
+const EXTRACT_SERVER_URL = 'http://127.0.0.1:12471';
 
 function fetchWithTimeout(url, opts, timeoutMs) {
     const controller = new AbortController();
@@ -7,6 +8,99 @@ function fetchWithTimeout(url, opts, timeoutMs) {
     const merged = { ...opts, signal: controller.signal };
     return fetch(url, merged).finally(() => clearTimeout(timer));
 }
+
+// ══════════════════════════════════════════════════════════════
+//  Direct FFmpeg extraction (Option A — fast, seekable)
+// ══════════════════════════════════════════════════════════════
+
+/**
+ * Check whether the audio-extract sidecar server is running.
+ */
+async function checkExtractServer() {
+    try {
+        const r = await fetchWithTimeout(`${EXTRACT_SERVER_URL}/health`, {}, 3000);
+        return r.ok;
+    } catch (_) {
+        return false;
+    }
+}
+
+/**
+ * Extract a single audio chunk via the sidecar FFmpeg server.
+ * Returns raw 16 kHz mono Float32 PCM — no browser-side decoding needed.
+ *
+ * @param {string} mediaUrl  — URL that FFmpeg can fetch directly
+ * @param {number} startSec  — start offset in seconds
+ * @param {number} durationSec — chunk duration in seconds
+ * @param {string|null} headers — optional HTTP headers for FFmpeg (debrid auth etc.)
+ */
+async function extractChunkDirect(mediaUrl, startSec, durationSec, headers) {
+    const params = new URLSearchParams({
+        mediaURL: mediaUrl,
+        start: String(startSec),
+        duration: String(durationSec),
+    });
+    if (headers) {
+        params.set('headers', headers);
+    }
+    const resp = await fetchWithTimeout(
+        `${EXTRACT_SERVER_URL}/audio-extract?${params}`,
+        {},
+        30000,
+    );
+    if (!resp.ok) {
+        const body = await resp.text().catch(function () { return ''; });
+        throw new Error('Extract failed (' + resp.status + '): ' + body.substring(0, 100));
+    }
+
+    const arrayBuf = await resp.arrayBuffer();
+    // Server outputs raw f32le — wrap directly as Float32Array
+    const pcm = new Float32Array(arrayBuf);
+
+    return {
+        audio: pcm,
+        sampleRate: TARGET_SAMPLE_RATE,
+        startTime: startSec,
+        duration: durationSec,
+    };
+}
+
+/**
+ * Extract multiple chunks in parallel.
+ * Each entry: { start: seconds, duration: seconds }
+ * Returns an array of audio results in the same order.
+ */
+async function extractBatch(mediaUrl, chunks, headers) {
+    return Promise.all(
+        chunks.map(function (c) {
+            return extractChunkDirect(mediaUrl, c.start, c.duration, headers);
+        }),
+    );
+}
+
+/**
+ * Resolve the mediaURL that FFmpeg can fetch from directly.
+ *
+ * FFmpeg runs locally and can only do plain HTTP reliably (the bundled
+ * ffmpeg-static build often lacks working TLS on Windows). So we always
+ * route through the streaming server on localhost:
+ *   - Torrents → http://127.0.0.1:11470/<hash>/<idx>
+ *   - HTTP/Debrid → http://127.0.0.1:11470/proxy/...  (streaming server proxies the HTTPS request)
+ *
+ * All URLs are plain HTTP to localhost — no TLS, no CORS issues for FFmpeg.
+ */
+async function resolveMediaUrl(streamingServerUrl, streamContent) {
+    const ssUrl = streamingServerUrl.replace(/\/$/, '');
+    const fetchBase = getFetchBase(ssUrl);
+    // buildMediaUrl returns URLs relative to ssUrl (the streaming server),
+    // which is exactly what FFmpeg needs — plain HTTP to localhost.
+    var url = await buildMediaUrl(ssUrl, streamContent, fetchBase);
+    return { url: url, headers: null };
+}
+
+// ══════════════════════════════════════════════════════════════
+//  HLS-based extraction (fallback when sidecar is unavailable)
+// ══════════════════════════════════════════════════════════════
 
 /**
  * Fetch a single segment with retry. The HLS transcoder processes segments
@@ -158,7 +252,9 @@ async function createAudioSession(streamingServerUrl, streamContent) {
     };
 }
 
-// ── URL helpers ──
+// ══════════════════════════════════════════════════════════════
+//  URL helpers (shared by both extraction paths)
+// ══════════════════════════════════════════════════════════════
 
 /**
  * Builds the mediaURL for the HLS transcoder.
@@ -318,4 +414,13 @@ function parsePlaylist(text, playlistUrl, fetchBase) {
     return { initUrl, segments };
 }
 
-module.exports = { createAudioSession, TARGET_SAMPLE_RATE };
+module.exports = {
+    // Direct extraction (primary)
+    checkExtractServer,
+    extractChunkDirect,
+    extractBatch,
+    resolveMediaUrl,
+    // HLS extraction (fallback)
+    createAudioSession,
+    TARGET_SAMPLE_RATE,
+};
