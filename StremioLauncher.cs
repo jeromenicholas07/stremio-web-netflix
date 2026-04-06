@@ -37,6 +37,7 @@ class StremioLauncher
             try
             {
                 _audioTcp = new TcpListener(IPAddress.Loopback, 12471);
+                _audioTcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
                 _audioTcp.Start();
                 new Thread(AudioAcceptLoop) { IsBackground = true }.Start();
                 Console.WriteLine("[OK] Audio extract server on :12471 (FFmpeg: " + _ffmpeg + ")");
@@ -55,6 +56,7 @@ class StremioLauncher
         try
         {
             _corsTcp = new TcpListener(IPAddress.Loopback, 12470);
+            _corsTcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
             _corsTcp.Start();
             new Thread(CorsAcceptLoop) { IsBackground = true }.Start();
             Console.WriteLine("[OK] CORS proxy on :12470");
@@ -66,16 +68,26 @@ class StremioLauncher
 
         Thread.Sleep(500);
 
+        // Graceful shutdown on Ctrl+C or console close
+        Console.CancelKeyPress += delegate { Shutdown(); };
+        AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
+
         // Launch Stremio Shell
         Console.WriteLine("[OK] Launching Stremio...");
         var proc = Process.Start(shell, "--webui-url=https://jeromenicholas07.github.io/stremio-web-netflix/");
         proc.WaitForExit();
 
-        // Cleanup
-        Console.WriteLine("Stremio closed. Cleaning up...");
+        Shutdown();
+        return 0;
+    }
+
+    static int _shutdown = 0;
+    static void Shutdown()
+    {
+        if (Interlocked.Exchange(ref _shutdown, 1) == 1) return;
+        Console.WriteLine("Shutting down...");
         try { if (_audioTcp != null) _audioTcp.Stop(); } catch { }
         try { if (_corsTcp != null) _corsTcp.Stop(); } catch { }
-        return 0;
     }
 
     // ── Startup cleanup ──────────────────────────────────────
@@ -85,6 +97,7 @@ class StremioLauncher
         int myPid = Process.GetCurrentProcess().Id;
         string myName = Process.GetCurrentProcess().ProcessName;
 
+        // Kill previous launcher instances
         foreach (var p in Process.GetProcessesByName(myName))
         {
             if (p.Id == myPid) continue;
@@ -97,9 +110,77 @@ class StremioLauncher
             catch { }
         }
 
+        // Kill leftover PowerShell processes from old .bat launcher
+        foreach (var p in Process.GetProcessesByName("powershell"))
+        {
+            try
+            {
+                string title = p.MainWindowTitle;
+                if (title == "StremioProxy" || title == "StremioAudioExtract")
+                {
+                    Console.WriteLine("[CLEANUP] Killing old PowerShell process: " + title + " (PID " + p.Id + ")");
+                    p.Kill();
+                    p.WaitForExit(3000);
+                }
+            }
+            catch { }
+        }
+
+        // Kill any process holding our ports
         KillByPort(12471);
         KillByPort(12470);
-        Thread.Sleep(300);
+
+        // If HTTP.sys (PID 4) is still squatting on our ports, restart the HTTP service to release them
+        // This requires admin privileges
+        if (IsPortHeldBySystem(12470) || IsPortHeldBySystem(12471))
+        {
+            Console.WriteLine("[CLEANUP] HTTP.sys holding ports - restarting HTTP service (needs admin)...");
+            try
+            {
+                var psi = new ProcessStartInfo("cmd.exe", "/c net stop http /y && net start http")
+                {
+                    Verb = "runas",
+                    UseShellExecute = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                var p = Process.Start(psi);
+                p.WaitForExit(15000);
+                Thread.Sleep(1000);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[WARN] Could not restart HTTP service: " + ex.Message);
+            }
+        }
+    }
+
+    static bool IsPortHeldBySystem(int port)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("netstat", "-ano")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            var proc = Process.Start(psi);
+            string output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+
+            string search = "127.0.0.1:" + port;
+            foreach (string line in output.Split('\n'))
+            {
+                if (line.IndexOf(search) < 0 || line.IndexOf("LISTENING") < 0) continue;
+                string[] parts = line.Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 5) continue;
+                int pid;
+                if (int.TryParse(parts[parts.Length - 1], out pid) && pid == 4)
+                    return true;
+            }
+        }
+        catch { }
+        return false;
     }
 
     static void KillByPort(int port)
@@ -121,8 +202,7 @@ class StremioLauncher
 
             foreach (string line in output.Split('\n'))
             {
-                if (line.IndexOf(search) < 0) continue;
-                if (line.IndexOf("LISTENING") < 0) continue;
+                if (line.IndexOf(search) < 0 || line.IndexOf("LISTENING") < 0) continue;
                 string[] parts = line.Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 5) continue;
                 int pid;
@@ -138,6 +218,24 @@ class StremioLauncher
                     catch { }
                 }
             }
+        }
+        catch { }
+    }
+
+    static void RunCmd(string exe, string args)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(exe, args)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            var p = Process.Start(psi);
+            p.StandardOutput.ReadToEnd();
+            p.WaitForExit(10000);
         }
         catch { }
     }

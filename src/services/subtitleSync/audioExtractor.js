@@ -90,10 +90,20 @@ async function extractBatch(mediaUrl, chunks, headers) {
  * All URLs are plain HTTP to localhost — no TLS, no CORS issues for FFmpeg.
  */
 async function resolveMediaUrl(streamingServerUrl, streamContent) {
-    const ssUrl = streamingServerUrl.replace(/\/$/, '');
-    const fetchBase = getFetchBase(ssUrl);
-    // buildMediaUrl returns URLs relative to ssUrl (the streaming server),
-    // which is exactly what FFmpeg needs — plain HTTP to localhost.
+    // FFmpeg runs locally and doesn't need CORS — always target the real
+    // streaming server on port 11470, never the CORS proxy on 12470.
+    var ssUrl = streamingServerUrl.replace(/\/$/, '');
+    var ssUrlObj;
+    try { ssUrlObj = new URL(ssUrl); } catch (_) { /* */ }
+    if (ssUrlObj && ssUrlObj.port === '12470') {
+        ssUrlObj.port = '11470';
+        ssUrl = ssUrlObj.origin;
+    }
+    var fetchBase = getFetchBase(ssUrl);
+    // fetchBase may also point to the CORS proxy — force it to streaming server too
+    if (fetchBase.indexOf(':12470') !== -1) {
+        fetchBase = fetchBase.replace(':12470', ':11470');
+    }
     var url = await buildMediaUrl(ssUrl, streamContent, fetchBase);
     return { url: url, headers: null };
 }
