@@ -13,6 +13,9 @@ class StremioLauncher
 
     static int Main()
     {
+        // Kill any previous launcher instances
+        KillExisting();
+
         // Find Stremio Shell
         string shell = FindShell();
         if (shell == null)
@@ -121,6 +124,25 @@ class StremioLauncher
         catch { }
 
         return null;
+    }
+
+    static void KillExisting()
+    {
+        int myPid = Process.GetCurrentProcess().Id;
+        string myName = Process.GetCurrentProcess().ProcessName;
+        foreach (var p in Process.GetProcessesByName(myName))
+        {
+            if (p.Id == myPid) continue;
+            try
+            {
+                Console.WriteLine("[CLEANUP] Killing previous instance (PID " + p.Id + ")");
+                p.Kill();
+                p.WaitForExit(3000);
+            }
+            catch { }
+        }
+        // Brief pause for ports to release
+        Thread.Sleep(500);
     }
 
     // ── Audio Extraction Server ──────────────────────────────
