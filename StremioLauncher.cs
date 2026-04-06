@@ -129,20 +129,68 @@ class StremioLauncher
     static void KillExisting()
     {
         int myPid = Process.GetCurrentProcess().Id;
+
+        // Kill previous launcher instances
         string myName = Process.GetCurrentProcess().ProcessName;
         foreach (var p in Process.GetProcessesByName(myName))
         {
             if (p.Id == myPid) continue;
             try
             {
-                Console.WriteLine("[CLEANUP] Killing previous instance (PID " + p.Id + ")");
+                Console.WriteLine("[CLEANUP] Killing previous launcher (PID " + p.Id + ")");
                 p.Kill();
                 p.WaitForExit(3000);
             }
             catch { }
         }
+
+        // Kill anything holding our ports (e.g. leftover PowerShell processes)
+        KillByPort(12471);
+        KillByPort(12470);
+
         // Brief pause for ports to release
         Thread.Sleep(500);
+    }
+
+    static void KillByPort(int port)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo("netstat", "-ano")
+            {
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                CreateNoWindow = true
+            };
+            var proc = Process.Start(psi);
+            string output = proc.StandardOutput.ReadToEnd();
+            proc.WaitForExit(5000);
+
+            int myPid = Process.GetCurrentProcess().Id;
+            string search = "127.0.0.1:" + port;
+
+            foreach (string line in output.Split('\n'))
+            {
+                if (line.IndexOf(search) < 0) continue;
+                if (line.IndexOf("LISTENING") < 0) continue;
+                string trimmed = line.Trim();
+                string[] parts = trimmed.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length < 5) continue;
+                int pid;
+                if (int.TryParse(parts[parts.Length - 1], out pid) && pid != myPid && pid != 0)
+                {
+                    try
+                    {
+                        var p = Process.GetProcessById(pid);
+                        Console.WriteLine("[CLEANUP] Killing process on port " + port + ": " + p.ProcessName + " (PID " + pid + ")");
+                        p.Kill();
+                        p.WaitForExit(3000);
+                    }
+                    catch { }
+                }
+            }
+        }
+        catch { }
     }
 
     // ── Audio Extraction Server ──────────────────────────────
