@@ -1,19 +1,21 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 
 class StremioLauncher
 {
     static string _ffmpeg;
-    static HttpListener _audioLn;
-    static HttpListener _corsLn;
+    static TcpListener _audioTcp;
+    static TcpListener _corsTcp;
 
     static int Main()
     {
-        // Kill any previous launcher instances
+        // Kill any previous instances and free ports
         KillExisting();
 
         // Find Stremio Shell
@@ -29,15 +31,14 @@ class StremioLauncher
         string stremioDir = Path.GetDirectoryName(shell);
         _ffmpeg = FindFFmpeg(stremioDir);
 
-        // Start audio extraction server
+        // Start audio extraction server (port 12471)
         if (_ffmpeg != null)
         {
             try
             {
-                _audioLn = new HttpListener();
-                _audioLn.Prefixes.Add("http://127.0.0.1:12471/");
-                _audioLn.Start();
-                new Thread(AudioLoop) { IsBackground = true }.Start();
+                _audioTcp = new TcpListener(IPAddress.Loopback, 12471);
+                _audioTcp.Start();
+                new Thread(AudioAcceptLoop) { IsBackground = true }.Start();
                 Console.WriteLine("[OK] Audio extract server on :12471 (FFmpeg: " + _ffmpeg + ")");
             }
             catch (Exception ex)
@@ -50,13 +51,12 @@ class StremioLauncher
             Console.WriteLine("[INFO] FFmpeg not found - subtitle sync will use HLS fallback");
         }
 
-        // Start CORS proxy
+        // Start CORS proxy (port 12470)
         try
         {
-            _corsLn = new HttpListener();
-            _corsLn.Prefixes.Add("http://127.0.0.1:12470/");
-            _corsLn.Start();
-            new Thread(CorsLoop) { IsBackground = true }.Start();
+            _corsTcp = new TcpListener(IPAddress.Loopback, 12470);
+            _corsTcp.Start();
+            new Thread(CorsAcceptLoop) { IsBackground = true }.Start();
             Console.WriteLine("[OK] CORS proxy on :12470");
         }
         catch (Exception ex)
@@ -73,65 +73,18 @@ class StremioLauncher
 
         // Cleanup
         Console.WriteLine("Stremio closed. Cleaning up...");
-        try { if (_audioLn != null) _audioLn.Stop(); } catch { }
-        try { if (_corsLn != null) _corsLn.Stop(); } catch { }
+        try { if (_audioTcp != null) _audioTcp.Stop(); } catch { }
+        try { if (_corsTcp != null) _corsTcp.Stop(); } catch { }
         return 0;
     }
 
-    static string FindShell()
-    {
-        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
-        string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
-        string progX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-
-        string[] candidates = {
-            Path.Combine(local, "Programs", "Stremio", "stremio-shell-ng.exe"),
-            Path.Combine(local, "Programs", "LNV", "Stremio-4", "stremio-shell-ng.exe"),
-            Path.Combine(progFiles, "Stremio", "stremio-shell-ng.exe"),
-            Path.Combine(progX86, "Stremio", "stremio-shell-ng.exe"),
-        };
-
-        foreach (var c in candidates)
-            if (File.Exists(c)) return c;
-        return null;
-    }
-
-    static string FindFFmpeg(string stremioDir)
-    {
-        // 1. Same directory as Stremio Shell
-        string inStremio = Path.Combine(stremioDir, "ffmpeg.exe");
-        if (File.Exists(inStremio)) return inStremio;
-
-        // 2. stremio-runtime subdirectory
-        string inRuntime = Path.Combine(stremioDir, "stremio-runtime", "ffmpeg.exe");
-        if (File.Exists(inRuntime)) return inRuntime;
-
-        // 3. System PATH
-        try
-        {
-            var psi = new ProcessStartInfo("ffmpeg", "-version")
-            {
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            var p = Process.Start(psi);
-            p.StandardOutput.ReadToEnd();
-            p.WaitForExit(5000);
-            if (p.ExitCode == 0) return "ffmpeg";
-        }
-        catch { }
-
-        return null;
-    }
+    // ── Startup cleanup ──────────────────────────────────────
 
     static void KillExisting()
     {
         int myPid = Process.GetCurrentProcess().Id;
-
-        // Kill previous launcher instances
         string myName = Process.GetCurrentProcess().ProcessName;
+
         foreach (var p in Process.GetProcessesByName(myName))
         {
             if (p.Id == myPid) continue;
@@ -144,12 +97,9 @@ class StremioLauncher
             catch { }
         }
 
-        // Kill anything holding our ports (e.g. leftover PowerShell processes)
         KillByPort(12471);
         KillByPort(12470);
-
-        // Brief pause for ports to release
-        Thread.Sleep(500);
+        Thread.Sleep(300);
     }
 
     static void KillByPort(int port)
@@ -173,11 +123,10 @@ class StremioLauncher
             {
                 if (line.IndexOf(search) < 0) continue;
                 if (line.IndexOf("LISTENING") < 0) continue;
-                string trimmed = line.Trim();
-                string[] parts = trimmed.Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                string[] parts = line.Trim().Split(new char[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length < 5) continue;
                 int pid;
-                if (int.TryParse(parts[parts.Length - 1], out pid) && pid != myPid && pid != 0)
+                if (int.TryParse(parts[parts.Length - 1], out pid) && pid != myPid && pid > 4)
                 {
                     try
                     {
@@ -193,210 +142,373 @@ class StremioLauncher
         catch { }
     }
 
-    // ── Audio Extraction Server ──────────────────────────────
+    // ── Find Stremio / FFmpeg ────────────────────────────────
 
-    static void AudioLoop()
+    static string FindShell()
     {
-        while (_audioLn.IsListening)
-        {
-            HttpListenerContext ctx;
-            try { ctx = _audioLn.GetContext(); }
-            catch { break; }
+        string local = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        string progFiles = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles);
+        string progX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
 
-            ThreadPool.QueueUserWorkItem(_ => HandleAudio(ctx));
-        }
+        string[] candidates = {
+            Path.Combine(local, "Programs", "Stremio", "stremio-shell-ng.exe"),
+            Path.Combine(local, "Programs", "LNV", "Stremio-4", "stremio-shell-ng.exe"),
+            Path.Combine(progFiles, "Stremio", "stremio-shell-ng.exe"),
+            Path.Combine(progX86, "Stremio", "stremio-shell-ng.exe"),
+        };
+
+        foreach (var c in candidates)
+            if (File.Exists(c)) return c;
+        return null;
     }
 
-    static void HandleAudio(HttpListenerContext ctx)
+    static string FindFFmpeg(string stremioDir)
     {
-        var req = ctx.Request;
-        var res = ctx.Response;
+        string inStremio = Path.Combine(stremioDir, "ffmpeg.exe");
+        if (File.Exists(inStremio)) return inStremio;
 
-        res.AddHeader("Access-Control-Allow-Origin", "*");
-        res.AddHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
-        res.AddHeader("Access-Control-Allow-Headers", "*");
+        string inRuntime = Path.Combine(stremioDir, "stremio-runtime", "ffmpeg.exe");
+        if (File.Exists(inRuntime)) return inRuntime;
 
         try
         {
-            if (req.HttpMethod == "OPTIONS") { res.StatusCode = 204; res.Close(); return; }
-
-            string path = req.Url.AbsolutePath;
-
-            if (path == "/health")
+            var psi = new ProcessStartInfo("ffmpeg", "-version")
             {
-                string json = "{\"status\":\"ok\",\"ffmpeg\":\"" + _ffmpeg.Replace("\\", "\\\\") + "\"}";
-                byte[] b = Encoding.UTF8.GetBytes(json);
-                res.ContentType = "application/json";
-                res.OutputStream.Write(b, 0, b.Length);
-                res.Close();
-                return;
-            }
-
-            if (path != "/audio-extract") { res.StatusCode = 404; res.Close(); return; }
-
-            string mediaURL = req.QueryString["mediaURL"];
-            string start = req.QueryString["start"] ?? "0";
-            string duration = req.QueryString["duration"] ?? "5";
-
-            if (string.IsNullOrEmpty(mediaURL))
-            {
-                res.StatusCode = 400;
-                byte[] b = Encoding.UTF8.GetBytes("Missing mediaURL");
-                res.OutputStream.Write(b, 0, b.Length);
-                res.Close();
-                return;
-            }
-
-            // Build FFmpeg arguments — URL is always quoted
-            string args = string.Format(
-                "-ss {0} -i \"{1}\" -t {2} -vn -ac 1 -ar 16000 -f f32le -y pipe:1",
-                start, mediaURL, duration);
-
-            string hdrs = req.QueryString["headers"];
-            if (!string.IsNullOrEmpty(hdrs))
-                args = string.Format("-headers \"{0}\r\n\" {1}", hdrs, args);
-
-            Console.WriteLine("[Extract] start={0}s dur={1}s url={2}...",
-                start, duration, mediaURL.Length > 80 ? mediaURL.Substring(0, 80) : mediaURL);
-
-            var psi = new ProcessStartInfo(_ffmpeg, args)
-            {
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
+                UseShellExecute = false, CreateNoWindow = true,
+                RedirectStandardOutput = true, RedirectStandardError = true
             };
+            var p = Process.Start(psi);
+            p.StandardOutput.ReadToEnd();
+            p.WaitForExit(5000);
+            if (p.ExitCode == 0) return "ffmpeg";
+        }
+        catch { }
 
-            var proc = Process.Start(psi);
+        return null;
+    }
 
-            // Read stderr async to avoid deadlock
-            StringBuilder stderrBuf = new StringBuilder();
-            proc.ErrorDataReceived += (s, e) => { if (e.Data != null) stderrBuf.AppendLine(e.Data); };
-            proc.BeginErrorReadLine();
+    // ── Minimal HTTP helpers (no HttpListener/HTTP.sys) ──────
 
-            // Read stdout (binary PCM data)
-            var ms = new MemoryStream();
-            proc.StandardOutput.BaseStream.CopyTo(ms);
-
-            if (!proc.WaitForExit(30000))
+    static string ReadHttpRequest(Stream s, out string method, out string path, out string queryString, out Dictionary<string, string> headers)
+    {
+        // Read until \r\n\r\n
+        var buf = new List<byte>();
+        int prev3 = 0, prev2 = 0, prev1 = 0;
+        while (true)
+        {
+            int b = s.ReadByte();
+            if (b < 0) break;
+            buf.Add((byte)b);
+            if (prev2 == '\r' && prev1 == '\n' && b == '\n' && prev3 == '\r') break; // ..but we check prev char
+            // Simpler: check for \r\n\r\n at end
+            if (buf.Count >= 4)
             {
-                try { proc.Kill(); } catch { }
-                res.StatusCode = 504;
-                byte[] b = Encoding.UTF8.GetBytes("FFmpeg timed out (30s)");
-                res.OutputStream.Write(b, 0, b.Length);
-                res.Close();
-                return;
+                int l = buf.Count;
+                if (buf[l - 4] == '\r' && buf[l - 3] == '\n' && buf[l - 2] == '\r' && buf[l - 1] == '\n') break;
             }
+            prev3 = prev2; prev2 = prev1; prev1 = b;
+        }
 
-            if (proc.ExitCode != 0)
+        string raw = Encoding.ASCII.GetString(buf.ToArray());
+        string[] lines = raw.Split(new string[] { "\r\n" }, StringSplitOptions.None);
+
+        method = "GET"; path = "/"; queryString = "";
+        headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        if (lines.Length > 0)
+        {
+            string[] reqParts = lines[0].Split(' ');
+            if (reqParts.Length >= 2)
             {
-                string stderr = stderrBuf.ToString();
-                string tail = stderr.Length > 300 ? stderr.Substring(stderr.Length - 300) : stderr;
-                Console.WriteLine("[Extract] FFmpeg exit code {0}", proc.ExitCode);
-                res.StatusCode = 500;
-                byte[] b = Encoding.UTF8.GetBytes("FFmpeg error (code " + proc.ExitCode + "): " + tail);
-                res.OutputStream.Write(b, 0, b.Length);
-                res.Close();
-                return;
+                method = reqParts[0];
+                string fullPath = reqParts[1];
+                int qIdx = fullPath.IndexOf('?');
+                if (qIdx >= 0)
+                {
+                    path = fullPath.Substring(0, qIdx);
+                    queryString = fullPath.Substring(qIdx + 1);
+                }
+                else
+                {
+                    path = fullPath;
+                }
             }
+        }
 
-            byte[] pcm = ms.ToArray();
-            Console.WriteLine("[Extract] Done - {0} bytes ({1:F1}s of audio)",
-                pcm.Length, (double)pcm.Length / 4.0 / 16000.0);
+        for (int i = 1; i < lines.Length; i++)
+        {
+            int colon = lines[i].IndexOf(':');
+            if (colon > 0)
+            {
+                string key = lines[i].Substring(0, colon).Trim();
+                string val = lines[i].Substring(colon + 1).Trim();
+                headers[key] = val;
+            }
+        }
 
-            res.ContentType = "application/octet-stream";
-            res.ContentLength64 = pcm.Length;
-            res.OutputStream.Write(pcm, 0, pcm.Length);
-            res.Close();
+        return raw;
+    }
+
+    static string GetQueryParam(string queryString, string name)
+    {
+        if (string.IsNullOrEmpty(queryString)) return null;
+        foreach (string part in queryString.Split('&'))
+        {
+            int eq = part.IndexOf('=');
+            if (eq < 0) continue;
+            string key = Uri.UnescapeDataString(part.Substring(0, eq));
+            if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
+                return Uri.UnescapeDataString(part.Substring(eq + 1));
+        }
+        return null;
+    }
+
+    static void WriteResponse(Stream s, int statusCode, string contentType, byte[] body, bool cors)
+    {
+        string statusText = statusCode == 200 ? "OK" : statusCode == 204 ? "No Content" :
+            statusCode == 400 ? "Bad Request" : statusCode == 404 ? "Not Found" :
+            statusCode == 500 ? "Internal Server Error" : statusCode == 504 ? "Gateway Timeout" : "Error";
+
+        var sb = new StringBuilder();
+        sb.AppendFormat("HTTP/1.1 {0} {1}\r\n", statusCode, statusText);
+        if (cors)
+        {
+            sb.Append("Access-Control-Allow-Origin: *\r\n");
+            sb.Append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
+            sb.Append("Access-Control-Allow-Headers: *\r\n");
+        }
+        if (contentType != null)
+            sb.AppendFormat("Content-Type: {0}\r\n", contentType);
+        if (body != null)
+            sb.AppendFormat("Content-Length: {0}\r\n", body.Length);
+        sb.Append("Connection: close\r\n");
+        sb.Append("\r\n");
+
+        byte[] header = Encoding.ASCII.GetBytes(sb.ToString());
+        s.Write(header, 0, header.Length);
+        if (body != null && body.Length > 0)
+            s.Write(body, 0, body.Length);
+    }
+
+    // ── Audio Extraction Server ──────────────────────────────
+
+    static void AudioAcceptLoop()
+    {
+        while (true)
+        {
+            TcpClient client;
+            try { client = _audioTcp.AcceptTcpClient(); }
+            catch { break; }
+            var c = client;
+            ThreadPool.QueueUserWorkItem(_ => HandleAudioRequest(c));
+        }
+    }
+
+    static void HandleAudioRequest(TcpClient client)
+    {
+        try
+        {
+            using (client)
+            using (var stream = client.GetStream())
+            {
+                stream.ReadTimeout = 10000;
+                string method, path, qs;
+                Dictionary<string, string> headers;
+                ReadHttpRequest(stream, out method, out path, out qs, out headers);
+
+                if (method == "OPTIONS")
+                {
+                    WriteResponse(stream, 204, null, null, true);
+                    return;
+                }
+
+                if (path == "/health")
+                {
+                    string json = "{\"status\":\"ok\",\"ffmpeg\":\"" + _ffmpeg.Replace("\\", "\\\\") + "\"}";
+                    WriteResponse(stream, 200, "application/json", Encoding.UTF8.GetBytes(json), true);
+                    return;
+                }
+
+                if (path != "/audio-extract")
+                {
+                    WriteResponse(stream, 404, "text/plain", Encoding.UTF8.GetBytes("Not found"), true);
+                    return;
+                }
+
+                string mediaURL = GetQueryParam(qs, "mediaURL");
+                string start = GetQueryParam(qs, "start") ?? "0";
+                string duration = GetQueryParam(qs, "duration") ?? "5";
+
+                if (string.IsNullOrEmpty(mediaURL))
+                {
+                    WriteResponse(stream, 400, "text/plain", Encoding.UTF8.GetBytes("Missing mediaURL"), true);
+                    return;
+                }
+
+                // Build FFmpeg arguments — URL is always quoted
+                string ffArgs = string.Format(
+                    "-ss {0} -i \"{1}\" -t {2} -vn -ac 1 -ar 16000 -f f32le -y pipe:1",
+                    start, mediaURL, duration);
+
+                string customHeaders = GetQueryParam(qs, "headers");
+                if (!string.IsNullOrEmpty(customHeaders))
+                    ffArgs = string.Format("-headers \"{0}\r\n\" {1}", customHeaders, ffArgs);
+
+                Console.WriteLine("[Extract] start={0}s dur={1}s url={2}...",
+                    start, duration, mediaURL.Length > 80 ? mediaURL.Substring(0, 80) : mediaURL);
+
+                var psi = new ProcessStartInfo(_ffmpeg, ffArgs)
+                {
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+
+                var proc = Process.Start(psi);
+                StringBuilder stderrBuf = new StringBuilder();
+                proc.ErrorDataReceived += (s, e) => { if (e.Data != null) stderrBuf.AppendLine(e.Data); };
+                proc.BeginErrorReadLine();
+
+                var ms = new MemoryStream();
+                proc.StandardOutput.BaseStream.CopyTo(ms);
+
+                if (!proc.WaitForExit(30000))
+                {
+                    try { proc.Kill(); } catch { }
+                    WriteResponse(stream, 504, "text/plain", Encoding.UTF8.GetBytes("FFmpeg timed out (30s)"), true);
+                    return;
+                }
+
+                if (proc.ExitCode != 0)
+                {
+                    string stderr = stderrBuf.ToString();
+                    string tail = stderr.Length > 300 ? stderr.Substring(stderr.Length - 300) : stderr;
+                    Console.WriteLine("[Extract] FFmpeg exit code {0}", proc.ExitCode);
+                    WriteResponse(stream, 500, "text/plain",
+                        Encoding.UTF8.GetBytes("FFmpeg error (code " + proc.ExitCode + "): " + tail), true);
+                    return;
+                }
+
+                byte[] pcm = ms.ToArray();
+                Console.WriteLine("[Extract] Done - {0} bytes ({1:F1}s of audio)",
+                    pcm.Length, (double)pcm.Length / 4.0 / 16000.0);
+                WriteResponse(stream, 200, "application/octet-stream", pcm, true);
+            }
         }
         catch (Exception ex)
         {
-            try
-            {
-                res.StatusCode = 500;
-                byte[] b = Encoding.UTF8.GetBytes("Error: " + ex.Message);
-                res.OutputStream.Write(b, 0, b.Length);
-                res.Close();
-            }
-            catch { }
+            Console.WriteLine("[Extract] Error: " + ex.Message);
         }
     }
 
     // ── CORS Proxy ───────────────────────────────────────────
 
-    static void CorsLoop()
+    static void CorsAcceptLoop()
     {
-        while (_corsLn.IsListening)
+        while (true)
         {
-            HttpListenerContext ctx;
-            try { ctx = _corsLn.GetContext(); }
+            TcpClient client;
+            try { client = _corsTcp.AcceptTcpClient(); }
             catch { break; }
-
-            ThreadPool.QueueUserWorkItem(_ => HandleCors(ctx));
+            var c = client;
+            ThreadPool.QueueUserWorkItem(_ => HandleCorsRequest(c));
         }
     }
 
-    static void HandleCors(HttpListenerContext ctx)
+    static void HandleCorsRequest(TcpClient client)
     {
-        var req = ctx.Request;
-        var res = ctx.Response;
-
         try
         {
-            if (req.HttpMethod == "OPTIONS")
+            using (client)
+            using (var stream = client.GetStream())
             {
-                res.AddHeader("Access-Control-Allow-Origin", "*");
-                res.AddHeader("Access-Control-Allow-Methods", "*");
-                res.AddHeader("Access-Control-Allow-Headers", "*");
-                res.StatusCode = 204;
-                res.Close();
-                return;
-            }
+                stream.ReadTimeout = 10000;
+                string method, path, qs;
+                Dictionary<string, string> reqHeaders;
+                ReadHttpRequest(stream, out method, out path, out qs, out reqHeaders);
 
-            string targetUrl = "http://127.0.0.1:11470" + req.Url.PathAndQuery;
-
-            var wr = (HttpWebRequest)WebRequest.Create(targetUrl);
-            wr.Method = req.HttpMethod;
-            wr.Timeout = 120000;
-            wr.ServicePoint.Expect100Continue = false;
-            if (req.ContentType != null) wr.ContentType = req.ContentType;
-
-            if (req.HttpMethod != "GET" && req.HttpMethod != "HEAD" && req.ContentLength64 > 0)
-            {
-                using (var rs = wr.GetRequestStream())
-                    req.InputStream.CopyTo(rs);
-            }
-
-            HttpWebResponse upstream;
-            try
-            {
-                upstream = (HttpWebResponse)wr.GetResponse();
-            }
-            catch (WebException wex)
-            {
-                upstream = wex.Response as HttpWebResponse;
-                if (upstream == null) { res.StatusCode = 502; res.Close(); return; }
-            }
-
-            using (upstream)
-            {
-                res.AddHeader("Access-Control-Allow-Origin", "*");
-                res.StatusCode = (int)upstream.StatusCode;
-                if (upstream.ContentType != null) res.ContentType = upstream.ContentType;
-
-                using (var s = upstream.GetResponseStream())
+                if (method == "OPTIONS")
                 {
-                    byte[] buf = new byte[65536];
-                    int n;
-                    while ((n = s.Read(buf, 0, buf.Length)) > 0)
-                        res.OutputStream.Write(buf, 0, n);
+                    WriteResponse(stream, 204, null, null, true);
+                    return;
+                }
+
+                string pathAndQuery = string.IsNullOrEmpty(qs) ? path : path + "?" + qs;
+                string targetUrl = "http://127.0.0.1:11470" + pathAndQuery;
+
+                var wr = (HttpWebRequest)WebRequest.Create(targetUrl);
+                wr.Method = method;
+                wr.Timeout = 120000;
+                wr.ServicePoint.Expect100Continue = false;
+
+                string ct;
+                if (reqHeaders.TryGetValue("Content-Type", out ct))
+                    wr.ContentType = ct;
+
+                if (method != "GET" && method != "HEAD")
+                {
+                    string clStr;
+                    int contentLen = 0;
+                    if (reqHeaders.TryGetValue("Content-Length", out clStr))
+                        int.TryParse(clStr, out contentLen);
+
+                    if (contentLen > 0)
+                    {
+                        byte[] body = new byte[contentLen];
+                        int read = 0;
+                        while (read < contentLen)
+                        {
+                            int n = stream.Read(body, read, contentLen - read);
+                            if (n <= 0) break;
+                            read += n;
+                        }
+                        using (var rs = wr.GetRequestStream())
+                            rs.Write(body, 0, read);
+                    }
+                }
+
+                HttpWebResponse upstream;
+                try
+                {
+                    upstream = (HttpWebResponse)wr.GetResponse();
+                }
+                catch (WebException wex)
+                {
+                    upstream = wex.Response as HttpWebResponse;
+                    if (upstream == null)
+                    {
+                        WriteResponse(stream, 502, "text/plain", Encoding.UTF8.GetBytes("Bad Gateway"), true);
+                        return;
+                    }
+                }
+
+                using (upstream)
+                {
+                    // Build response with CORS headers
+                    var sb = new StringBuilder();
+                    sb.AppendFormat("HTTP/1.1 {0} {1}\r\n", (int)upstream.StatusCode, upstream.StatusDescription);
+                    sb.Append("Access-Control-Allow-Origin: *\r\n");
+                    if (upstream.ContentType != null)
+                        sb.AppendFormat("Content-Type: {0}\r\n", upstream.ContentType);
+                    if (upstream.ContentLength >= 0)
+                        sb.AppendFormat("Content-Length: {0}\r\n", upstream.ContentLength);
+                    sb.Append("Connection: close\r\n");
+                    sb.Append("\r\n");
+
+                    byte[] header = Encoding.ASCII.GetBytes(sb.ToString());
+                    stream.Write(header, 0, header.Length);
+
+                    using (var us = upstream.GetResponseStream())
+                    {
+                        byte[] buf = new byte[65536];
+                        int n;
+                        while ((n = us.Read(buf, 0, buf.Length)) > 0)
+                            stream.Write(buf, 0, n);
+                    }
                 }
             }
-            res.Close();
         }
-        catch
-        {
-            try { res.StatusCode = 502; res.Close(); } catch { }
-        }
+        catch { }
     }
 }
