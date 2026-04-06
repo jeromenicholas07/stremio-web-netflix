@@ -72,9 +72,9 @@ class StremioLauncher
         Console.CancelKeyPress += delegate { Shutdown(); };
         AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
 
-        // Launch Stremio Shell
+        // Launch Stremio Shell with dev tools enabled
         Console.WriteLine("[OK] Launching Stremio...");
-        var proc = Process.Start(shell, "--webui-url=https://jeromenicholas07.github.io/stremio-web-netflix/");
+        var proc = Process.Start(shell, "--webui-url=https://jeromenicholas07.github.io/stremio-web-netflix/ --development");
         proc.WaitForExit();
 
         Shutdown();
