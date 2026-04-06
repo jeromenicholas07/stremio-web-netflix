@@ -73,12 +73,12 @@ if defined FFMPEG_PATH (
       "    $b=[Text.Encoding]::UTF8.GetBytes('Missing mediaURL');" ^
       "    $r.OutputStream.Write($b,0,$b.Length);$r.Close();continue" ^
       "  }" ^
-      "  $fargs=@('-ss',$start,'-i',$mediaURL,'-t',$dur,'-vn','-ac','1','-ar','16000','-f','f32le','-y','pipe:1');" ^
+      "  $fargs=@('-ss',$start,'-i',('\"'+$mediaURL+'\"'),'-t',$dur,'-vn','-ac','1','-ar','16000','-f','f32le','-y','pipe:1');" ^
       "  $hdrs=$qs['headers'];" ^
-      "  if($hdrs){$fargs=@('-headers',\"$hdrs`r`n\")+$fargs}" ^
+      "  if($hdrs){$fargs=@('-headers',('\"'+$hdrs+\"`r`n\"+'\"'))+$fargs}" ^
       "  $psi=New-Object System.Diagnostics.ProcessStartInfo;" ^
       "  $psi.FileName=$ffmpeg;" ^
-      "  $psi.Arguments=($fargs|ForEach-Object{if($_ -match '\s'){'\"'+$_+'\"'}else{$_}}) -join ' ';" ^
+      "  $psi.Arguments=$fargs -join ' ';" ^
       "  $psi.UseShellExecute=$false;" ^
       "  $psi.RedirectStandardOutput=$true;" ^
       "  $psi.RedirectStandardError=$true;" ^
