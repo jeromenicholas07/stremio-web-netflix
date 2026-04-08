@@ -92,7 +92,9 @@ async function extractBatch(mediaUrl, chunks, headers) {
 async function resolveMediaUrl(streamingServerUrl, streamContent) {
     // FFmpeg runs locally and doesn't need CORS — always target the real
     // streaming server on port 11470, never the CORS proxy on 12470.
-    var ssUrl = streamingServerUrl.replace(/\/$/, '');
+    // Also force 127.0.0.1 to avoid Mixed Content blocks (browsers allow
+    // http://127.0.0.1 from HTTPS pages, but NOT http://192.168.x.x).
+    var ssUrl = forceLoopback(streamingServerUrl.replace(/\/$/, ''));
     var ssUrlObj;
     try { ssUrlObj = new URL(ssUrl); } catch (_) { /* */ }
     if (ssUrlObj && ssUrlObj.port === '12470') {
@@ -165,7 +167,7 @@ async function fetchSegmentWithRetry(url, maxRetries) {
  * segments can be requested at any offset.
  */
 async function createAudioSession(streamingServerUrl, streamContent) {
-    const ssUrl = streamingServerUrl.replace(/\/$/, '');
+    const ssUrl = forceLoopback(streamingServerUrl.replace(/\/$/, ''));
     const fetchBase = getFetchBase(ssUrl);
     // mediaURL must point at the streaming server's own address (it fetches from itself)
     const mediaUrl = await buildMediaUrl(ssUrl, streamContent, fetchBase);
@@ -380,6 +382,22 @@ function buildProxyUrl(ssUrl, streamContent) {
     return `${ssUrl}/proxy/${proxyParams.toString()}${parsed.pathname}${parsed.search}`;
 }
 
+/**
+ * Force a URL to use 127.0.0.1 instead of LAN IPs (192.168.x.x, 10.x.x.x, etc.).
+ * Browsers allow http://127.0.0.1 from HTTPS pages (secure context exception)
+ * but block http://<LAN-IP> as Mixed Content.
+ */
+function forceLoopback(url) {
+    try {
+        var u = new URL(url);
+        if (u.hostname !== 'localhost' && u.hostname !== '127.0.0.1' && u.hostname !== '[::1]') {
+            u.hostname = '127.0.0.1';
+            return u.href.replace(/\/$/, '');
+        }
+    } catch (_) { /* */ }
+    return url;
+}
+
 function getFetchBase(ssUrl) {
     try {
         const ssOrigin = new URL(ssUrl).origin;
@@ -390,10 +408,9 @@ function getFetchBase(ssUrl) {
             return '/streaming-server';
         }
         // Remote origin (GitHub Pages / Stremio Shell with remote webui-url):
-        // Route through the CORS proxy on port 12470. The launcher bat file
-        // starts a PowerShell-based proxy automatically — no setup needed.
-        const ssUrlObj = new URL(ssUrl);
-        return `http://${ssUrlObj.hostname}:12470`;
+        // Route through the CORS proxy on port 12470.
+        // Always use 127.0.0.1 to avoid Mixed Content blocks from HTTPS pages.
+        return 'http://127.0.0.1:12470';
     } catch (_) { /* */ }
     return '/streaming-server';
 }
