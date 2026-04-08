@@ -64,7 +64,12 @@ if ! grep -q "$PUBLIC_PATH$HASH" build/index.html; then
 fi
 echo "publicPath verified OK"
 
-echo "=== Step 5: Switch to gh-pages and deploy ==="
+echo "=== Step 5: Save build to /tmp (git checkout wipes build/) ==="
+rm -rf /tmp/stremio-deploy
+cp -r build /tmp/stremio-deploy
+echo "Saved build to /tmp/stremio-deploy"
+
+echo "=== Step 6: Switch to gh-pages and deploy ==="
 git checkout gh-pages
 
 # Remove old build hash directories (keep non-hash dirs like images/, fonts/)
@@ -72,21 +77,25 @@ for dir in $(ls -d */ 2>/dev/null | grep -E '^[0-9a-f]{10,}/$'); do
     echo "Removing old hash dir: $dir"
     rm -rf "$dir"
 done
+# Also clean stale root files from previous deploys
+rm -f index.html service-worker.js service-worker.js.map manifest.json
+rm -f workbox-*.js workbox-*.js.map e34a*.mjs
+rm -rf build .well-known
 
-# Copy new build output
-cp -r build/* .
+# Copy from saved build (NOT from build/ which git checkout may have clobbered)
+cp -r /tmp/stremio-deploy/* .
 
 # Ensure .nojekyll exists
 touch .nojekyll
 
-echo "=== Step 6: Commit and push gh-pages ==="
+echo "=== Step 7: Commit and push gh-pages ==="
 git add -A
 git commit -m "$MSG
 
 Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
 git push "$REMOTE" gh-pages
 
-echo "=== Step 7: Switch back to $SOURCE_BRANCH ==="
+echo "=== Step 8: Switch back to $SOURCE_BRANCH ==="
 git checkout "$SOURCE_BRANCH"
 
 echo ""
