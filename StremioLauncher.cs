@@ -85,10 +85,16 @@ class StremioLauncher
         string webuiUrl = "https://jeromenicholas07.github.io/stremio-web-netflix/"
             + "#/?streamingServerUrl=" + Uri.EscapeDataString("http://127.0.0.1:12470/");
         Console.WriteLine("[OK] Launching Stremio...");
+        Console.WriteLine("[INFO] URL: " + webuiUrl);
         var proc = Process.Start(shell, "--webui-url=" + webuiUrl + " --development");
         proc.WaitForExit();
+        Console.WriteLine("[INFO] Stremio exited with code " + proc.ExitCode);
 
         Shutdown();
+
+        // Keep console open so user can see errors
+        Console.WriteLine("\nPress any key to close...");
+        Console.ReadKey();
         return 0;
     }
 
@@ -491,7 +497,11 @@ class StremioLauncher
         {
             TcpClient client;
             try { client = _audioTcp.AcceptTcpClient(); }
-            catch { break; }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[Audio] Accept loop ended: " + ex.Message);
+                break;
+            }
             var c = client;
             ThreadPool.QueueUserWorkItem(_ => HandleAudioRequest(c));
         }
@@ -604,7 +614,11 @@ class StremioLauncher
         {
             TcpClient client;
             try { client = _corsTcp.AcceptTcpClient(); }
-            catch { break; }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[CORS] Accept loop ended: " + ex.Message);
+                break;
+            }
             var c = client;
             ThreadPool.QueueUserWorkItem(_ => HandleCorsRequest(c));
         }
