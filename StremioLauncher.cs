@@ -482,7 +482,8 @@ class StremioLauncher
                 {
                     string stderr = stderrBuf.ToString();
                     string tail = stderr.Length > 300 ? stderr.Substring(stderr.Length - 300) : stderr;
-                    Console.WriteLine("[Extract] FFmpeg exit code {0}", proc.ExitCode);
+                    Console.WriteLine("[Extract] FAILED (exit code {0}) url={1}", proc.ExitCode, mediaURL);
+                    Console.WriteLine("[Extract] stderr: {0}", tail);
                     WriteResponse(stream, 500, "text/plain",
                         Encoding.UTF8.GetBytes("FFmpeg error (code " + proc.ExitCode + "): " + tail), true);
                     return;
