@@ -2,7 +2,7 @@
 
 const React = require('react');
 const { deepEqual } = require('fast-equals');
-const { withCoreSuspender, useProfile, useToast } = require('stremio/common');
+const { withCoreSuspender, useProfile, useToast, CONSTANTS } = require('stremio/common');
 const { useServices } = require('stremio/services');
 
 const SearchParamsHandler = () => {
@@ -50,6 +50,38 @@ const SearchParamsHandler = () => {
             });
         }
     }, [searchParams]);
+
+    // Auto-fix: when running from a remote origin (GitHub Pages), ensure the
+    // streaming server URL points to the CORS proxy (12470), not direct (11470).
+    // This handles cases where stremio-core persisted the old 11470 URL.
+    React.useEffect(() => {
+        if (!profile || !profile.settings) return;
+        const currentUrl = profile.settings.streamingServerUrl;
+        const correctUrl = CONSTANTS.DEFAULT_STREAMING_SERVER_URL;
+        if (currentUrl && correctUrl && currentUrl !== correctUrl
+            && currentUrl.indexOf(':11470') !== -1
+            && correctUrl.indexOf(':12470') !== -1) {
+            // eslint-disable-next-line no-console
+            console.log('[SearchParamsHandler] Auto-fixing streaming server URL:', currentUrl, '->', correctUrl);
+            core.transport.dispatch({
+                action: 'Ctx',
+                args: {
+                    action: 'UpdateSettings',
+                    args: {
+                        ...profile.settings,
+                        streamingServerUrl: correctUrl,
+                    },
+                },
+            });
+            core.transport.dispatch({
+                action: 'Ctx',
+                args: {
+                    action: 'AddServerUrl',
+                    args: correctUrl,
+                },
+            });
+        }
+    }, [profile && profile.settings && profile.settings.streamingServerUrl]);
 
     React.useEffect(() => {
         onLocationChange();

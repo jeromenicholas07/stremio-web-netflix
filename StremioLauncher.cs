@@ -32,7 +32,24 @@ class StremioLauncher
         string stremioDir = Path.GetDirectoryName(shell);
         _ffmpeg = FindFFmpeg(stremioDir);
 
-        // Start the streaming server (port 11470) — required for everything
+        // Start CORS proxy FIRST (port 12470) — must bind before streaming server
+        // so the streaming server's HTTPS endpoint on 12470 gracefully fails,
+        // and all browser requests go through our CORS proxy instead.
+        try
+        {
+            _corsTcp = new TcpListener(IPAddress.Loopback, 12470);
+            _corsTcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _corsTcp.Start();
+            new Thread(CorsAcceptLoop) { IsBackground = true }.Start();
+            Console.WriteLine("[OK] CORS proxy on :12470");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[WARN] CORS proxy failed to start: " + ex.Message);
+        }
+
+        // Start the streaming server (port 11470) — required for everything.
+        // Its HTTPS endpoint on 12470 will fail (our CORS proxy is there) — that's fine.
         StartStreamingServer(stremioDir);
 
         // Start audio extraction server (port 12471)
@@ -56,20 +73,6 @@ class StremioLauncher
             Console.WriteLine("[INFO] FFmpeg not found - subtitle sync will use HLS fallback");
         }
 
-        // Start CORS proxy (port 12470)
-        try
-        {
-            _corsTcp = new TcpListener(IPAddress.Loopback, 12470);
-            _corsTcp.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
-            _corsTcp.Start();
-            new Thread(CorsAcceptLoop) { IsBackground = true }.Start();
-            Console.WriteLine("[OK] CORS proxy on :12470");
-        }
-        catch (Exception ex)
-        {
-            Console.WriteLine("[WARN] CORS proxy failed to start: " + ex.Message);
-        }
-
         Thread.Sleep(500);
 
         // Graceful shutdown on Ctrl+C or console close
@@ -77,8 +80,12 @@ class StremioLauncher
         AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
 
         // Launch Stremio Shell with dev tools enabled
+        // Pass streamingServerUrl via hash param so SearchParamsHandler configures
+        // stremio-core to use our CORS proxy (12470) instead of direct 11470.
+        string webuiUrl = "https://jeromenicholas07.github.io/stremio-web-netflix/"
+            + "#/?streamingServerUrl=" + Uri.EscapeDataString("http://127.0.0.1:12470/");
         Console.WriteLine("[OK] Launching Stremio...");
-        var proc = Process.Start(shell, "--webui-url=https://jeromenicholas07.github.io/stremio-web-netflix/ --development");
+        var proc = Process.Start(shell, "--webui-url=" + webuiUrl + " --development");
         proc.WaitForExit();
 
         Shutdown();
