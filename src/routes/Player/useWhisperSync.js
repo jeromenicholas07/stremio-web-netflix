@@ -140,7 +140,14 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         const resolved = await resolveMediaUrl(streamingServerUrl, streamContent);
         const mediaUrl = resolved.url;
         const mediaHeaders = resolved.headers;
+        // For debrid/HTTP streams, use HLS playlist URL so the streaming server
+        // resolves the debrid URL internally (proxy endpoint fails for these).
+        const extractUrl = resolved.hlsUrl || mediaUrl;
         if (cancelledRef.current) return;
+
+        // eslint-disable-next-line no-console
+        console.log('[WhisperSync] Stream type:', resolved.isTorrent ? 'torrent' : 'debrid/HTTP',
+            '| extract via:', resolved.hlsUrl ? 'HLS transcoder' : 'direct proxy');
 
         // Density-ordered chunk offsets (densest regions first)
         const chunkOffsets = findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
@@ -172,7 +179,7 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 '— extracting', batchChunks.length, 'chunks at offsets:',
                 batch.map(function (o) { return o + 's'; }).join(', '),
             );
-            const audioResults = await extractBatch(mediaUrl, batchChunks, mediaHeaders);
+            const audioResults = await extractBatch(extractUrl, batchChunks, mediaHeaders);
             if (cancelledRef.current) return;
 
             // ── Sequential transcribe + align per chunk ──

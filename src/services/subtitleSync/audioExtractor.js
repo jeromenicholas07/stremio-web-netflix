@@ -104,8 +104,30 @@ async function resolveMediaUrl(streamingServerUrl, streamContent) {
     if (fetchBase.indexOf(':12470') !== -1) {
         fetchBase = fetchBase.replace(':12470', ':11470');
     }
+
+    var isTorrent = streamContent && typeof streamContent.infoHash === 'string';
     var url = await buildMediaUrl(ssUrl, streamContent, fetchBase);
-    return { url: url, headers: null };
+
+    // For debrid/HTTP streams, build an HLS playlist URL that FFmpeg can read.
+    // The streaming server's HLS transcoder resolves debrid URLs internally,
+    // whereas the /proxy/ endpoint fails when FFmpeg makes separate requests.
+    var hlsUrl = null;
+    if (!isTorrent) {
+        var hlsId = 'whisper_' + Math.random().toString(36).slice(2);
+        var qp = new URLSearchParams();
+        qp.set('mediaURL', url);
+        qp.append('videoCodecs', 'h264');
+        qp.append('audioCodecs', 'aac');
+        qp.set('maxAudioChannels', '1');
+        hlsUrl = ssUrl + '/hlsv2/' + hlsId + '/master.m3u8?' + qp.toString();
+
+        // Warm up: prefetch the master playlist so the transcoder starts
+        // resolving the debrid URL before FFmpeg hits it.
+        var warmupUrl = hlsUrl.replace(':11470', ':12470');
+        fetchWithTimeout(warmupUrl, {}, 10000).catch(function () { /* fire-and-forget */ });
+    }
+
+    return { url: url, headers: null, isTorrent: isTorrent, hlsUrl: hlsUrl };
 }
 
 // ══════════════════════════════════════════════════════════════
