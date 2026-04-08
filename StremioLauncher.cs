@@ -12,6 +12,7 @@ class StremioLauncher
     static string _ffmpeg;
     static TcpListener _audioTcp;
     static TcpListener _corsTcp;
+    static Process _serverProc;
 
     static int Main()
     {
@@ -30,6 +31,9 @@ class StremioLauncher
 
         string stremioDir = Path.GetDirectoryName(shell);
         _ffmpeg = FindFFmpeg(stremioDir);
+
+        // Start the streaming server (port 11470) — required for everything
+        StartStreamingServer(stremioDir);
 
         // Start audio extraction server (port 12471)
         if (_ffmpeg != null)
@@ -88,6 +92,90 @@ class StremioLauncher
         Console.WriteLine("Shutting down...");
         try { if (_audioTcp != null) _audioTcp.Stop(); } catch { }
         try { if (_corsTcp != null) _corsTcp.Stop(); } catch { }
+        try { if (_serverProc != null && !_serverProc.HasExited) _serverProc.Kill(); } catch { }
+    }
+
+    static void StartStreamingServer(string stremioDir)
+    {
+        // Check if streaming server is already running on 11470
+        try
+        {
+            var test = new TcpClient();
+            test.Connect(IPAddress.Loopback, 11470);
+            test.Close();
+            Console.WriteLine("[OK] Streaming server already running on :11470");
+            return;
+        }
+        catch { /* not running, start it */ }
+
+        string runtime = Path.Combine(stremioDir, "stremio-runtime.exe");
+        string serverJs = Path.Combine(stremioDir, "server.js");
+
+        if (!File.Exists(runtime) || !File.Exists(serverJs))
+        {
+            // Try node from PATH as fallback
+            runtime = "node";
+            if (!File.Exists(serverJs))
+            {
+                Console.WriteLine("[WARN] Streaming server not found — streaming will not work");
+                return;
+            }
+        }
+
+        try
+        {
+            var psi = new ProcessStartInfo(runtime, "\"" + serverJs + "\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true
+            };
+            _serverProc = Process.Start(psi);
+
+            // Log server output in background
+            new Thread(() =>
+            {
+                try
+                {
+                    string line;
+                    while ((line = _serverProc.StandardOutput.ReadLine()) != null)
+                        Console.WriteLine("[server] " + line);
+                }
+                catch { }
+            }) { IsBackground = true }.Start();
+
+            new Thread(() =>
+            {
+                try
+                {
+                    string line;
+                    while ((line = _serverProc.StandardError.ReadLine()) != null)
+                        Console.WriteLine("[server] " + line);
+                }
+                catch { }
+            }) { IsBackground = true }.Start();
+
+            // Wait for it to start listening
+            for (int i = 0; i < 20; i++)
+            {
+                Thread.Sleep(500);
+                try
+                {
+                    var test = new TcpClient();
+                    test.Connect(IPAddress.Loopback, 11470);
+                    test.Close();
+                    Console.WriteLine("[OK] Streaming server started on :11470");
+                    return;
+                }
+                catch { }
+            }
+            Console.WriteLine("[WARN] Streaming server started but port 11470 not responding yet");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[WARN] Failed to start streaming server: " + ex.Message);
+        }
     }
 
     // ── Startup cleanup ──────────────────────────────────────
