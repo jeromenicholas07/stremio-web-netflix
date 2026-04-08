@@ -318,7 +318,14 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
             if (directAvailable) {
                 // eslint-disable-next-line no-console
                 console.log('[WhisperSync] Using direct FFmpeg extraction (sidecar on :12471)');
-                await runDirectSync(cues);
+                try {
+                    await runDirectSync(cues);
+                } catch (directError) {
+                    if (cancelledRef.current) return;
+                    // eslint-disable-next-line no-console
+                    console.warn('[WhisperSync] Direct extraction failed:', directError.message, '— falling back to HLS');
+                    await runHlsSync(cues);
+                }
             } else {
                 // eslint-disable-next-line no-console
                 console.log('[WhisperSync] Sidecar unavailable — falling back to HLS extraction');
