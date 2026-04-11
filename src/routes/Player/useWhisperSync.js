@@ -25,8 +25,9 @@ const SYNC_STATUS = {
 };
 
 const CHUNK_DURATION = 5;           // seconds per chunk (was 15)
-const MAX_CHUNK_ATTEMPTS = 8;       // max chunks to try
-const BATCH_SIZE = 3;               // parallel fetches per batch
+const MAX_CHUNK_ATTEMPTS = 8;       // max chunks to try (auto-sync)
+const BATCH_SIZE = 3;               // parallel fetches per batch (auto-sync)
+const MANUAL_CHUNK_ATTEMPTS = 2;    // manual sync: 1 batch of 2 near current time
 const MAX_RETRIES = 3;              // full pipeline retries (HLS fallback only)
 
 const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, setSubtitlesDelay, streamingServerUrl, streamContent, currentTimeMs) => {
@@ -151,22 +152,29 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         console.log('[WhisperSync] Stream type:', resolved.isTorrent ? 'torrent' : 'debrid/HTTP',
             '| extract via:', resolved.hlsUrl ? 'HLS transcoder' : 'direct proxy');
 
-        // If a focus time is provided (manual sync while watching), pick chunks
-        // centered around it for deterministic results. Otherwise use density
-        // ranking across the whole episode (initial auto-sync on track load).
-        const chunkOffsets = focusTimeSec != null
-            ? findChunkOffsetsNearTime(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS, focusTimeSec)
-            : findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
+        // Manual sync (focusTimeSec set): pick densest chunks WITHIN a window
+        // around the current playback time. Only 2 chunks in 1 batch — fast,
+        // deterministic, and uses the same density quality signal as auto-sync.
+        //
+        // Auto-sync (no focusTimeSec): density-ranked chunks across the whole
+        // episode (up to 8 chunks, 3 per batch).
+        const isManual = focusTimeSec != null;
+        const chunkLimit = isManual ? MANUAL_CHUNK_ATTEMPTS : MAX_CHUNK_ATTEMPTS;
+        const batchSize = isManual ? MANUAL_CHUNK_ATTEMPTS : BATCH_SIZE;
+
+        const chunkOffsets = isManual
+            ? findChunkOffsetsNearTime(cues, CHUNK_DURATION, chunkLimit, focusTimeSec)
+            : findBestChunkOffsets(cues, CHUNK_DURATION, chunkLimit);
 
         // eslint-disable-next-line no-console
         console.log('[WhisperSync] Chunk strategy:',
-            focusTimeSec != null ? 'focused @' + Math.round(focusTimeSec) + 's' : 'density-ranked',
+            isManual ? 'focused @' + Math.round(focusTimeSec) + 's (' + chunkLimit + ' chunks)' : 'density-ranked',
             '| offsets:', chunkOffsets.map(function (o) { return o + 's'; }).join(', '));
 
-        // Split into batches of BATCH_SIZE
+        // Split into batches
         const batches = [];
-        for (let i = 0; i < chunkOffsets.length; i += BATCH_SIZE) {
-            batches.push(chunkOffsets.slice(i, i + BATCH_SIZE));
+        for (let i = 0; i < chunkOffsets.length; i += batchSize) {
+            batches.push(chunkOffsets.slice(i, i + batchSize));
         }
 
         // Create worker once — model stays loaded across all chunks
@@ -250,9 +258,10 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 if (cancelledRef.current) return;
 
                 // For HLS fallback, chunks must be chronological (transcoder is sequential)
+                const hlsChunkLimit = focusTimeSec != null ? MANUAL_CHUNK_ATTEMPTS : MAX_CHUNK_ATTEMPTS;
                 const chunkOffsets = focusTimeSec != null
-                    ? findChunkOffsetsNearTime(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS, focusTimeSec)
-                    : findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
+                    ? findChunkOffsetsNearTime(cues, CHUNK_DURATION, hlsChunkLimit, focusTimeSec)
+                    : findBestChunkOffsets(cues, CHUNK_DURATION, hlsChunkLimit);
                 const chronological = [...chunkOffsets].sort(function (a, b) { return a - b; });
 
                 const worker = createWorker();

@@ -254,59 +254,99 @@ function findBestChunkOffsets(cues, chunkDurationSec, maxChunks) {
 }
 
 /**
- * Pick chunk offsets densely around a specific timestamp (seconds).
+ * Pick the densest chunk offsets within a window around a specific timestamp.
  *
  * Used for manual auto-sync while watching: the user is at time T, so we
- * extract chunks near T first. This is deterministic — if sync is wrong,
- * the user can seek to a known-dialogue moment and click sync there.
+ * want chunks that (a) are near T, and (b) contain dense dialogue — the same
+ * quality signal that makes the initial density-ranked auto-sync work well.
  *
- * Strategy: take consecutive chunks forward from (focusSec - CHUNK*2)
- * so the focus time sits inside the middle of the window. Chunks that
- * land outside the cue range or in silent gaps are skipped.
+ * Strategy:
+ *   1. Build a sliding window of ±WINDOW_SEC around focusSec
+ *   2. Within that window, score every candidate chunk by cue density
+ *      (count of cues) + text length (total characters of dialogue)
+ *   3. Pick the top `maxChunks` by score, enforcing a minimum gap between
+ *      chunks so we don't get two near-identical adjacent chunks
+ *   4. If the window has too few scoring chunks, widen it
  */
 function findChunkOffsetsNearTime(cues, chunkDurationSec, maxChunks, focusSec) {
     if (!cues || cues.length === 0) return [Math.max(0, Math.floor(focusSec))];
 
     const firstCueSec = Math.floor(cues[0].start / 1000);
     const lastCueSec = Math.ceil(cues[cues.length - 1].end / 1000);
-
-    // Clamp focus into the cue range
     const clampedFocus = Math.max(firstCueSec, Math.min(lastCueSec - chunkDurationSec, focusSec));
 
-    // Start 2 chunks before focus so the focus sits roughly in the middle
-    const startSec = Math.max(firstCueSec, Math.floor(clampedFocus - chunkDurationSec * 2));
-
-    const offsets = [];
-    for (let i = 0; i < maxChunks; i++) {
-        const off = startSec + i * chunkDurationSec;
-        if (off + chunkDurationSec > lastCueSec) break;
-
-        // Skip chunks with no cues in them (silent/non-dialogue gaps)
-        const winStartMs = off * 1000;
-        const winEndMs = (off + chunkDurationSec) * 1000;
-        let hasCue = false;
+    // Score every candidate chunk in the entire cue range by (density + text length),
+    // then prefer chunks close to the focus time.
+    const candidates = [];
+    // Step by 1 second for finer granularity (not just on chunkDuration grid)
+    const step = Math.max(1, Math.floor(chunkDurationSec / 2));
+    for (let t = firstCueSec; t + chunkDurationSec <= lastCueSec; t += step) {
+        const winStartMs = t * 1000;
+        const winEndMs = (t + chunkDurationSec) * 1000;
+        let count = 0;
+        let textLen = 0;
         for (const cue of cues) {
-            if (cue.end > winStartMs && cue.start < winEndMs) { hasCue = true; break; }
-        }
-        if (hasCue) offsets.push(off);
-    }
-
-    // If we didn't get enough non-silent chunks going forward, extend backward
-    if (offsets.length < maxChunks) {
-        for (let i = 1; offsets.length < maxChunks; i++) {
-            const off = startSec - i * chunkDurationSec;
-            if (off < firstCueSec) break;
-            const winStartMs = off * 1000;
-            const winEndMs = (off + chunkDurationSec) * 1000;
-            let hasCue = false;
-            for (const cue of cues) {
-                if (cue.end > winStartMs && cue.start < winEndMs) { hasCue = true; break; }
+            if (cue.end > winStartMs && cue.start < winEndMs) {
+                count++;
+                textLen += (cue.text || '').length;
             }
-            if (hasCue) offsets.unshift(off);
+        }
+        if (count === 0) continue;
+        // Quality score: prefer many cues + lots of text
+        const quality = count * 10 + Math.min(textLen, 200);
+        candidates.push({ offset: t, quality: quality });
+    }
+
+    if (candidates.length === 0) {
+        return [Math.max(0, Math.floor(clampedFocus))];
+    }
+
+    // Window the search around focus. Start tight, widen if not enough dense chunks.
+    const WINDOW_TIERS = [30, 60, 120, 300]; // seconds half-width
+    let picked = [];
+
+    for (const half of WINDOW_TIERS) {
+        const lo = clampedFocus - half;
+        const hi = clampedFocus + half;
+        const inWindow = candidates.filter(function (c) {
+            return c.offset + chunkDurationSec > lo && c.offset < hi;
+        });
+        if (inWindow.length === 0) continue;
+
+        // Sort by quality desc
+        inWindow.sort(function (a, b) { return b.quality - a.quality; });
+
+        // Greedy pick with minimum gap so chunks don't overlap / cluster
+        const minGap = chunkDurationSec; // at least one chunk-width apart
+        picked = [];
+        for (const c of inWindow) {
+            let tooClose = false;
+            for (const p of picked) {
+                if (Math.abs(c.offset - p) < minGap) { tooClose = true; break; }
+            }
+            if (!tooClose) picked.push(c.offset);
+            if (picked.length >= maxChunks) break;
+        }
+
+        if (picked.length >= maxChunks) break;
+    }
+
+    // Fallback: if windowed search came up empty, just use the best global candidates
+    if (picked.length === 0) {
+        const sorted = candidates.slice().sort(function (a, b) { return b.quality - a.quality; });
+        for (const c of sorted) {
+            let tooClose = false;
+            for (const p of picked) {
+                if (Math.abs(c.offset - p) < chunkDurationSec) { tooClose = true; break; }
+            }
+            if (!tooClose) picked.push(c.offset);
+            if (picked.length >= maxChunks) break;
         }
     }
 
-    return offsets.length > 0 ? offsets : [Math.max(0, Math.floor(clampedFocus))];
+    // Return in chronological order so HLS fallback works; direct path doesn't care
+    picked.sort(function (a, b) { return a - b; });
+    return picked.length > 0 ? picked : [Math.max(0, Math.floor(clampedFocus))];
 }
 
 module.exports = {
