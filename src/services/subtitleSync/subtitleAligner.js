@@ -253,11 +253,68 @@ function findBestChunkOffsets(cues, chunkDurationSec, maxChunks) {
     return offsets.length > 0 ? offsets : [startSec];
 }
 
+/**
+ * Pick chunk offsets densely around a specific timestamp (seconds).
+ *
+ * Used for manual auto-sync while watching: the user is at time T, so we
+ * extract chunks near T first. This is deterministic — if sync is wrong,
+ * the user can seek to a known-dialogue moment and click sync there.
+ *
+ * Strategy: take consecutive chunks forward from (focusSec - CHUNK*2)
+ * so the focus time sits inside the middle of the window. Chunks that
+ * land outside the cue range or in silent gaps are skipped.
+ */
+function findChunkOffsetsNearTime(cues, chunkDurationSec, maxChunks, focusSec) {
+    if (!cues || cues.length === 0) return [Math.max(0, Math.floor(focusSec))];
+
+    const firstCueSec = Math.floor(cues[0].start / 1000);
+    const lastCueSec = Math.ceil(cues[cues.length - 1].end / 1000);
+
+    // Clamp focus into the cue range
+    const clampedFocus = Math.max(firstCueSec, Math.min(lastCueSec - chunkDurationSec, focusSec));
+
+    // Start 2 chunks before focus so the focus sits roughly in the middle
+    const startSec = Math.max(firstCueSec, Math.floor(clampedFocus - chunkDurationSec * 2));
+
+    const offsets = [];
+    for (let i = 0; i < maxChunks; i++) {
+        const off = startSec + i * chunkDurationSec;
+        if (off + chunkDurationSec > lastCueSec) break;
+
+        // Skip chunks with no cues in them (silent/non-dialogue gaps)
+        const winStartMs = off * 1000;
+        const winEndMs = (off + chunkDurationSec) * 1000;
+        let hasCue = false;
+        for (const cue of cues) {
+            if (cue.end > winStartMs && cue.start < winEndMs) { hasCue = true; break; }
+        }
+        if (hasCue) offsets.push(off);
+    }
+
+    // If we didn't get enough non-silent chunks going forward, extend backward
+    if (offsets.length < maxChunks) {
+        for (let i = 1; offsets.length < maxChunks; i++) {
+            const off = startSec - i * chunkDurationSec;
+            if (off < firstCueSec) break;
+            const winStartMs = off * 1000;
+            const winEndMs = (off + chunkDurationSec) * 1000;
+            let hasCue = false;
+            for (const cue of cues) {
+                if (cue.end > winStartMs && cue.start < winEndMs) { hasCue = true; break; }
+            }
+            if (hasCue) offsets.unshift(off);
+        }
+    }
+
+    return offsets.length > 0 ? offsets : [Math.max(0, Math.floor(clampedFocus))];
+}
+
 module.exports = {
     parseSubtitles,
     computeOffset,
     findBestMatch,
     fetchAndParseSubtitles,
     findBestChunkOffsets,
+    findChunkOffsetsNearTime,
     MIN_MATCHES_FOR_CONFIDENCE,
 };

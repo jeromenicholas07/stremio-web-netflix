@@ -10,6 +10,7 @@ const {
     findBestMatch: findBestMatchExport,
     fetchAndParseSubtitles,
     findBestChunkOffsets,
+    findChunkOffsetsNearTime,
     MIN_MATCHES_FOR_CONFIDENCE,
 } = require('stremio/services/subtitleSync/subtitleAligner');
 
@@ -28,7 +29,10 @@ const MAX_CHUNK_ATTEMPTS = 8;       // max chunks to try
 const BATCH_SIZE = 3;               // parallel fetches per batch
 const MAX_RETRIES = 3;              // full pipeline retries (HLS fallback only)
 
-const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, setSubtitlesDelay, streamingServerUrl, streamContent) => {
+const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, setSubtitlesDelay, streamingServerUrl, streamContent, currentTimeMs) => {
+    // Keep latest currentTime in a ref so callbacks don't need to recreate
+    const currentTimeMsRef = React.useRef(currentTimeMs);
+    React.useEffect(() => { currentTimeMsRef.current = currentTimeMs; }, [currentTimeMs]);
     const [syncStatus, setSyncStatus] = React.useState(SYNC_STATUS.IDLE);
     const [syncProgress, setSyncProgress] = React.useState(0);
     const [syncError, setSyncError] = React.useState(null);
@@ -132,7 +136,7 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
     //  Direct extraction path — batch-of-3, parallel fetch, fast
     // ══════════════════════════════════════════════════════════════
 
-    const runDirectSync = React.useCallback(async (cues) => {
+    const runDirectSync = React.useCallback(async (cues, focusTimeSec) => {
         if (cancelledRef.current) return;
 
         setSyncStatus(SYNC_STATUS.EXTRACTING);
@@ -140,8 +144,6 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         const resolved = await resolveMediaUrl(streamingServerUrl, streamContent);
         const mediaUrl = resolved.url;
         const mediaHeaders = resolved.headers;
-        // For debrid/HTTP streams, use HLS playlist URL so the streaming server
-        // resolves the debrid URL internally (proxy endpoint fails for these).
         const extractUrl = resolved.hlsUrl || mediaUrl;
         if (cancelledRef.current) return;
 
@@ -149,8 +151,17 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         console.log('[WhisperSync] Stream type:', resolved.isTorrent ? 'torrent' : 'debrid/HTTP',
             '| extract via:', resolved.hlsUrl ? 'HLS transcoder' : 'direct proxy');
 
-        // Density-ordered chunk offsets (densest regions first)
-        const chunkOffsets = findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
+        // If a focus time is provided (manual sync while watching), pick chunks
+        // centered around it for deterministic results. Otherwise use density
+        // ranking across the whole episode (initial auto-sync on track load).
+        const chunkOffsets = focusTimeSec != null
+            ? findChunkOffsetsNearTime(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS, focusTimeSec)
+            : findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
+
+        // eslint-disable-next-line no-console
+        console.log('[WhisperSync] Chunk strategy:',
+            focusTimeSec != null ? 'focused @' + Math.round(focusTimeSec) + 's' : 'density-ranked',
+            '| offsets:', chunkOffsets.map(function (o) { return o + 's'; }).join(', '));
 
         // Split into batches of BATCH_SIZE
         const batches = [];
@@ -225,7 +236,7 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
     //  HLS fallback path — sequential, original algorithm
     // ══════════════════════════════════════════════════════════════
 
-    const runHlsSync = React.useCallback(async (cues) => {
+    const runHlsSync = React.useCallback(async (cues, focusTimeSec) => {
         let lastError = null;
 
         for (let retry = 0; retry < MAX_RETRIES; retry++) {
@@ -239,7 +250,9 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 if (cancelledRef.current) return;
 
                 // For HLS fallback, chunks must be chronological (transcoder is sequential)
-                const chunkOffsets = findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
+                const chunkOffsets = focusTimeSec != null
+                    ? findChunkOffsetsNearTime(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS, focusTimeSec)
+                    : findBestChunkOffsets(cues, CHUNK_DURATION, MAX_CHUNK_ATTEMPTS);
                 const chronological = [...chunkOffsets].sort(function (a, b) { return a - b; });
 
                 const worker = createWorker();
@@ -303,7 +316,7 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
     //  Main entry point — picks the best available extraction path
     // ══════════════════════════════════════════════════════════════
 
-    const runSync = React.useCallback(async () => {
+    const runSync = React.useCallback(async (focusTimeSec) => {
         const track = getSelectedTrack();
         if (!track || !streamContent || !streamingServerUrl) return;
 
@@ -326,17 +339,17 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 // eslint-disable-next-line no-console
                 console.log('[WhisperSync] Using direct FFmpeg extraction (sidecar on :12471)');
                 try {
-                    await runDirectSync(cues);
+                    await runDirectSync(cues, focusTimeSec);
                 } catch (directError) {
                     if (cancelledRef.current) return;
                     // eslint-disable-next-line no-console
                     console.warn('[WhisperSync] Direct extraction failed:', directError.message, '— falling back to HLS');
-                    await runHlsSync(cues);
+                    await runHlsSync(cues, focusTimeSec);
                 }
             } else {
                 // eslint-disable-next-line no-console
                 console.log('[WhisperSync] Sidecar unavailable — falling back to HLS extraction');
-                await runHlsSync(cues);
+                await runHlsSync(cues, focusTimeSec);
             }
         } catch (error) {
             if (!cancelledRef.current) {
@@ -346,8 +359,13 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         }
     }, [streamingServerUrl, streamContent, getSelectedTrack, runDirectSync, runHlsSync]);
 
+    // Manual sync (button click while watching) — focus on current playback time
+    // so results are deterministic: seek to a clear-dialogue moment, click sync,
+    // and the transcription happens exactly there.
     const startSync = React.useCallback(() => {
-        runSync();
+        const tMs = currentTimeMsRef.current;
+        const focusTimeSec = (tMs != null && isFinite(tMs) && tMs > 0) ? tMs / 1000 : undefined;
+        runSync(focusTimeSec);
     }, [runSync]);
 
     const cancelSync = React.useCallback(() => {
