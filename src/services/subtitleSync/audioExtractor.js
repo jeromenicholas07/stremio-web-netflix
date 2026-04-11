@@ -110,26 +110,14 @@ async function resolveMediaUrl(streamingServerUrl, streamContent) {
     var isTorrent = streamContent && typeof streamContent.infoHash === 'string';
     var url = await buildMediaUrl(ssUrl, streamContent, fetchBase);
 
-    // For debrid/HTTP streams, build an HLS playlist URL that FFmpeg can read.
-    // The streaming server's HLS transcoder resolves debrid URLs internally,
-    // whereas the /proxy/ endpoint fails when FFmpeg makes separate requests.
-    var hlsUrl = null;
-    if (!isTorrent) {
-        var hlsId = 'whisper_' + Math.random().toString(36).slice(2);
-        var qp = new URLSearchParams();
-        qp.set('mediaURL', url);
-        qp.append('videoCodecs', 'h264');
-        qp.append('audioCodecs', 'aac');
-        qp.set('maxAudioChannels', '1');
-        hlsUrl = ssUrl + '/hlsv2/' + hlsId + '/master.m3u8?' + qp.toString();
-
-        // Warm up: prefetch the master playlist so the transcoder starts
-        // resolving the debrid URL before FFmpeg hits it.
-        var warmupUrl = hlsUrl.replace(':11470', ':12470');
-        fetchWithTimeout(warmupUrl, {}, 10000).catch(function () { /* fire-and-forget */ });
-    }
-
-    return { url: url, headers: null, isTorrent: isTorrent, hlsUrl: hlsUrl };
+    // For ALL streams (torrent + debrid/HTTP): FFmpeg reads directly from
+    // the streaming server via /proxy/ or /<hash>/<idx>. Both support HTTP
+    // range requests so FFmpeg can seek to any offset without transcoding.
+    //
+    // Why NOT HLS: the HLS transcoder has concurrency=1 per session. Parallel
+    // extract requests (multiple chunks at once) kill each other's sessions,
+    // causing SegmentCanceledError and 0-byte outputs.
+    return { url: url, headers: null, isTorrent: isTorrent, hlsUrl: null };
 }
 
 // ══════════════════════════════════════════════════════════════

@@ -548,8 +548,13 @@ class StremioLauncher
                     return;
                 }
 
-                // Build FFmpeg arguments — URL is always quoted
+                // Build FFmpeg arguments — URL is always quoted.
+                // -seekable 1 + -ss before -i: fast seek via HTTP range requests.
+                // -reconnect flags: retry on transient 5xx or dropped connections.
+                // -analyzeduration/probesize: don't read huge amounts before seeking.
                 string ffArgs = string.Format(
+                    "-seekable 1 -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 " +
+                    "-analyzeduration 2000000 -probesize 1000000 " +
                     "-ss {0} -i \"{1}\" -t {2} -vn -ac 1 -ar 16000 -f f32le -y pipe:1",
                     start, mediaURL, duration);
 
@@ -595,6 +600,16 @@ class StremioLauncher
                 }
 
                 byte[] pcm = ms.ToArray();
+                if (pcm.Length == 0)
+                {
+                    string stderr = stderrBuf.ToString();
+                    string tail = stderr.Length > 400 ? stderr.Substring(stderr.Length - 400) : stderr;
+                    Console.WriteLine("[Extract] FAILED (0 bytes) url={0}", mediaURL);
+                    Console.WriteLine("[Extract] stderr: {0}", tail);
+                    WriteResponse(stream, 500, "text/plain",
+                        Encoding.UTF8.GetBytes("FFmpeg returned 0 bytes. stderr: " + tail), true);
+                    return;
+                }
                 Console.WriteLine("[Extract] Done - {0} bytes ({1:F1}s of audio)",
                     pcm.Length, (double)pcm.Length / 4.0 / 16000.0);
                 WriteResponse(stream, 200, "application/octet-stream", pcm, true);
