@@ -669,7 +669,9 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         const totalBars = top + bottom;
         const effectiveAR = totalBars > 0.01 ? videoAR / (1 - totalBars) : videoAR;
         const targetW = Math.ceil(posterH * effectiveAR);
-        const currentW = trailerMounted ? targetW : posterW;
+        // Never shrink below poster width — prevents a visible gap between
+        // trailer edges and poster edges. Narrower videos are centered inside.
+        const currentW = trailerMounted ? Math.max(targetW, posterW) : posterW;
         return { posterW, posterH, currentW, containerW };
     }, [isTrailerPlaying, videoAR, letterbox, trailerMounted]);
 
@@ -713,23 +715,6 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         // left:50% + translateX(-50%), avoiding sub-pixel gaps.
         const leftPos = Math.round((containerW - currentW) / 2);
         return { left: `${leftPos}px`, right: 'auto', width: `${currentW}px` };
-    }, [expandedWidth, edgePosition]);
-
-    // Poster-container style — expand to match trailer width so no grey band is visible.
-    // Uses the same width + centering as the trailer layer, applied via margin offset.
-    const posterContainerStyle = React.useMemo(() => {
-        if (!expandedWidth) return undefined;
-        const { currentW, posterW, containerW } = expandedWidth;
-        // Only apply when trailer is wider than poster (no need to shrink)
-        if (currentW <= posterW) return undefined;
-        if (edgePosition === 'left') {
-            return { width: `${currentW}px` };
-        } else if (edgePosition === 'right') {
-            return { width: `${currentW}px`, marginLeft: 'auto', marginRight: '0' };
-        }
-        // Center: offset left by half the extra width
-        const offset = Math.round((currentW - posterW) / 2);
-        return { width: `${currentW}px`, marginLeft: `-${offset}px` };
     }, [expandedWidth, edgePosition]);
 
     // Calculate crop style to remove detected letterbox black bars
@@ -836,7 +821,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
             onMouseEnter={onMouseEnter}
             onMouseLeave={onMouseLeave}
         >
-            <Button href={href} ref={posterRef} className={styles['poster-container']} style={posterContainerStyle}>
+            <Button href={href} ref={posterRef} className={styles['poster-container']}>
                 <div className={styles['poster-image-layer']}>
                     <Image
                         className={styles['poster-image']}
