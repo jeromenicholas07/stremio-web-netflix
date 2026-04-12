@@ -393,10 +393,13 @@
         transform: scale(1.35) translateX(-0.3rem);
     }
 
-    // When trailer plays, hide poster behind the video — trailer layer owns the shadow
+    // When trailer plays, hide poster behind the video — trailer layer owns the shadow.
+    // Switch poster-container bg to match trailer bg so no contrasting strips are visible
+    // on either side when the trailer is narrower than the poster.
     &.trailer-playing {
         .poster-container {
             box-shadow: none;
+            background-color: #141414;
 
             .poster-image-layer {
                 opacity: 0;
