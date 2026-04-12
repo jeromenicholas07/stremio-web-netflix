@@ -696,19 +696,23 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     }, [expandedWidth, edgePosition]);
 
     // Calculate hover-info style — pixel-perfect alignment with trailer layer.
-    // Uses the same centering method as .card-trailer-layer CSS (left:50% + translateX(-50%))
-    // to avoid sub-pixel rounding differences from JS-computed pixel offsets.
+    // Trailer uses CSS left:50% + translateX(-50%), which resolves to
+    // leftEdge = (containerW - currentW) / 2.  We compute the same value
+    // and apply it as a pixel offset so no transform is involved (avoids
+    // transition glitches between the CSS default left:0.2rem and transform).
     const hoverInfoStyle = React.useMemo(() => {
         if (!expandedWidth) return undefined;
-        const { currentW } = expandedWidth;
+        const { currentW, containerW } = expandedWidth;
 
         if (edgePosition === 'left') {
-            return { left: '0', right: 'auto', width: `${currentW}px`, transform: 'none' };
+            return { left: '0', right: 'auto', width: `${currentW}px` };
         } else if (edgePosition === 'right') {
-            return { left: 'auto', right: '0', width: `${currentW}px`, transform: 'none' };
+            return { left: 'auto', right: '0', width: `${currentW}px` };
         }
-        // Mirror the trailer layer's CSS centering: left:50% + translateX(-50%)
-        return { left: '50%', right: 'auto', width: `${currentW}px`, transform: 'translateX(-50%)' };
+        // Use Math.round to snap to the same integer pixel the browser picks for
+        // left:50% + translateX(-50%), avoiding sub-pixel gaps.
+        const leftPos = Math.round((containerW - currentW) / 2);
+        return { left: `${leftPos}px`, right: 'auto', width: `${currentW}px` };
     }, [expandedWidth, edgePosition]);
 
     // Calculate crop style to remove detected letterbox black bars
