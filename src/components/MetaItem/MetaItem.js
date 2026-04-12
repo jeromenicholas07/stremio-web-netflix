@@ -167,7 +167,7 @@ function pickBestTrailerFallback(trailerStreams) {
     return pool[0].ytId;
 }
 
-const MetaItem = React.memo(({ className, type, name, poster, posterShape, background, progress, newVideos, deepLinks, dataset, onPlayClick, watched, trailerStreams, releaseInfo, links, disableTrailerExpand, onCWAction, rateMode, onRated, ...props }) => {
+const MetaItem = React.memo(({ className, type, name, poster, posterShape, background, progress, newVideos, deepLinks, dataset, onPlayClick, watched, trailerStreams, releaseInfo, links, disableTrailerExpand, onCWAction, onDismissClick, rateMode, onRated, rowContext, ...props }) => {
     const { core } = useServices();
     const trailerCtx = React.useContext(TrailerContext);
     const [isHovered, setIsHovered] = React.useState(false);
@@ -194,6 +194,10 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     const [videoAR, setVideoAR] = React.useState(CARD_AR);
     // Letterbox detection — { top, bottom } as fractions
     const [letterbox, setLetterbox] = React.useState({ top: 0, bottom: 0 });
+
+    // TMDB logo — shows a title logo on the card instead of plain text.
+    const isCWItem = typeof onCWAction === 'function';
+    const [logoUrl, setLogoUrl] = React.useState(null);
 
     // Default click navigates to streams (for poster click → play)
     const href = React.useMemo(() => {
@@ -456,6 +460,8 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     const [trailerYtId, setTrailerYtId] = React.useState(null);
 
     React.useEffect(() => {
+        // Skip trailer fetch entirely for Continue Watching items
+        if (isCWItem) { setTrailerYtId(null); return; }
         let cancelled = false;
         const fetchTrailer = async () => {
             const source = tmdbService.getTrailerSource();
@@ -484,7 +490,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         };
         fetchTrailer();
         return () => { cancelled = true; };
-    }, [itemId, trailerStreams]);
+    }, [isCWItem, itemId, trailerStreams]);
 
     // Fetch video aspect ratio via noembed when trailer changes
     React.useEffect(() => {
@@ -512,6 +518,22 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         return () => { cancelled = true; };
     }, [trailerYtId]);
 
+    // Fetch TMDB logo for title overlay on all MetaItems.
+    // Falls back to plain text title if no logo is available.
+    React.useEffect(() => {
+        if (!itemId) { setLogoUrl(null); return; }
+        let cancelled = false;
+        (async () => {
+            try {
+                const resolved = await tmdbService.resolveTmdbId(itemId, type);
+                if (!resolved || cancelled) return;
+                const url = await tmdbService.getLogoUrl(resolved.tmdbId, resolved.mediaType);
+                if (url && !cancelled) setLogoUrl(url);
+            } catch { /* silent */ }
+        })();
+        return () => { cancelled = true; };
+    }, [itemId, type]);
+
     const onMouseEnter = React.useCallback(() => {
         // Measure poster dims BEFORE hover scale is applied
         if (posterRef.current) {
@@ -536,13 +558,13 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         hoverTimerRef.current = setTimeout(() => {
             setIsHovered(true);
         }, 300);
-        if (trailerYtId) {
+        if (trailerYtId && !isCWItem) {
             trailerTimerRef.current = setTimeout(() => {
                 setShowTrailer(true);
                 if (trailerCtx) trailerCtx.setActiveTrailer(cardIdRef.current);
             }, 2000);
         }
-    }, [trailerYtId]);
+    }, [trailerYtId, isCWItem]);
 
     const onMouseLeave = React.useCallback(() => {
         clearTimeout(hoverTimerRef.current);
@@ -717,7 +739,12 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                         />
                     </div>
                     <div className={styles['rate-mode-overlay']}>
-                        <div className={styles['rate-mode-title']}>{name}</div>
+                        {
+                            logoUrl ?
+                                <img className={styles['rate-mode-logo']} src={logoUrl} alt={name || ''} />
+                                :
+                                <div className={styles['rate-mode-title']}>{name}</div>
+                        }
                         <div className={styles['rating-stars']}>
                             {[1, 2, 3, 4, 5].map((star) => (
                                 <button
@@ -748,6 +775,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                 [styles['edge-left']]: edgePosition === 'left',
                 [styles['edge-right']]: edgePosition === 'right',
                 [styles['dismissed']]: dismissed,
+                [styles['cw-mode']]: isCWItem,
             })}
             style={cardStyle}
             data-hovered={isHovered ? 'true' : undefined}
@@ -764,7 +792,12 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                     />
                 </div>
                 <div className={styles['card-title-overlay']}>
-                    <span className={styles['card-title']}>{name}</span>
+                    {
+                        logoUrl ?
+                            <img className={styles['card-logo']} src={logoUrl} alt={name || ''} />
+                            :
+                            <span className={styles['card-title']}>{name}</span>
+                    }
                 </div>
                 {
                     isWatched ?
@@ -810,6 +843,27 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                         null
                 }
             </Button>
+            {
+                isCWItem && typeof onDismissClick === 'function' ?
+                    <div
+                        className={styles['card-dismiss-btn']}
+                        onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            onDismissClick(e);
+                        }}
+                        aria-label="Remove from Continue Watching"
+                        title="Remove from Continue Watching"
+                    >
+                        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="12" cy="12" r="11" fill="rgba(0,0,0,0.75)" stroke="rgba(255,255,255,0.7)" strokeWidth="1.2" />
+                            <line x1="8" y1="8" x2="16" y2="16" stroke="white" strokeWidth="2.2" strokeLinecap="round" />
+                            <line x1="16" y1="8" x2="8" y2="16" stroke="white" strokeWidth="2.2" strokeLinecap="round" />
+                        </svg>
+                    </div>
+                    :
+                    null
+            }
             {
                 isTrailerPlaying ?
                     <div className={styles['card-trailer-layer']} style={trailerLayerStyle}>
@@ -883,23 +937,28 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                 isHovered ?
                     <div className={styles['hover-info']} style={hoverInfoStyle}>
                         <div className={styles['hover-buttons']}>
-                            <Button
-                                className={styles['hover-btn']}
-                                onClick={onAddToWatchlist}
-                                title="Add to watchlist"
-                            >
-                                <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-                                    <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
-                                    <line x1="20" y1="13" x2="20" y2="27" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                                    <line x1="13" y1="20" x2="27" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" />
-                                </svg>
-                            </Button>
                             {
-                                itemId ?
+                                rowContext !== 'watchlist' ?
+                                    <Button
+                                        className={styles['hover-btn']}
+                                        onClick={onAddToWatchlist}
+                                        title={rowContext === 'not-interested' ? 'Move to watchlist' : 'Add to watchlist'}
+                                    >
+                                        <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                            <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                                            <line x1="20" y1="13" x2="20" y2="27" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                            <line x1="13" y1="20" x2="27" y2="20" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                        </svg>
+                                    </Button>
+                                    :
+                                    null
+                            }
+                            {
+                                itemId && rowContext !== 'not-interested' ?
                                     <Button
                                         className={styles['hover-btn']}
                                         onClick={onNotInterested}
-                                        title="Not interested"
+                                        title={rowContext === 'watchlist' ? 'Move to not interested' : 'Not interested'}
                                     >
                                         <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
                                             <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
@@ -910,7 +969,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                     null
                             }
                             {
-                                itemId ?
+                                itemId && !isCWItem ?
                                     <Button
                                         className={styles['hover-btn']}
                                         onClick={onToggleWatched}

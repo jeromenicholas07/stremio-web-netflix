@@ -2,6 +2,9 @@
 
 A custom Stremio Web UI with a Netflix-style redesign and AI-powered automatic subtitle synchronization.
 
+**🌐 Live demo:** [jeromenicholas07.github.io/stremio-web-netflix](https://jeromenicholas07.github.io/stremio-web-netflix/#/)
+*(Open in any browser to preview the UI. For full streaming + auto-sync, follow the Setup Guide below to run it inside the Stremio shell.)*
+
 ![Home](screenshots/home.png)
 
 ## Features

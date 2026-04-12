@@ -9,6 +9,7 @@ const { default: Image } = require('stremio/components/Image');
 const YouTubePlayer = require('stremio/components/YouTubePlayer');
 const { TrailerContext } = require('stremio/common/TrailerContext');
 const tmdbService = require('stremio/services/TMDBService');
+const { CARD_AR, detectLetterboxing, fetchVideoAR } = require('stremio/common/videoFit');
 const styles = require('./styles');
 
 const TRAILER_DELAY = 2500;
@@ -148,6 +149,50 @@ const HeroBanner = React.memo(({ items }) => {
         return () => { cancelled = true; };
     }, [item]);
 
+    // Real video aspect ratio + letterbox detection — used to build a style
+    // that cover-fits the visible (non-letterboxed) region into the hero
+    // container with minimum cropping, matching MetaItem's trailer logic.
+    const [videoAR, setVideoAR] = React.useState(CARD_AR);
+    const [letterbox, setLetterbox] = React.useState({ top: 0, bottom: 0 });
+
+    React.useEffect(() => {
+        if (!trailerYtId) { setVideoAR(CARD_AR); return; }
+        let cancelled = false;
+        fetchVideoAR(trailerYtId).then((ar) => { if (!cancelled) setVideoAR(ar); });
+        return () => { cancelled = true; };
+    }, [trailerYtId]);
+
+    React.useEffect(() => {
+        if (!trailerYtId) { setLetterbox({ top: 0, bottom: 0 }); return; }
+        let cancelled = false;
+        detectLetterboxing(trailerYtId).then((lb) => { if (!cancelled) setLetterbox(lb); });
+        return () => { cancelled = true; };
+    }, [trailerYtId]);
+
+    // Compute iframe sizing that cover-fits the visible content of the video
+    // into the hero container. The iframe itself is rendered at 16:9 by YouTube;
+    // the "visible region" is the subframe without the top/bottom baked bars.
+    //
+    // For a container (100cqw x 100cqh) and bars (T, B as fractions of iframe
+    // height), the iframe must be large enough that its visible region covers
+    // the container on both axes:
+    //   iframeH >= 100cqh / (1 - T - B)      (cover vertically)
+    //   iframeW >= 100cqw                    (cover horizontally)
+    //   iframeW = iframeH * videoAR
+    // Then shift the iframe vertically so the visible-region center lands at
+    // the container center — by translateY of (T - B) / 2 of iframe height.
+    const trailerStyle = React.useMemo(() => {
+        const t = letterbox.top || 0;
+        const b = letterbox.bottom || 0;
+        const vis = Math.max(0.1, 1 - t - b);
+        const ar = videoAR || CARD_AR;
+        return {
+            width: `max(100cqw, calc(100cqh * ${ar} / ${vis}))`,
+            height: `max(calc(100cqw / ${ar}), calc(100cqh / ${vis}))`,
+            transform: `translate(-50%, calc(-50% - ${((t - b) * 50).toFixed(3)}%))`,
+        };
+    }, [videoAR, letterbox]);
+
     const cardTrailerActive = trailerCtx && trailerCtx.activeTrailerId !== null && trailerCtx.activeTrailerId !== 'hero';
     const globalMuted = trailerCtx ? trailerCtx.globalMuted : true;
     const pageVisible = trailerCtx ? trailerCtx.pageVisible : true;
@@ -226,7 +271,15 @@ const HeroBanner = React.memo(({ items }) => {
         if (trailerCtx) trailerCtx.toggleGlobalMute();
     }, []);
 
-    if (!item) return null;
+    if (!item) {
+        return (
+            <div className={styles['hero-container']}>
+                <div className={styles['hero-loading-placeholder']}>
+                    <div className={styles['hero-loading-shimmer']} />
+                </div>
+            </div>
+        );
+    }
 
     const playHref = item.deepLinks?.player ?? item.deepLinks?.metaDetailsStreams ?? null;
     const infoHref = item.deepLinks?.metaDetailsVideos ?? item.deepLinks?.metaDetailsStreams ?? null;
@@ -254,6 +307,7 @@ const HeroBanner = React.memo(({ items }) => {
                                 onEnded={onTrailerEnded}
                                 onPlaying={onTrailerPlaying}
                                 className={styles['hero-trailer-player']}
+                                style={trailerStyle}
                                 startTime={item.trailerStartTime || 0}
                             />
                         </div>

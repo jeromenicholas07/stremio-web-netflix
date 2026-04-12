@@ -64,7 +64,7 @@
             right: 0;
             padding: 1.5rem 0.6rem 0.5rem;
             background: linear-gradient(0deg, rgba(0, 0, 0, 0.8) 0%, transparent 100%);
-            z-index: 1;
+            z-index: 11;
             pointer-events: none;
             transition: opacity 0.2s ease;
 
@@ -78,6 +78,17 @@
                 overflow: hidden;
                 text-shadow: 1px 1px 3px rgba(0, 0, 0, 0.7);
                 line-height: 1.2;
+            }
+
+            .card-logo {
+                display: block;
+                max-height: 2.6rem;
+                max-width: 85%;
+                width: auto;
+                height: auto;
+                object-fit: contain;
+                object-position: left bottom;
+                filter: drop-shadow(1px 1px 3px rgba(0, 0, 0, 0.8));
             }
         }
 
@@ -312,9 +323,38 @@
             .poster-image {
                 border-radius: 0.25rem 0.25rem 0 0;
             }
+        }
+    }
 
-            .card-title-overlay {
-                opacity: 0;
+    // Continue Watching mode: dismiss button on cards.
+    &.cw-mode {
+        .card-dismiss-btn {
+            position: absolute;
+            top: 0.35rem;
+            right: 0.35rem;
+            width: 1.5rem;
+            height: 1.5rem;
+            z-index: 12;
+            opacity: 0;
+            cursor: pointer;
+            transition: opacity 0.2s ease, transform 0.15s ease;
+            pointer-events: auto;
+
+            svg {
+                width: 100%;
+                height: 100%;
+                display: block;
+            }
+
+            &:hover {
+                transform: scale(1.12);
+            }
+        }
+
+        &.hovered,
+        &.trailer-playing {
+            .card-dismiss-btn {
+                opacity: 1;
             }
         }
     }
@@ -563,6 +603,16 @@
             text-overflow: ellipsis;
             white-space: nowrap;
             text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
+        }
+
+        .rate-mode-logo {
+            display: block;
+            max-height: 2.2rem;
+            max-width: 80%;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+            filter: drop-shadow(1px 1px 3px rgba(0, 0, 0, 0.8));
         }
     }
 

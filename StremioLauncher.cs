@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
@@ -87,14 +88,14 @@ class StremioLauncher
         Console.WriteLine("[OK] Launching Stremio...");
         Console.WriteLine("[INFO] URL: " + webuiUrl);
         var proc = Process.Start(shell, "--webui-url=" + webuiUrl + " --development");
+
+        // Maximize window + apply dark title bar once the main window appears.
+        new Thread(() => ApplyWindowStyling(proc)) { IsBackground = true }.Start();
+
         proc.WaitForExit();
         Console.WriteLine("[INFO] Stremio exited with code " + proc.ExitCode);
 
         Shutdown();
-
-        // Keep console open so user can see errors
-        Console.WriteLine("\nPress any key to close...");
-        Console.ReadKey();
         return 0;
     }
 
@@ -188,6 +189,58 @@ class StremioLauncher
         catch (Exception ex)
         {
             Console.WriteLine("[WARN] Failed to start streaming server: " + ex.Message);
+        }
+    }
+
+    // ── Window styling (fullscreen + dark title bar) ─────────
+
+    [DllImport("user32.dll")]
+    static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+    [DllImport("user32.dll")]
+    static extern bool SetForegroundWindow(IntPtr hWnd);
+    [DllImport("user32.dll")]
+    static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("dwmapi.dll")]
+    static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+    const int SW_MAXIMIZE = 3;
+    // DWMWA_USE_IMMERSIVE_DARK_MODE: 20 on Win10 20H1+/Win11, 19 on older builds
+    const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
+    const int DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19;
+
+    static void ApplyWindowStyling(Process proc)
+    {
+        try
+        {
+            IntPtr hWnd = IntPtr.Zero;
+            // Poll for the main window to appear (shell launches, then creates the window)
+            for (int i = 0; i < 100; i++)
+            {
+                if (proc.HasExited) return;
+                try { proc.Refresh(); hWnd = proc.MainWindowHandle; } catch { }
+                if (hWnd != IntPtr.Zero && IsWindowVisible(hWnd)) break;
+                Thread.Sleep(150);
+            }
+            if (hWnd == IntPtr.Zero)
+            {
+                Console.WriteLine("[WindowStyle] Could not locate Stremio window");
+                return;
+            }
+
+            // Force dark title bar (Win10 20H1+ / Win11)
+            int useDark = 1;
+            int hr = DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE, ref useDark, sizeof(int));
+            if (hr != 0)
+                DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY, ref useDark, sizeof(int));
+
+            // Maximize (full-screen window)
+            ShowWindow(hWnd, SW_MAXIMIZE);
+            SetForegroundWindow(hWnd);
+            Console.WriteLine("[WindowStyle] Applied: maximized + dark title bar");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[WindowStyle] Error: " + ex.Message);
         }
     }
 

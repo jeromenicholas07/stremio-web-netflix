@@ -10,7 +10,7 @@ const useTranslate = require('stremio/common/useTranslate');
 const MetaRowPlaceholder = require('./MetaRowPlaceholder');
 const styles = require('./styles');
 
-const MetaRow = ({ className, title, catalog, message, itemComponent, notifications, source }) => {
+const MetaRow = ({ className, title, catalog, message, itemComponent, notifications, source, rowContext }) => {
     const t = useTranslate();
     const scrollRef = React.useRef(null);
     const [translateX, setTranslateX] = React.useState(0);
@@ -118,6 +118,7 @@ const MetaRow = ({ className, title, catalog, message, itemComponent, notificati
                                             key: item.id || index,
                                             className: classnames(styles['meta-item'], styles['poster-shape-poster'], styles[`poster-shape-${item.posterShape}`]),
                                             notifications,
+                                            ...(rowContext ? { rowContext } : {}),
                                         });
                                     })
                                     :
@@ -172,6 +173,7 @@ MetaRow.propTypes = {
     }),
     itemComponent: PropTypes.elementType,
     notifications: PropTypes.object,
+    rowContext: PropTypes.oneOf(['watchlist', 'not-interested', 'discovery', 'continue-watching']),
 };
 
 module.exports = MetaRow;

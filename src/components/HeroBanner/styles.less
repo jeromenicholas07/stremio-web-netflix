@@ -34,8 +34,9 @@
         object-position: center top;
     }
 
-    // Wrapper with overflow:hidden + overscan to crop black bars
+    // Wrapper: container query context so the player can cover-fit a 16:9 video.
     .hero-trailer-wrapper {
+        container-type: size;
         position: absolute;
         top: 0;
         left: 0;
@@ -45,17 +46,25 @@
         overflow: hidden;
         background: #000;
 
+        // Cover-fit a 16:9 video inside an arbitrary-aspect container,
+        // equivalent to `object-fit: cover` for an iframe. Sized to the larger
+        // of (container-width-driven 16:9) or (container-height-driven 16:9),
+        // then centered — so whichever axis is longer gets cropped and the
+        // video subject stays as close to center as the source framing allows.
+        //
+        // Extra 2% scale is safety overscan for 1px rounding + any hairline
+        // YouTube player edge artefacts.
         .hero-trailer-player {
             position: absolute;
-            // 12% overscan crops letterbox/pillarbox black bars
-            top: -6%;
-            left: -6%;
-            width: 112%;
-            height: 112%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            width:  max(102cqw, calc(102cqh * 16 / 9));
+            height: max(102cqh, calc(102cqw * 9 / 16));
             overflow: hidden;
 
-            // Force YouTube iframe and its wrapper div to fill container
-            // regardless of YouTube API default dimensions
+            // Force YouTube iframe and its wrapper div to fill the player
+            // regardless of YouTube API default dimensions.
             > div {
                 width: 100% !important;
                 height: 100% !important;
@@ -376,4 +385,38 @@
     .hero-nav-arrow {
         display: none;
     }
+}
+
+// ─── Loading placeholder (same dimensions as hero-container) ───
+.hero-loading-placeholder {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(180deg, #1a1a1a 0%, #111 60%, #0a0a0a 100%);
+    overflow: hidden;
+}
+
+.hero-loading-shimmer {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(
+        105deg,
+        transparent 30%,
+        rgba(255, 255, 255, 0.03) 45%,
+        rgba(255, 255, 255, 0.05) 50%,
+        rgba(255, 255, 255, 0.03) 55%,
+        transparent 70%
+    );
+    background-size: 200% 100%;
+    animation: hero-shimmer 2s ease-in-out infinite;
+}
+
+@keyframes hero-shimmer {
+    0% { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
 }

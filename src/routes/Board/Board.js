@@ -14,6 +14,7 @@ const useRecommendations = require('./useRecommendations');
 const useTraktRecommendations = require('./useTraktRecommendations');
 const useWatchedNotRated = require('./useWatchedNotRated');
 const useTraktLists = require('./useTraktLists');
+const useTraktDiscoveryRows = require('./useTraktDiscoveryRows');
 const styles = require('./styles');
 
 const THRESHOLD = 5;
@@ -144,6 +145,7 @@ const BoardContent = () => {
     const { rows: traktRows } = useTraktRecommendations();
     const watchedNotRatedItems = useWatchedNotRated();
     const { watchlistItems: traktWatchlistItems, notInterestedItems: traktNotInterestedItems } = useTraktLists();
+    const traktDiscoveryRows = useTraktDiscoveryRows();
     const { libraryNames, libraryIds } = useLibraryItems();
 
     // Trakt auth is now handled via OAuth Device Code flow in Settings.
@@ -217,13 +219,10 @@ const BoardContent = () => {
         'netflix.', 'disney_plus.', 'hbo_max.', 'amazon_prime.', 'apple_tv_plus.',
     ];
 
-    // The "Not Interested" list catalog ID from Trakt
-    const TRAKT_NOT_INTERESTED_ID = 'trakt_list:jeromeee:34129597:rank:asc';
-
-    // Split catalogs into: Trakt top, content rows (non-Trakt), Trakt bottom (history + not interested)
-    const { traktTopCatalogs, contentCatalogs, traktBottomCatalogs } = React.useMemo(() => {
-        const traktTop = [];    // recommendations, watchlist, popular, trending, curated lists
-        const traktBottom = []; // not interested list
+    // Split addon catalogs into content rows (non-Trakt). Trakt addon catalogs
+    // are dropped entirely — discovery/recommendation rows now come directly
+    // from the Trakt API via useTraktDiscoveryRows.
+    const { contentCatalogs } = React.useMemo(() => {
         const content = [];
 
         for (let i = 0; i < board.catalogs.length; i++) {
@@ -231,19 +230,9 @@ const BoardContent = () => {
             const addonId = c.addon?.manifest?.id || '';
             const catalogId = c.id || '';
 
-            // Handle both old (org.trakt.*) and new (community.trakt-tv) Trakt addons
+            // Drop all Trakt addon catalogs (handled by useTraktDiscoveryRows / useTraktLists)
             const isTrakt = addonId.startsWith('org.trakt') || addonId === 'community.trakt-tv';
-
-            if (isTrakt) {
-                // Not Interested list goes to the very bottom
-                if (catalogId === TRAKT_NOT_INTERESTED_ID) {
-                    traktBottom.push({ catalog: c, originalIndex: i });
-                } else {
-                    // Everything else (recommendations, watchlist, popular, trending, curated) goes to top
-                    traktTop.push({ catalog: c, originalIndex: i });
-                }
-                continue;
-            }
+            if (isTrakt) continue;
 
             // Exclude entire addons
             if (EXCLUDED_ADDONS.has(addonId)) continue;
@@ -256,7 +245,7 @@ const BoardContent = () => {
             content.push({ catalog: c, originalIndex: i });
         }
 
-        return { traktTopCatalogs: traktTop, contentCatalogs: content, traktBottomCatalogs: traktBottom };
+        return { contentCatalogs: content };
     }, [board.catalogs]);
 
     // Build a name-based dismissed set from the ID-based one for cross-ID filtering.
@@ -295,38 +284,22 @@ const BoardContent = () => {
                 }
             }
         }
-        // Add items from Trakt "Not Interested" catalog — these should be filtered
-        // from all recommendation/discovery rows (but still shown in the NI row itself)
-        for (const { catalog } of traktBottomCatalogs) {
-            if (catalog.content?.type === 'Ready' && Array.isArray(catalog.content.content)) {
-                for (const item of catalog.content.content) {
-                    if (item.name) names.add(item.name.toLowerCase().trim());
-                }
-            }
-        }
-        // Also add API-fetched Not Interested items
+        // Add API-fetched Not Interested items so they're filtered from
+        // recommendation/discovery rows (still shown in the NI row itself).
         for (const item of traktNotInterestedItems) {
             if (item.name) names.add(item.name.toLowerCase().trim());
         }
         return names;
-    }, [dismissedSet, board.catalogs, traktRows, recommendations, libraryNames, traktBottomCatalogs, traktNotInterestedItems]);
+    }, [dismissedSet, board.catalogs, traktRows, recommendations, libraryNames, traktNotInterestedItems]);
 
     // Build a set of Not Interested item IDs for direct ID matching
     const notInterestedIds = React.useMemo(() => {
         const ids = new Set();
-        for (const { catalog } of traktBottomCatalogs) {
-            if (catalog.content?.type === 'Ready' && Array.isArray(catalog.content.content)) {
-                for (const item of catalog.content.content) {
-                    if (item.id) ids.add(item.id);
-                }
-            }
-        }
-        // Also include API-fetched Not Interested items
         for (const item of traktNotInterestedItems) {
             if (item.id) ids.add(item.id);
         }
         return ids;
-    }, [traktBottomCatalogs, traktNotInterestedItems]);
+    }, [traktNotInterestedItems]);
 
     // Build combined dismissed check: matches by ID, library ID, NI ID, or by name (cross-ID filtering)
     const combinedDismissedSet = React.useMemo(() => {
@@ -352,26 +325,26 @@ const BoardContent = () => {
     // Get hero items from a random eligible row (recommendation rows or watchlist),
     // filtered to exclude dismissed/library items.
     const baseHeroItems = React.useMemo(() => {
-        // Collect all eligible rows with labels for stable identification
-        const candidateRows = [];
+        // Two tiers:
+        //   preferredRows — recommendation-class rows (Trakt direct + TMDB recs + TMDB discovery).
+        //                   These are what we want the hero to actually lock onto.
+        //   fallbackRows  — addon catalogs (Cinemeta etc.). Used only as a placeholder before
+        //                   the preferred rows finish loading; never locked to.
+        const preferredRows = [];
+        const fallbackRows = [];
 
-        // Trakt catalogs (watchlist + discovery rows, NOT not-interested)
-        for (const catalog of board.catalogs) {
-            const addonId = catalog.addon?.manifest?.id || '';
-            const isTrakt = addonId.startsWith('org.trakt') || addonId === 'community.trakt-tv';
-            if (!isTrakt) continue;
-            const catalogId = catalog.id || '';
-            if (catalogId === TRAKT_NOT_INTERESTED_ID) continue;
-            if (catalog.content?.type === 'Ready' && Array.isArray(catalog.content.content) && catalog.content.content.length >= 3) {
-                candidateRows.push({ key: 'trakt:' + catalogId, items: catalog.content.content });
+        // Direct Trakt API discovery rows (Trending, Popular, Recommended, etc.)
+        for (const row of traktDiscoveryRows) {
+            if (row.items && row.items.length >= 3) {
+                preferredRows.push({ key: 'trakt-disc:' + row.key, items: row.items });
             }
         }
 
-        // TMDB discovery rows
+        // TMDB discovery rows (useTraktRecommendations)
         for (let i = 0; i < traktRows.length; i++) {
             const row = traktRows[i];
             if (row.items && row.items.length >= 3) {
-                candidateRows.push({ key: 'tmdb-disc:' + i, items: row.items });
+                preferredRows.push({ key: 'tmdb-disc:' + i, items: row.items });
             }
         }
 
@@ -379,11 +352,11 @@ const BoardContent = () => {
         for (let i = 0; i < recommendations.length; i++) {
             const rec = recommendations[i];
             if (rec.items && rec.items.length >= 3) {
-                candidateRows.push({ key: 'rec:' + i, items: rec.items });
+                preferredRows.push({ key: 'rec:' + i, items: rec.items });
             }
         }
 
-        // Other addon catalogs (Cinemeta, etc.)
+        // Other addon catalogs — fallback only
         for (const catalog of board.catalogs) {
             const addonId = catalog.addon?.manifest?.id || '';
             const catalogId = catalog.id || '';
@@ -391,29 +364,34 @@ const BoardContent = () => {
             if (isTrakt) continue;
             if (EXCLUDED_ADDONS.has(addonId)) continue;
             if (catalog.content?.type === 'Ready' && Array.isArray(catalog.content.content) && catalog.content.content.length >= 3) {
-                candidateRows.push({ key: 'addon:' + addonId + ':' + catalogId, items: catalog.content.content });
+                fallbackRows.push({ key: 'addon:' + addonId + ':' + catalogId, items: catalog.content.content });
             }
         }
 
-        if (candidateRows.length === 0) return [];
+        if (preferredRows.length === 0 && fallbackRows.length === 0) return [];
 
-        // If we already locked a row, try to find it again
+        // If we already locked a row, try to find it again (search both tiers since
+        // a fallback could in theory have been locked previously — won't happen now,
+        // but kept for safety).
         let chosenRow = null;
         if (heroChoiceRef.current.lockedRowKey) {
-            chosenRow = candidateRows.find((r) => r.key === heroChoiceRef.current.lockedRowKey);
+            chosenRow = preferredRows.find((r) => r.key === heroChoiceRef.current.lockedRowKey)
+                || fallbackRows.find((r) => r.key === heroChoiceRef.current.lockedRowKey);
         }
 
-        // If not locked yet (or locked row vanished), pick a random one
-        // Wait until we have a decent number of candidates (at least 3) before locking
+        // Lock criteria: only lock to a preferred row, and only after the Trakt API
+        // round-trip has populated traktDiscoveryRows. This guarantees the hero waits
+        // for the Trakt rows to load instead of grabbing an addon row first.
         if (!chosenRow) {
-            if (candidateRows.length < 3) {
-                // Not enough data yet — use first available as placeholder
-                chosenRow = candidateRows[0];
-            } else {
-                // Lock in a random choice
-                const rowIndex = Math.floor(heroChoiceRef.current.seed * candidateRows.length);
-                chosenRow = candidateRows[rowIndex];
+            const traktLoaded = traktDiscoveryRows.length > 0;
+            if (traktLoaded && preferredRows.length >= 3) {
+                const rowIndex = Math.floor(heroChoiceRef.current.seed * preferredRows.length);
+                chosenRow = preferredRows[rowIndex];
                 heroChoiceRef.current.lockedRowKey = chosenRow.key;
+            } else {
+                // Not ready yet — show a placeholder from whatever we have so the
+                // banner isn't blank. Don't lock; we'll re-select once Trakt arrives.
+                chosenRow = preferredRows[0] || fallbackRows[0];
             }
         }
 
@@ -425,7 +403,7 @@ const BoardContent = () => {
         });
 
         return filtered.slice(0, 10);
-    }, [board.catalogs, traktRows, recommendations, combinedDismissedSet]);
+    }, [board.catalogs, traktDiscoveryRows, traktRows, recommendations, combinedDismissedSet]);
 
     // Prepend promoted item (from card ^ button) to hero items
     const promotedItem = trailerCtx ? trailerCtx.promotedItem : null;
@@ -443,11 +421,13 @@ const BoardContent = () => {
         }
     }, [promotedItem]);
 
-    // Pre-compute all filtered+deduped rows in a single useMemo pass
-    // This ensures deduplication happens sequentially across all row sections
+    // Pre-compute all filtered+deduped rows in a single useMemo pass.
+    // Each row is filtered by combinedDismissedSet, deduped against earlier rows,
+    // and capped at MAX_ROW_ITEMS so we always show a consistent count.
+    const MAX_ROW_ITEMS = 20;
     const dedupedRows = React.useMemo(() => {
         const seenNames = new Set();
-        const result = { traktTop: [], tmdbDisc: [], recs: [], content: [], traktBottom: [] };
+        const result = { traktDisc: [], tmdbDisc: [], recs: [], content: [] };
 
         // Seed seenNames with Continue Watching items (they get priority)
         if (continueWatchingPreview.items) {
@@ -456,48 +436,36 @@ const BoardContent = () => {
             }
         }
 
-        // Trakt top catalogs: split into personal rows (watchlist) vs discovery rows
-        // Personal rows (watchlist, history) are NOT filtered by dismissed/library,
-        // but their items seed seenNames so they're deduped from other rows.
-        // Discovery rows (popular, trending, recommendations, curated lists) ARE filtered.
-        for (let i = 0; i < traktTopCatalogs.length; i++) {
-            const { catalog, originalIndex } = traktTopCatalogs[i];
-            if (catalog.content?.type !== 'Ready') continue;
-            const catalogId = catalog.id || '';
-            // Personal rows: watchlist, history — don't filter, just dedup
-            const isPersonal = catalogId.startsWith('trakt_watchlist') || catalogId.startsWith('trakt_history');
-            const items = catalog.content.content.filter((item) => {
-                // Apply dismissed filter only to discovery/recommendation rows
-                if (!isPersonal && combinedDismissedSet.hasItem(item)) return false;
+        const filterAndCap = (items) => {
+            const out = [];
+            for (const item of items) {
+                if (out.length >= MAX_ROW_ITEMS) break;
+                if (combinedDismissedSet.hasItem(item)) continue;
                 if (item.name) {
                     const key = item.name.toLowerCase().trim();
-                    if (seenNames.has(key)) return false;
+                    if (seenNames.has(key)) continue;
                     seenNames.add(key);
                 }
-                return true;
-            });
+                out.push(item);
+            }
+            return out;
+        };
+
+        // Direct-from-Trakt-API discovery rows (replaces addon catalogs)
+        for (const row of traktDiscoveryRows) {
+            const items = filterAndCap(row.items);
             if (items.length === 0) continue;
-            const rawTitle = catalog.name || catalog.title || '';
-            const cleanTitle = rawTitle.replace(/\s*-\s*Trakt$/i, '');
-            result.traktTop.push({
-                key: `trakt-${originalIndex}`,
-                title: cleanTitle,
-                catalog: { ...catalog, content: { ...catalog.content, content: items } },
+            result.traktDisc.push({
+                key: `trakt-disc-${row.key}`,
+                title: row.title,
+                catalog: { items, content: { type: 'Ready', content: items } },
             });
         }
 
         // TMDB discovery rows
         for (let i = 0; i < traktRows.length; i++) {
             const row = traktRows[i];
-            const items = row.items.filter((item) => {
-                if (combinedDismissedSet.hasItem(item)) return false;
-                if (item.name) {
-                    const key = item.name.toLowerCase().trim();
-                    if (seenNames.has(key)) return false;
-                    seenNames.add(key);
-                }
-                return true;
-            });
+            const items = filterAndCap(row.items);
             if (items.length === 0) continue;
             result.tmdbDisc.push({
                 key: `tmdb-disc-${i}`,
@@ -506,18 +474,10 @@ const BoardContent = () => {
             });
         }
 
-        // TMDB recommendations
+        // TMDB "Because You Watched" recommendations
         for (let i = 0; i < recommendations.length; i++) {
             const rec = recommendations[i];
-            const items = rec.items.filter((item) => {
-                if (combinedDismissedSet.hasItem(item)) return false;
-                if (item.name) {
-                    const key = item.name.toLowerCase().trim();
-                    if (seenNames.has(key)) return false;
-                    seenNames.add(key);
-                }
-                return true;
-            });
+            const items = filterAndCap(rec.items);
             if (items.length === 0) continue;
             result.recs.push({
                 key: `rec-${i}`,
@@ -530,15 +490,7 @@ const BoardContent = () => {
         for (let i = 0; i < contentCatalogs.length; i++) {
             const { catalog, originalIndex } = contentCatalogs[i];
             if (catalog.content?.type !== 'Ready') continue;
-            const items = catalog.content.content.filter((item) => {
-                if (combinedDismissedSet.hasItem(item)) return false;
-                if (item.name) {
-                    const key = item.name.toLowerCase().trim();
-                    if (seenNames.has(key)) return false;
-                    seenNames.add(key);
-                }
-                return true;
-            });
+            const items = filterAndCap(catalog.content.content);
             if (items.length === 0) continue;
             const addonName = catalog.addon?.manifest?.name || '';
             result.content.push({
@@ -549,21 +501,8 @@ const BoardContent = () => {
             });
         }
 
-        // Trakt bottom catalogs (not deduped — these are special lists like "Not Interested")
-        for (let i = 0; i < traktBottomCatalogs.length; i++) {
-            const { catalog, originalIndex } = traktBottomCatalogs[i];
-            if (catalog.content?.type !== 'Ready') continue;
-            const rawTitle = catalog.name || catalog.title || '';
-            const cleanTitle = rawTitle.replace(/\s*-\s*Trakt$/i, '');
-            result.traktBottom.push({
-                key: `trakt-bottom-${originalIndex}`,
-                title: cleanTitle,
-                catalog,
-            });
-        }
-
         return result;
-    }, [traktTopCatalogs, traktRows, recommendations, contentCatalogs, traktBottomCatalogs, combinedDismissedSet, continueWatchingPreview.items]);
+    }, [traktDiscoveryRows, traktRows, recommendations, contentCatalogs, combinedDismissedSet, continueWatchingPreview.items]);
 
     return (
         <div className={styles['board-container']}>
@@ -594,12 +533,13 @@ const BoardContent = () => {
                             catalog={{ content: { type: 'Ready', content: traktWatchlistItems } }}
                             itemComponent={MetaItem}
                             source={'Trakt'}
+                            rowContext={'watchlist'}
                         />
                         :
                         null
                     }
-                    {/* Trakt addon catalogs — top: recommendations, popular, trending, curated */}
-                    {dedupedRows.traktTop.map((row) => (
+                    {/* Trakt discovery rows — fetched directly from Trakt API */}
+                    {dedupedRows.traktDisc.map((row) => (
                         <MetaRow
                             key={row.key}
                             className={classnames(styles['board-row'], 'animation-fade-in')}
@@ -661,21 +601,11 @@ const BoardContent = () => {
                             catalog={{ content: { type: 'Ready', content: traktNotInterestedItems } }}
                             itemComponent={MetaItem}
                             source={'Trakt'}
+                            rowContext={'not-interested'}
                         />
                         :
                         null
                     }
-                    {/* Trakt addon catalogs — bottom: Not Interested list (fallback if addon installed) */}
-                    {dedupedRows.traktBottom.map((row) => (
-                        <MetaRow
-                            key={row.key}
-                            className={classnames(styles['board-row'], 'animation-fade-in')}
-                            title={row.title}
-                            catalog={row.catalog}
-                            itemComponent={MetaItem}
-                            source={'Trakt'}
-                        />
-                    ))}
                     </div>
                 </div>
             </MainNavBars>

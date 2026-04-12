@@ -18,22 +18,61 @@ class TraktBridge {
         this._watchlistIds = new Set();
         this._notInterestedIds = new Set();
         this._allDismissedIds = new Set();
-        this._lastSync = 0;
         this._syncInterval = 5 * 60 * 1000; // 5 minutes
         this._syncPromise = null;
         this._listeners = new Set();
         this._notInterestedListSlug = '';
-        // Full item data from sync for rows
-        this._watchedItemsData = []; // { id, imdbId, tmdbId, name, type, watchedAt }
-        this._watchlistItemsData = []; // { id, imdbId, tmdbId, name, type, year, listedAt }
-        this._notInterestedItemsData = []; // { id, imdbId, tmdbId, name, type, year, listedAt }
-        this._ratedImdbIds = new Set();
-        this._ratedTmdbIds = new Set();
+        // Full item data from sync for rows — hydrated from localStorage so
+        // reloads within the sync window don't need a round-trip to Trakt.
+        const hydrated = this._readSyncSnapshot();
+        this._lastSync = hydrated.lastSync || 0;
+        this._watchedItemsData = hydrated.watchedItemsData || [];
+        this._watchlistItemsData = hydrated.watchlistItemsData || [];
+        this._notInterestedItemsData = hydrated.notInterestedItemsData || [];
+        this._ratedImdbIds = new Set(hydrated.ratedImdb || []);
+        this._ratedTmdbIds = new Set(hydrated.ratedTmdb || []);
+        this._watchedIds = new Set(hydrated.watchedIds || []);
+        this._watchlistIds = new Set(hydrated.watchlistIds || []);
+        this._notInterestedIds = new Set(hydrated.notInterestedIds || []);
+        // Rebuild composite _ratedIds (imdb IDs + tmdb-prefixed IDs) and
+        // the all-dismissed set so filters work without waiting for a sync.
+        this._ratedImdbIds.forEach((id) => this._ratedIds.add(id));
+        this._ratedTmdbIds.forEach((id) => this._ratedIds.add(`tmdb:${id}`));
+        this._watchedIds.forEach((id) => this._allDismissedIds.add(id));
+        this._notInterestedIds.forEach((id) => this._allDismissedIds.add(id));
+        this._ratedIds.forEach((id) => this._allDismissedIds.add(id));
         // Items marked watched locally but not yet confirmed by API
         this._pendingWatchedItems = new Map(); // id → item data
         // Device auth polling
         this._devicePollTimer = null;
         this._devicePollAbort = null;
+    }
+
+    // ─── Sync snapshot persistence ───
+    // Persists the parsed result of a /sync/* fan-out to localStorage so
+    // reloads within the sync window can skip the network round-trip entirely.
+    _readSyncSnapshot() {
+        try {
+            const raw = localStorage.getItem('trakt_sync_snapshot_v1');
+            if (!raw) return {};
+            return JSON.parse(raw) || {};
+        } catch { return {}; }
+    }
+    _writeSyncSnapshot() {
+        try {
+            const snap = {
+                lastSync: this._lastSync,
+                watchedItemsData: this._watchedItemsData,
+                watchlistItemsData: this._watchlistItemsData,
+                notInterestedItemsData: this._notInterestedItemsData,
+                ratedImdb: Array.from(this._ratedImdbIds),
+                ratedTmdb: Array.from(this._ratedTmdbIds),
+                watchedIds: Array.from(this._watchedIds),
+                watchlistIds: Array.from(this._watchlistIds),
+                notInterestedIds: Array.from(this._notInterestedIds),
+            };
+            localStorage.setItem('trakt_sync_snapshot_v1', JSON.stringify(snap));
+        } catch { /* quota — ignore */ }
     }
 
     // ─── Event system ───
@@ -317,6 +356,10 @@ class TraktBridge {
         this._ratedImdbIds = new Set();
         this._ratedTmdbIds = new Set();
         this._lastSync = 0;
+        try {
+            localStorage.removeItem('trakt_sync_snapshot_v1');
+            localStorage.removeItem('trakt_response_cache_v1');
+        } catch { /* */ }
         this._notify();
     }
 
@@ -332,6 +375,96 @@ class TraktBridge {
                 throw new Error(`Token expired and refresh failed: ${err.message}`);
             }
         }
+    }
+
+    // ─── Public unauthenticated fetch (trending, popular, etc.) ───
+    // Trakt public endpoints only need trakt-api-key + trakt-api-version.
+    async fetchPublic(path) {
+        const clientId = this.getClientId();
+        if (!clientId) throw new Error('No Trakt client ID');
+        const res = await fetch(`${TRAKT_API}${path}`, {
+            headers: {
+                'Content-Type': 'application/json',
+                'trakt-api-version': '2',
+                'trakt-api-key': clientId,
+            },
+        });
+        if (!res.ok) {
+            const text = await res.text().catch(() => '');
+            throw new Error(`Trakt API ${res.status}: ${text.slice(0, 200)}`);
+        }
+        if (res.status === 204) return {};
+        const ct = res.headers.get('content-type') || '';
+        if (ct.includes('json')) return res.json();
+        return {};
+    }
+
+    // Public alias for the auth-required _fetch (used by hooks).
+    async fetchAuth(path, options = {}) {
+        return this._fetch(path, options);
+    }
+
+    // ─── Response cache (stale-while-revalidate) ───
+    // Backs discovery/list fetches with a localStorage cache so repeated mounts
+    // don't blow through Trakt's rate limits. On fetch errors (e.g. rate limit)
+    // the most recent cached value is returned as a graceful fallback.
+    //
+    // Keys: 'public:<path>' or 'auth:<path>'
+    // Values: { ts: epoch_ms, data: ... }
+    _readCache() {
+        try { return JSON.parse(localStorage.getItem('trakt_response_cache_v1') || '{}'); }
+        catch { return {}; }
+    }
+    _writeCache(cache) {
+        try { localStorage.setItem('trakt_response_cache_v1', JSON.stringify(cache)); }
+        catch { /* quota exceeded — ignore, cache is best-effort */ }
+    }
+    // In-flight promise dedup so parallel callers share one network round-trip.
+    _inflight = new Map();
+
+    async _cachedFetch(key, fetcher, ttlMs) {
+        const cache = this._readCache();
+        const entry = cache[key];
+        const now = Date.now();
+        if (entry && (now - entry.ts) < ttlMs) {
+            return entry.data;
+        }
+        if (this._inflight.has(key)) return this._inflight.get(key);
+        const p = (async () => {
+            try {
+                const data = await fetcher();
+                const fresh = this._readCache();
+                fresh[key] = { ts: Date.now(), data };
+                this._writeCache(fresh);
+                return data;
+            } catch (err) {
+                // On rate-limit / network failure, serve the stale entry if
+                // we have one so the UI keeps working.
+                if (entry) {
+                    console.warn('[Trakt] Serving stale cache for', key, '—', err.message);
+                    return entry.data;
+                }
+                throw err;
+            } finally {
+                this._inflight.delete(key);
+            }
+        })();
+        this._inflight.set(key, p);
+        return p;
+    }
+
+    // Cached variants used by discovery/list hooks.
+    async fetchPublicCached(path, ttlMs = 60 * 60 * 1000) {
+        return this._cachedFetch('public:' + path, () => this.fetchPublic(path), ttlMs);
+    }
+    async fetchAuthCached(path, ttlMs = 30 * 60 * 1000) {
+        return this._cachedFetch('auth:' + path, () => this._fetch(path), ttlMs);
+    }
+
+    // Manual cache clear (exposed for dev/debug via window.traktBridge).
+    clearResponseCache() {
+        try { localStorage.removeItem('trakt_response_cache_v1'); } catch { /* */ }
+        this._inflight.clear();
     }
 
     // ─── Raw fetch with auto-refresh ───
@@ -630,15 +763,32 @@ class TraktBridge {
         return result;
     }
 
-    // Debounced delayed refresh — waits 1.5s for Trakt to propagate before re-fetching
+    // Debounced delayed refresh — waits 1.5s for Trakt to propagate before re-fetching.
+    // On failure, retries once after 5s. If both attempts fail, forces the next syncAll()
+    // to bypass its 5-min cooldown so the data is corrected at the earliest opportunity.
     _scheduleRefresh(listType) {
         const timerKey = `_refreshTimer_${listType}`;
         clearTimeout(this[timerKey]);
         this[timerKey] = setTimeout(() => {
-            if (listType === 'watchlist') this._refreshWatchlistData();
-            else if (listType === 'notInterested') this._refreshNotInterestedData();
-            else if (listType === 'watched') this._refreshWatchedData();
+            this._executeRefresh(listType).catch(() => {
+                // First attempt failed — retry once after 5s
+                const retryKey = `_refreshRetry_${listType}`;
+                clearTimeout(this[retryKey]);
+                this[retryKey] = setTimeout(() => {
+                    this._executeRefresh(listType).catch(() => {
+                        // Both attempts failed — force next syncAll to bypass cooldown
+                        this._lastSync = 0;
+                        console.warn(`TraktBridge: Refresh for "${listType}" failed after retry, next syncAll will force.`);
+                    });
+                }, 5000);
+            });
         }, 1500);
+    }
+
+    async _executeRefresh(listType) {
+        if (listType === 'watchlist') await this._refreshWatchlistData();
+        else if (listType === 'notInterested') await this._refreshNotInterestedData();
+        else if (listType === 'watched') await this._refreshWatchedData();
     }
 
     // ─── Mark as watched ───
@@ -881,6 +1031,7 @@ class TraktBridge {
 
             this._rebuildDismissed();
             this._lastSync = Date.now();
+            this._writeSyncSnapshot();
             this._notify();
         } catch (err) {
             console.warn('TraktBridge sync failed:', err.message);
@@ -889,32 +1040,39 @@ class TraktBridge {
 
     // Ensure the "Not Interested List" exists on Trakt; auto-create if missing.
     async _ensureNotInterestedList() {
-        // If we already have a slug cached, verify it still exists
-        const existingSlug = this.getNotInterestedListSlug();
-        if (existingSlug) {
-            try {
-                await this._fetch(`/users/me/lists/${existingSlug}`);
-                return; // list exists
-            } catch {
-                // List was deleted or slug is stale — fall through to find/create
-            }
-        }
-
-        // Search existing lists for "Not Interested List"
+        // Always list the user's lists first so we can pick the best match —
+        // a previously-cached slug may point at a stale auto-created list
+        // when a better-named one exists on the account.
         try {
             const lists = await this._fetch('/users/me/lists');
             if (Array.isArray(lists)) {
-                const match = lists.find((l) =>
-                    l.name === 'Not Interested List' ||
-                    l.ids?.slug === 'not-interested-list'
-                );
-                if (match) {
+                const normalize = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+                const isNiName = (s) => /not\s*interested/.test(normalize(s));
+                // Priority order:
+                //  1. Canonical slug 'not-interested-list'  (user's curated list)
+                //  2. Exact name 'Not Interested List'
+                //  3. Any list whose name/slug contains 'not interested'
+                //  4. Any list whose name contains 'dismiss'
+                const canonical = lists.find((l) => l.ids?.slug === 'not-interested-list');
+                const exactName = lists.find((l) => l.name === 'Not Interested List');
+                const fuzzy = lists.find((l) => isNiName(l.name) || isNiName(l.ids?.slug));
+                const dismissed = lists.find((l) => /dismiss/.test(normalize(l.name)));
+                const match = canonical || exactName || fuzzy || dismissed;
+                if (match && match.ids?.slug) {
                     this.setNotInterestedListSlug(match.ids.slug);
                     return;
                 }
             }
         } catch {
-            // If we can't list, try to create anyway
+            // /users/me/lists failed (rate-limited, offline). Fall back to the
+            // previously cached slug if we have one.
+            const existingSlug = this.getNotInterestedListSlug();
+            if (existingSlug) {
+                try {
+                    await this._fetch(`/users/me/lists/${existingSlug}`);
+                    return; // cached slug still resolves
+                } catch { /* fall through to create */ }
+            }
         }
 
         // Create the list
@@ -986,9 +1144,11 @@ class TraktBridge {
             this._watchlistIds = newIds;
             this._watchlistItemsData = items;
             this._rebuildDismissed();
+            this._writeSyncSnapshot();
             this._notify();
         } catch (err) {
             console.warn('TraktBridge: Failed to refresh watchlist:', err.message);
+            throw err;
         }
     }
 
@@ -1027,9 +1187,11 @@ class TraktBridge {
             this._notInterestedIds = newIds;
             this._notInterestedItemsData = items;
             this._rebuildDismissed();
+            this._writeSyncSnapshot();
             this._notify();
         } catch (err) {
             console.warn('TraktBridge: Failed to refresh not-interested list:', err.message);
+            throw err;
         }
     }
 
@@ -1106,9 +1268,11 @@ class TraktBridge {
 
             this._watchedItemsData = watchedItems;
             this._rebuildDismissed();
+            this._writeSyncSnapshot();
             this._notify();
         } catch (err) {
             console.warn('TraktBridge: Failed to refresh watched data:', err.message);
+            throw err;
         }
     }
 
@@ -1148,4 +1312,11 @@ class TraktBridge {
 }
 
 const traktBridge = new TraktBridge();
+
+// Expose on window for runtime debugging (safe — read/write access to an
+// instance the user already controls via Settings).
+if (typeof window !== 'undefined') {
+    window.traktBridge = traktBridge;
+}
+
 module.exports = traktBridge;
