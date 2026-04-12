@@ -887,7 +887,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                         title={rowContext === 'watchlist' ? 'Remove from Watchlist' : rowContext === 'not-interested' ? 'Remove from Not Interested' : 'Remove from Continue Watching'}
                     >
                         <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
-                            <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                            <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.6)" strokeWidth="1.5" fill="rgba(0,0,0,0.55)" />
                             <line x1="14" y1="14" x2="26" y2="26" stroke="white" strokeWidth="2" strokeLinecap="round" />
                             <line x1="26" y1="14" x2="14" y2="26" stroke="white" strokeWidth="2" strokeLinecap="round" />
                         </svg>
