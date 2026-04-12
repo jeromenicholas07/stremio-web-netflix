@@ -692,6 +692,9 @@ class TraktBridge {
             this._watchlistIds.add(itemId);
             this._rebuildDismissed();
             this._notify();
+        } else {
+            this._writeSyncSnapshot();
+            this._scheduleRefresh('watchlist');
         }
         return result;
     }
@@ -759,6 +762,9 @@ class TraktBridge {
             this._notInterestedIds.add(itemId);
             this._rebuildDismissed();
             this._notify();
+        } else {
+            this._writeSyncSnapshot();
+            this._scheduleRefresh('notInterested');
         }
         return result;
     }

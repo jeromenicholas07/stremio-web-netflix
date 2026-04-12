@@ -456,6 +456,41 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         });
     }, [itemId, type, name, onCWAction]);
 
+    // Dismiss from Watchlist or Not Interested row — removes item from the Trakt list
+    const hasDismiss = isCWItem || rowContext === 'watchlist' || rowContext === 'not-interested';
+    const onDismissFromRow = React.useCallback((event) => {
+        if (event) { event.preventDefault(); event.stopPropagation(); }
+        if (!itemId) return;
+
+        if (rowContext === 'watchlist') {
+            const itemType = type === 'series' ? 'series' : 'movie';
+            traktBridge.removeFromWatchlist(itemId, itemType).then((result) => {
+                if (result.ok) {
+                    showToast({ type: 'success', title: 'Removed from Watchlist', message: name || itemId, timeout: 3000 });
+                } else {
+                    showToast({ type: 'error', title: 'Failed to remove', message: `Trakt API returned ${result.status}`, timeout: 5000 });
+                }
+            }).catch((err) => {
+                showToast({ type: 'error', title: 'Remove error', message: err.message, timeout: 5000 });
+            });
+            window.dispatchEvent(new Event('stremio-dismissed-updated'));
+        } else if (rowContext === 'not-interested') {
+            const itemType = type === 'series' ? 'series' : 'movie';
+            traktBridge.removeFromNotInterested(itemId, itemType).then((result) => {
+                if (!result.ok) {
+                    showToast({ type: 'error', title: 'Failed to remove', message: `Trakt API returned ${result.status}`, timeout: 5000 });
+                } else {
+                    showToast({ type: 'success', title: 'Removed from Not Interested', message: name || itemId, timeout: 3000 });
+                }
+            }).catch((err) => {
+                showToast({ type: 'error', title: 'Remove error', message: err.message, timeout: 5000 });
+            });
+            window.dispatchEvent(new Event('stremio-dismissed-updated'));
+        } else if (isCWItem && typeof onDismissClick === 'function') {
+            onDismissClick(event);
+        }
+    }, [itemId, type, name, rowContext, isCWItem, onDismissClick]);
+
     // TMDB trailer fetch — primary source with stremio fallback
     const [trailerYtId, setTrailerYtId] = React.useState(null);
 
@@ -775,7 +810,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                 [styles['edge-left']]: edgePosition === 'left',
                 [styles['edge-right']]: edgePosition === 'right',
                 [styles['dismissed']]: dismissed,
-                [styles['cw-mode']]: isCWItem,
+                [styles['has-dismiss']]: hasDismiss,
             })}
             style={cardStyle}
             data-hovered={isHovered ? 'true' : undefined}
@@ -844,21 +879,17 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                 }
             </Button>
             {
-                isCWItem && typeof onDismissClick === 'function' ?
+                hasDismiss ?
                     <div
                         className={styles['card-dismiss-btn']}
-                        onClick={(e) => {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            onDismissClick(e);
-                        }}
-                        aria-label="Remove from Continue Watching"
-                        title="Remove from Continue Watching"
+                        onClick={onDismissFromRow}
+                        aria-label="Remove"
+                        title={rowContext === 'watchlist' ? 'Remove from Watchlist' : rowContext === 'not-interested' ? 'Remove from Not Interested' : 'Remove from Continue Watching'}
                     >
-                        <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
-                            <circle cx="12" cy="12" r="11" fill="rgba(0,0,0,0.75)" stroke="rgba(255,255,255,0.7)" strokeWidth="1.2" />
-                            <line x1="8" y1="8" x2="16" y2="16" stroke="white" strokeWidth="2.2" strokeLinecap="round" />
-                            <line x1="16" y1="8" x2="8" y2="16" stroke="white" strokeWidth="2.2" strokeLinecap="round" />
+                        <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                            <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                            <line x1="14" y1="14" x2="26" y2="26" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                            <line x1="26" y1="14" x2="14" y2="26" stroke="white" strokeWidth="2" strokeLinecap="round" />
                         </svg>
                     </div>
                     :
@@ -929,6 +960,22 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
                                 </g>
                             </svg>
                         </button>
+                        {
+                            hasDismiss ?
+                                <button
+                                    className={classnames(styles['card-trailer-btn'], styles['card-dismiss-trailer-btn'])}
+                                    onClick={onDismissFromRow}
+                                    aria-label="Remove"
+                                >
+                                    <svg viewBox="0 0 40 40" fill="none" xmlns="http://www.w3.org/2000/svg">
+                                        <circle cx="20" cy="20" r="18" stroke="rgba(255,255,255,0.5)" strokeWidth="1.5" fill="rgba(0,0,0,0.35)" />
+                                        <line x1="14" y1="14" x2="26" y2="26" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                        <line x1="26" y1="14" x2="14" y2="26" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                                    </svg>
+                                </button>
+                                :
+                                null
+                        }
                     </div>
                     :
                     null
