@@ -31,3 +31,120 @@ jobs:
           asset_name: stremio-web.zip
           tag: ${{ github.ref }}
           overwrite: true
+
+  launcher-full:
+    # Builds StremioLauncher.exe + StremioLauncherFULL.exe and packages them
+    # together with Prowlarr, portable Node, and the bundled incognito addon.
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Compile StremioLauncher.exe
+        shell: pwsh
+        run: |
+          $csc = Get-ChildItem -Path "C:\Windows\Microsoft.NET\Framework64" -Filter "csc.exe" -Recurse |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $csc) { throw "csc.exe not found" }
+          & $csc.FullName /target:exe /out:StremioLauncher.exe StremioLauncher.cs
+          if ($LASTEXITCODE -ne 0) { throw "StremioLauncher.exe compilation failed" }
+
+      - name: Compile StremioLauncherFULL.exe
+        shell: pwsh
+        run: |
+          $csc = Get-ChildItem -Path "C:\Windows\Microsoft.NET\Framework64" -Filter "csc.exe" -Recurse |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          & $csc.FullName /target:exe /out:StremioLauncherFULL.exe StremioLauncherFULL.cs
+          if ($LASTEXITCODE -ne 0) { throw "StremioLauncherFULL.exe compilation failed" }
+
+      - name: Upload StremioLauncher.exe
+        uses: svenstaro/upload-release-action@2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: StremioLauncher.exe
+          asset_name: StremioLauncher.exe
+          tag: ${{ github.ref }}
+          overwrite: true
+
+      - name: Upload StremioLauncherFULL.exe
+        uses: svenstaro/upload-release-action@2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: StremioLauncherFULL.exe
+          asset_name: StremioLauncherFULL.exe
+          tag: ${{ github.ref }}
+          overwrite: true
+
+      - name: Setup Node for addon deps
+        uses: actions/setup-node@v6
+        with:
+          node-version: '20'
+
+      - name: Install addon dependencies (production only)
+        shell: pwsh
+        working-directory: stremio-adult-addon
+        run: npm install --omit=dev
+
+      - name: Stage FULL bundle
+        shell: pwsh
+        run: |
+          $bundle = "StremioLauncherFULL-bundle"
+          New-Item -ItemType Directory -Force -Path $bundle | Out-Null
+
+          # Launcher binaries
+          Copy-Item StremioLauncher.exe      "$bundle\"
+          Copy-Item StremioLauncherFULL.exe  "$bundle\"
+
+          # Adult addon source + deps
+          New-Item -ItemType Directory -Force -Path "$bundle\stremio-adult-addon" | Out-Null
+          Copy-Item stremio-adult-addon\index.js            "$bundle\stremio-adult-addon\"
+          Copy-Item stremio-adult-addon\package.json        "$bundle\stremio-adult-addon\"
+          Copy-Item stremio-adult-addon\package-lock.json   "$bundle\stremio-adult-addon\" -ErrorAction SilentlyContinue
+          Copy-Item stremio-adult-addon\src                 "$bundle\stremio-adult-addon\" -Recurse
+          Copy-Item stremio-adult-addon\node_modules        "$bundle\stremio-adult-addon\" -Recurse
+
+          # Portable Node runtime
+          Write-Host "Downloading portable Node.js..."
+          $nodeUrl = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip"
+          Invoke-WebRequest -Uri $nodeUrl -OutFile node.zip
+          Expand-Archive -Path node.zip -DestinationPath node-extract
+          $nodeRoot = Get-ChildItem node-extract -Directory | Select-Object -First 1
+          New-Item -ItemType Directory -Force -Path "$bundle\node" | Out-Null
+          Copy-Item "$($nodeRoot.FullName)\node.exe" "$bundle\node\"
+
+          # Portable Prowlarr
+          Write-Host "Downloading Prowlarr..."
+          $prowlarrUrl = "https://github.com/Prowlarr/Prowlarr/releases/download/v1.28.2.4885/Prowlarr.master.1.28.2.4885.windows-core-x64.zip"
+          Invoke-WebRequest -Uri $prowlarrUrl -OutFile prowlarr.zip
+          Expand-Archive -Path prowlarr.zip -DestinationPath "$bundle\prowlarr"
+
+          # README for end-users
+          @"
+          Stremio Launcher FULL bundle
+          =============================
+
+          Double-click StremioLauncherFULL.exe to start Stremio with:
+            - Streaming server + CORS proxy + audio extraction (base services)
+            - Prowlarr indexer manager (http://127.0.0.1:9696)
+            - Incognito adult catalogs addon (http://127.0.0.1:7000)
+
+          First-time setup:
+            1. Run StremioLauncherFULL.exe
+            2. Open the Incognito tab in Stremio
+            3. Click the settings gear
+            4. Click 'Open Prowlarr' to configure indexers, then copy the API key
+            5. Paste the API key back into Incognito settings and click 'Save Prowlarr'
+
+          If you only want the base Stremio experience, run StremioLauncher.exe instead.
+          "@ | Out-File -FilePath "$bundle\README.txt" -Encoding ASCII
+
+          Compress-Archive -Path "$bundle\*" -DestinationPath StremioLauncherFULL.zip -Force
+
+      - name: Upload FULL bundle
+        uses: svenstaro/upload-release-action@2.11.5
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: StremioLauncherFULL.zip
+          asset_name: StremioLauncherFULL.zip
+          tag: ${{ github.ref }}
+          overwrite: true

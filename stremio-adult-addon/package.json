@@ -1,0 +1,16 @@
+{
+  "name": "stremio-adult-addon",
+  "version": "1.0.0",
+  "description": "Stremio addon for adult content catalogs via Prowlarr",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10",
+    "node-fetch": "^2.7.0",
+    "fast-levenshtein": "^3.0.0",
+    "xml2js": "^0.6.2",
+    "lru-cache": "^10.0.0"
+  }
+}

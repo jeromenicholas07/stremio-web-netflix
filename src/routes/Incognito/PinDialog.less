@@ -1,0 +1,111 @@
+.pin-dialog-container {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.95);
+    z-index: 1000;
+}
+
+.pin-dialog-content {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2rem;
+    padding: 3rem;
+    background: var(--color-background-dark2, #1a1a2e);
+    border-radius: 1rem;
+    min-width: 320px;
+}
+
+.pin-title {
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+    font-size: 1.4rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.pin-subtitle {
+    color: var(--color-surface-light5-60, rgba(255, 255, 255, 0.6));
+    font-size: 0.9rem;
+    margin-top: -1rem;
+}
+
+.pin-dots-container {
+    display: flex;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+
+.pin-dot {
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    border: 2px solid var(--color-surface-light5-60, rgba(255, 255, 255, 0.6));
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.pin-dot.filled {
+    background-color: var(--color-primary, #7b5bf5);
+    border-color: var(--color-primary, #7b5bf5);
+}
+
+.pin-error {
+    color: #e74c3c;
+    font-size: 0.85rem;
+    min-height: 1.2rem;
+}
+
+.pin-numpad {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 0.75rem;
+    width: 240px;
+}
+
+.numpad-button {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 56px;
+    border: none;
+    border-radius: 0.75rem;
+    background: var(--color-background-dark4, #2a2a4a);
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+    font-size: 1.5rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+    user-select: none;
+    outline: none;
+}
+
+.numpad-button:hover {
+    background: var(--color-background-dark5, #3a3a5a);
+}
+
+.numpad-button:active {
+    background: var(--color-primary, #7b5bf5);
+}
+
+.numpad-button.backspace-button {
+    font-size: 1.2rem;
+}
+
+.numpad-button.empty-button {
+    visibility: hidden;
+}
+
+@keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    10%, 30%, 50%, 70%, 90% { transform: translateX(-8px); }
+    20%, 40%, 60%, 80% { transform: translateX(8px); }
+}
+
+.pin-dots-container.shake {
+    animation: shake 0.5s ease-in-out;
+}

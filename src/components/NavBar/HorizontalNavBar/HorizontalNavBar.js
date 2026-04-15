@@ -13,6 +13,7 @@ const styles = require('./styles');
 const NAV_LINKS = [
     { id: 'board', label: 'Home', href: '#/' },
     { id: 'mylist', label: 'My List', href: '#/mylist' },
+    { id: 'incognito', label: 'Incognito', href: '#/incognito', icon: 'eye-off-outline' },
 ];
 
 const HorizontalNavBar = React.memo(({ className, route, query, title, backButton, searchBar, fullscreenButton, navMenu, ...props }) => {
@@ -70,6 +71,7 @@ const HorizontalNavBar = React.memo(({ className, route, query, title, backButto
                                 href={link.href}
                                 tabIndex={-1}
                             >
+                                {link.icon ? <Icon className={styles['nav-link-icon']} name={link.icon} /> : null}
                                 {link.label}
                             </Button>
                         ))}

@@ -48,6 +48,10 @@ const routesRegexp = {
     player: {
         regexp: /^\/player\/([^/]*)(?:\/([^/]*)\/([^/]*)\/([^/]*)\/([^/]*)\/([^/]*))?$/,
         urlParamsNames: ['stream', 'streamTransportUrl', 'metaTransportUrl', 'type', 'id', 'videoId']
+    },
+    incognito: {
+        regexp: /^\/incognito(?:\/([^/]*))?$/,
+        urlParamsNames: ['subpage']
     }
 };
 

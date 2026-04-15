@@ -1,0 +1,149 @@
+.settings-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.settings-panel {
+    background: var(--color-background-dark2, #1a1a2e);
+    border-radius: 1rem;
+    padding: 2rem;
+    min-width: 400px;
+    max-width: 560px;
+    max-height: 90vh;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+}
+
+.settings-divider {
+    height: 1px;
+    background: var(--color-surface-light5-20, rgba(255, 255, 255, 0.1));
+    margin: 0.25rem 0;
+}
+
+.settings-badge {
+    display: inline-block;
+    margin-left: 0.4rem;
+    padding: 0.1rem 0.45rem;
+    border-radius: 0.25rem;
+    background: rgba(46, 204, 113, 0.2);
+    color: #2ecc71;
+    font-size: 0.7rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.settings-title {
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+    font-size: 1.3rem;
+    font-weight: 600;
+}
+
+.settings-description {
+    color: var(--color-surface-light5-60, rgba(255, 255, 255, 0.6));
+    font-size: 0.9rem;
+    line-height: 1.5;
+}
+
+.settings-status-row {
+    min-height: 1.5rem;
+}
+
+.settings-group {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+.settings-label {
+    color: var(--color-surface-light5-60, rgba(255, 255, 255, 0.6));
+    font-size: 0.85rem;
+}
+
+.settings-input {
+    background: var(--color-background-dark4, #2a2a4a);
+    border: 1px solid var(--color-surface-light5-20, rgba(255, 255, 255, 0.2));
+    border-radius: 0.5rem;
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+    padding: 0.6rem 0.8rem;
+    font-size: 0.95rem;
+    outline: none;
+}
+
+.settings-input:focus {
+    border-color: var(--color-primary, #7b5bf5);
+}
+
+.settings-hint {
+    color: var(--color-surface-light5-40, rgba(255, 255, 255, 0.4));
+    font-size: 0.8rem;
+}
+
+.settings-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: flex-end;
+    margin-top: 0.5rem;
+}
+
+.settings-button {
+    padding: 0.5rem 1rem;
+    border: none;
+    border-radius: 0.5rem;
+    font-size: 0.9rem;
+    cursor: pointer;
+    transition: background-color 0.15s ease;
+    white-space: nowrap;
+}
+
+.settings-button.primary {
+    background: var(--color-primary, #7b5bf5);
+    color: white;
+}
+
+.settings-button.primary:hover {
+    background: var(--color-primary-dark, #6a4be4);
+}
+
+.settings-button.secondary {
+    background: var(--color-background-dark4, #2a2a4a);
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+}
+
+.settings-button.secondary:hover {
+    background: var(--color-background-dark5, #3a3a5a);
+}
+
+.settings-button.danger {
+    background: transparent;
+    color: #e74c3c;
+    border: 1px solid #e74c3c;
+}
+
+.settings-button.danger:hover {
+    background: rgba(231, 76, 60, 0.1);
+}
+
+.settings-status {
+    font-size: 0.85rem;
+    padding: 0.5rem 0;
+}
+
+.settings-status.connected {
+    color: #2ecc71;
+}
+
+.settings-status.disconnected {
+    color: #e74c3c;
+}
