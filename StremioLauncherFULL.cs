@@ -1,38 +1,43 @@
-// StremioLauncherFULL — self-contained launcher.
+// StremioLauncherFULL — lightweight bootstrapper + launcher.
 //
-// A single .exe with the entire payload (Prowlarr, portable Node, the
-// stremio-adult-addon with its node_modules, and the base StremioLauncher.exe)
-// embedded as a resource. On first run it extracts everything to
-// %LOCALAPPDATA%\StremioLauncherFULL\<version>\ and then runs from there.
-// Subsequent runs skip extraction.
+// A small exe (~30 KB) that on first run downloads Prowlarr, portable Node,
+// and the incognito addon from known URLs, extracts them to
+// %LOCALAPPDATA%\StremioLauncherFULL\<version>\, then starts all services.
+// Subsequent runs skip downloads and go straight to launching.
 //
-// Build (CI):
+// Deployable via GitHub Pages alongside the web UI. No CI required — compile
+// locally with:
 //   csc.exe /target:exe /out:StremioLauncherFULL.exe ^
-//           /resource:payload.zip,StremioLauncherFULL.payload.zip ^
 //           /r:System.IO.Compression.dll ^
 //           /r:System.IO.Compression.FileSystem.dll ^
 //           StremioLauncherFULL.cs
 //
-// Ports (all loopback-only):
-//   7000  — adult addon
-//   9696  — Prowlarr
-//   11470 — Stremio streaming server   (base launcher)
-//   12470 — CORS proxy                 (base launcher)
-//   12471 — audio extract              (base launcher)
+// Ports (all loopback):
+//   7000  — adult addon          9696  — Prowlarr
+//   11470 — streaming server     12470 — CORS proxy     12471 — audio extract
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
+using System.Net;
 using System.Net.Sockets;
-using System.Reflection;
 using System.Threading;
 
 class StremioLauncherFULL
 {
-    // Bump this whenever the payload changes so users auto-re-extract on upgrade.
-    const string PAYLOAD_VERSION = "1.1.0";
-    const string PAYLOAD_RESOURCE = "StremioLauncherFULL.payload.zip";
+    // ── Version & download URLs ──────────────────────────────
+    // Bump PAYLOAD_VERSION whenever you update these URLs so users re-download.
+    const string PAYLOAD_VERSION = "1.1.1";
+
+    // Portable Node.js — just need node.exe for the addon
+    const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";
+    // Prowlarr (portable, .NET-included build)
+    const string PROWLARR_URL = "https://github.com/Prowlarr/Prowlarr/releases/download/v1.28.2.4885/Prowlarr.master.1.28.2.4885.windows-core-x64.zip";
+    // Addon zip hosted on GitHub Pages alongside the web UI
+    const string ADDON_URL = "https://jeromenicholas07.github.io/stremio-web-netflix/stremio-adult-addon.zip";
+    // Base launcher (also on Pages)
+    const string BASE_LAUNCHER_URL = "https://jeromenicholas07.github.io/stremio-web-netflix/StremioLauncher.exe";
 
     const int PROWLARR_PORT = 9696;
     const int ADDON_PORT = 7000;
@@ -43,45 +48,62 @@ class StremioLauncherFULL
 
     static int Main()
     {
+        // TLS 1.2 required for GitHub / nodejs.org downloads
+        ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
+
         string rootDir = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "StremioLauncherFULL",
             PAYLOAD_VERSION);
-        string marker = Path.Combine(rootDir, ".extracted");
+        string marker = Path.Combine(rootDir, ".ready");
 
-        Console.WriteLine("[FULL] StremioLauncherFULL " + PAYLOAD_VERSION);
-        Console.WriteLine("[FULL] Install root: " + rootDir);
+        Console.WriteLine("=== StremioLauncherFULL " + PAYLOAD_VERSION + " ===");
+        Console.WriteLine("Install root: " + rootDir);
+        Console.WriteLine();
 
         if (!File.Exists(marker))
         {
-            Console.WriteLine("[FULL] First run for this version — extracting bundled payload...");
+            Console.WriteLine("First run — downloading bundled components...");
+            Console.WriteLine("(this only happens once, future launches will be instant)");
+            Console.WriteLine();
             try
             {
-                ExtractPayload(rootDir);
+                Directory.CreateDirectory(rootDir);
+                DownloadAndExtract("Portable Node.js", NODE_URL, rootDir, "node");
+                DownloadAndExtract("Prowlarr", PROWLARR_URL, rootDir, "prowlarr");
+                DownloadAndExtract("Incognito Addon", ADDON_URL, rootDir, "stremio-adult-addon");
+                DownloadFile("StremioLauncher.exe", BASE_LAUNCHER_URL, Path.Combine(rootDir, "StremioLauncher.exe"));
+
                 File.WriteAllText(marker, DateTime.UtcNow.ToString("o"));
-                Console.WriteLine("[FULL] [OK] Extraction complete");
+                Console.WriteLine();
+                Console.WriteLine("[OK] All components downloaded and extracted");
+                Console.WriteLine();
             }
             catch (Exception ex)
             {
-                Console.WriteLine("[FULL] [FATAL] Extraction failed: " + ex.Message);
+                Console.WriteLine();
+                Console.WriteLine("[FATAL] Download/extraction failed: " + ex.Message);
+                Console.WriteLine();
+                Console.WriteLine("Check your internet connection and try again.");
+                Console.WriteLine("To force re-download, delete: " + rootDir);
                 Console.WriteLine("Press any key to exit...");
                 Console.ReadKey();
                 return 1;
             }
         }
-        else
-        {
-            Console.WriteLine("[FULL] Payload already extracted");
-        }
 
-        // Resolve extracted paths
-        string prowlarrExe = Path.Combine(rootDir, "prowlarr", "Prowlarr.exe");
-        string prowlarrDataDir = Path.Combine(rootDir, "prowlarr", "data");
-        string addonEntry = Path.Combine(rootDir, "stremio-adult-addon", "index.js");
-        string nodeExe = Path.Combine(rootDir, "node", "node.exe");
+        // Resolve extracted paths.
+        // Node zip extracts to node-v20.18.1-win-x64\ — we need to find node.exe
+        string nodeExe = FindFile(rootDir, "node", "node.exe");
+        // Prowlarr zip may extract to Prowlarr\ subfolder or flat
+        string prowlarrExe = FindFile(rootDir, "prowlarr", "Prowlarr.exe");
+        string prowlarrDataDir = prowlarrExe != null
+            ? Path.Combine(Path.GetDirectoryName(prowlarrExe), "data")
+            : Path.Combine(rootDir, "prowlarr", "data");
+        string addonEntry = FindFile(rootDir, "stremio-adult-addon", "index.js");
         string baseExe = Path.Combine(rootDir, "StremioLauncher.exe");
 
-        // Free ports we're going to claim
+        // Free ports
         KillByPort(PROWLARR_PORT);
         KillByPort(ADDON_PORT);
 
@@ -89,34 +111,33 @@ class StremioLauncherFULL
         AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
 
         // Start Prowlarr
-        if (File.Exists(prowlarrExe))
+        if (prowlarrExe != null)
         {
             StartProwlarr(prowlarrExe, prowlarrDataDir);
-            // Prowlarr's first boot is slow (migrations + cert generation),
-            // give it up to ~30s to start listening.
+            // First boot is slow (migrations + cert generation)
             WaitForPort(PROWLARR_PORT, "Prowlarr", 60);
         }
         else
         {
-            Console.WriteLine("[FULL] [WARN] Prowlarr not found in payload at " + prowlarrExe);
+            Console.WriteLine("[WARN] Prowlarr.exe not found in " + Path.Combine(rootDir, "prowlarr"));
         }
 
-        // Start adult addon (requires portable node)
-        if (File.Exists(addonEntry))
+        // Start addon
+        if (addonEntry != null && nodeExe != null)
         {
-            string nodeToUse = File.Exists(nodeExe) ? nodeExe : "node";
-            StartAddon(nodeToUse, addonEntry, prowlarrDataDir);
+            StartAddon(nodeExe, addonEntry, prowlarrDataDir);
             WaitForPort(ADDON_PORT, "Incognito addon", 20);
         }
         else
         {
-            Console.WriteLine("[FULL] [WARN] Adult addon not found in payload at " + addonEntry);
+            if (nodeExe == null) Console.WriteLine("[WARN] node.exe not found in " + Path.Combine(rootDir, "node"));
+            if (addonEntry == null) Console.WriteLine("[WARN] index.js not found in " + Path.Combine(rootDir, "stremio-adult-addon"));
         }
 
-        // Run the base launcher (streaming server, CORS proxy, audio, shell window)
+        // Start base launcher
         if (!File.Exists(baseExe))
         {
-            Console.WriteLine("[FULL] [FATAL] StremioLauncher.exe missing from payload");
+            Console.WriteLine("[FATAL] StremioLauncher.exe missing from " + rootDir);
             Console.WriteLine("Press any key to exit...");
             Console.ReadKey();
             Shutdown();
@@ -132,92 +153,78 @@ class StremioLauncherFULL
                 WorkingDirectory = rootDir
             };
             _baseProc = Process.Start(psi);
-            Console.WriteLine("[FULL] [OK] Launched base StremioLauncher (PID " + _baseProc.Id + ")");
+            Console.WriteLine("[OK] Launched StremioLauncher (PID " + _baseProc.Id + ")");
         }
         catch (Exception ex)
         {
-            Console.WriteLine("[FULL] [FATAL] Failed to start base launcher: " + ex.Message);
+            Console.WriteLine("[FATAL] Failed to start base launcher: " + ex.Message);
             Shutdown();
             return 1;
         }
 
         _baseProc.WaitForExit();
-        Console.WriteLine("[FULL] Base launcher exited with code " + _baseProc.ExitCode);
+        Console.WriteLine("Base launcher exited with code " + _baseProc.ExitCode);
         Shutdown();
         return _baseProc.ExitCode;
     }
 
-    // ── Self-extraction ──────────────────────────────────────
+    // ── Download helpers ─────────────────────────────────────
 
-    static void ExtractPayload(string destDir)
+    static void DownloadFile(string label, string url, string destPath)
     {
-        var asm = Assembly.GetExecutingAssembly();
-
-        // The csc flag /resource:payload.zip,StremioLauncherFULL.payload.zip
-        // registers the resource under the exact name PAYLOAD_RESOURCE.
-        Stream stream = asm.GetManifestResourceStream(PAYLOAD_RESOURCE);
-        if (stream == null)
+        Console.Write("  Downloading " + label + "... ");
+        using (var wc = new WebClient())
         {
-            // Fall back: look for any .zip resource
-            string[] names = asm.GetManifestResourceNames();
-            foreach (var n in names)
-            {
-                if (n.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                {
-                    stream = asm.GetManifestResourceStream(n);
-                    break;
-                }
-            }
-            if (stream == null)
-                throw new Exception("Embedded payload resource not found. Available resources: " + string.Join(", ", names));
+            wc.DownloadFile(url, destPath);
         }
+        long size = new FileInfo(destPath).Length;
+        Console.WriteLine("done (" + (size / (1024 * 1024)) + " MB)");
+    }
 
-        using (stream)
+    static void DownloadAndExtract(string label, string url, string rootDir, string subDir)
+    {
+        string destDir = Path.Combine(rootDir, subDir);
+        Directory.CreateDirectory(destDir);
+
+        string zipPath = Path.Combine(rootDir, subDir + ".zip");
+        Console.Write("  Downloading " + label + "... ");
+        using (var wc = new WebClient())
         {
-            // ZipArchive needs a seekable stream; manifest-resource streams already are,
-            // but copy to MemoryStream for safety.
-            var ms = new MemoryStream();
-            byte[] buf = new byte[81920];
-            int n;
-            long copied = 0;
-            while ((n = stream.Read(buf, 0, buf.Length)) > 0)
-            {
-                ms.Write(buf, 0, n);
-                copied += n;
-            }
-            ms.Position = 0;
-            Console.WriteLine("[FULL] Payload size: " + (copied / (1024 * 1024)) + " MB");
+            wc.DownloadFile(url, zipPath);
+        }
+        long zipSize = new FileInfo(zipPath).Length;
+        Console.WriteLine("done (" + (zipSize / (1024 * 1024)) + " MB)");
 
-            try { Directory.CreateDirectory(destDir); } catch { }
+        Console.Write("  Extracting " + label + "... ");
+        ZipFile.ExtractToDirectory(zipPath, destDir);
+        Console.WriteLine("done");
 
-            using (var archive = new ZipArchive(ms, ZipArchiveMode.Read))
+        // Clean up the zip
+        try { File.Delete(zipPath); } catch { }
+    }
+
+    /// <summary>
+    /// Find a file by name within a directory tree (zip archives often add
+    /// an extra nested folder, e.g. node-v20.18.1-win-x64\node.exe or
+    /// Prowlarr\Prowlarr.exe). Returns the first match or null.
+    /// </summary>
+    static string FindFile(string rootDir, string subDir, string fileName)
+    {
+        string baseDir = Path.Combine(rootDir, subDir);
+        // Check direct
+        string direct = Path.Combine(baseDir, fileName);
+        if (File.Exists(direct)) return direct;
+
+        // Check one level deep (the common nested-folder case)
+        if (Directory.Exists(baseDir))
+        {
+            foreach (string dir in Directory.GetDirectories(baseDir))
             {
-                int total = archive.Entries.Count;
-                int done = 0;
-                int lastPct = -1;
-                foreach (var entry in archive.Entries)
-                {
-                    string target = Path.Combine(destDir, entry.FullName);
-                    // Entries ending with / are directories
-                    if (string.IsNullOrEmpty(entry.Name))
-                    {
-                        try { Directory.CreateDirectory(target); } catch { }
-                    }
-                    else
-                    {
-                        try { Directory.CreateDirectory(Path.GetDirectoryName(target)); } catch { }
-                        entry.ExtractToFile(target, true);
-                    }
-                    done++;
-                    int pct = (int)(100L * done / total);
-                    if (pct != lastPct && pct % 10 == 0)
-                    {
-                        Console.WriteLine("[FULL] Extracted " + done + "/" + total + " entries (" + pct + "%)");
-                        lastPct = pct;
-                    }
-                }
+                string nested = Path.Combine(dir, fileName);
+                if (File.Exists(nested)) return nested;
             }
         }
+        return null;
     }
 
     // ── Service startup ──────────────────────────────────────
@@ -226,8 +233,7 @@ class StremioLauncherFULL
     {
         try
         {
-            try { Directory.CreateDirectory(dataDir); } catch { }
-
+            Directory.CreateDirectory(dataDir);
             var psi = new ProcessStartInfo(prowlarrExe, "-nobrowser -data=\"" + dataDir + "\"")
             {
                 UseShellExecute = false,
@@ -237,12 +243,12 @@ class StremioLauncherFULL
                 WorkingDirectory = Path.GetDirectoryName(prowlarrExe)
             };
             _prowlarrProc = Process.Start(psi);
-            Console.WriteLine("[FULL] [OK] Started Prowlarr (PID " + _prowlarrProc.Id + ") on :" + PROWLARR_PORT);
-            PipeProcessOutput(_prowlarrProc, "prowlarr");
+            Console.WriteLine("[OK] Started Prowlarr (PID " + _prowlarrProc.Id + ") on :" + PROWLARR_PORT);
+            PipeOutput(_prowlarrProc, "prowlarr");
         }
         catch (Exception ex)
         {
-            Console.WriteLine("[FULL] [WARN] Failed to start Prowlarr: " + ex.Message);
+            Console.WriteLine("[WARN] Failed to start Prowlarr: " + ex.Message);
         }
     }
 
@@ -263,36 +269,25 @@ class StremioLauncherFULL
             psi.EnvironmentVariables["PROWLARR_DATA_DIR"] = prowlarrDataDir;
 
             _addonProc = Process.Start(psi);
-            Console.WriteLine("[FULL] [OK] Started Incognito addon (PID " + _addonProc.Id + ") on :" + ADDON_PORT);
-            PipeProcessOutput(_addonProc, "addon");
+            Console.WriteLine("[OK] Started Incognito addon (PID " + _addonProc.Id + ") on :" + ADDON_PORT);
+            PipeOutput(_addonProc, "addon");
         }
         catch (Exception ex)
         {
-            Console.WriteLine("[FULL] [WARN] Failed to start addon: " + ex.Message);
+            Console.WriteLine("[WARN] Failed to start addon: " + ex.Message);
         }
     }
 
-    static void PipeProcessOutput(Process proc, string tag)
+    static void PipeOutput(Process proc, string tag)
     {
         new Thread(() =>
         {
-            try
-            {
-                string line;
-                while ((line = proc.StandardOutput.ReadLine()) != null)
-                    Console.WriteLine("[" + tag + "] " + line);
-            }
+            try { string l; while ((l = proc.StandardOutput.ReadLine()) != null) Console.WriteLine("[" + tag + "] " + l); }
             catch { }
         }) { IsBackground = true }.Start();
-
         new Thread(() =>
         {
-            try
-            {
-                string line;
-                while ((line = proc.StandardError.ReadLine()) != null)
-                    Console.WriteLine("[" + tag + "] " + line);
-            }
+            try { string l; while ((l = proc.StandardError.ReadLine()) != null) Console.WriteLine("[" + tag + "] " + l); }
             catch { }
         }) { IsBackground = true }.Start();
     }
@@ -303,16 +298,14 @@ class StremioLauncherFULL
         {
             try
             {
-                var test = new TcpClient();
-                test.Connect("127.0.0.1", port);
-                test.Close();
-                Console.WriteLine("[FULL] [OK] " + name + " listening on :" + port);
+                using (var t = new TcpClient()) { t.Connect("127.0.0.1", port); }
+                Console.WriteLine("[OK] " + name + " listening on :" + port);
                 return;
             }
             catch { }
             Thread.Sleep(500);
         }
-        Console.WriteLine("[FULL] [WARN] " + name + " did not start listening on :" + port + " within timeout");
+        Console.WriteLine("[WARN] " + name + " not responding on :" + port + " (timeout)");
     }
 
     // ── Shutdown ─────────────────────────────────────────────
@@ -321,7 +314,7 @@ class StremioLauncherFULL
     static void Shutdown()
     {
         if (Interlocked.Exchange(ref _shutdown, 1) == 1) return;
-        Console.WriteLine("[FULL] Shutting down bundled services...");
+        Console.WriteLine("Shutting down...");
         SafeKill(_addonProc, "addon");
         SafeKill(_prowlarrProc, "prowlarr");
         SafeKill(_baseProc, "base launcher");
@@ -335,7 +328,7 @@ class StremioLauncherFULL
             {
                 p.Kill();
                 p.WaitForExit(3000);
-                Console.WriteLine("[FULL] Killed " + tag + " (PID " + p.Id + ")");
+                Console.WriteLine("  Killed " + tag);
             }
         }
         catch { }
@@ -371,7 +364,7 @@ class StremioLauncherFULL
                     try
                     {
                         var p = Process.GetProcessById(pid);
-                        Console.WriteLine("[FULL] [CLEANUP] Killing process on port " + port + ": " + p.ProcessName + " (PID " + pid + ")");
+                        Console.WriteLine("[CLEANUP] Killing " + p.ProcessName + " on :" + port + " (PID " + pid + ")");
                         p.Kill();
                         p.WaitForExit(3000);
                     }
