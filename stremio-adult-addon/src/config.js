@@ -54,19 +54,25 @@ function readApiKeyFromDisk() {
     }
 }
 
-function getProwlarrApiKey() {
+function getProwlarrApiKey({ forceReload = false } = {}) {
     // Env var always wins (useful for dev / non-bundled deployments)
     if (process.env.PROWLARR_API_KEY) return process.env.PROWLARR_API_KEY;
 
-    // Cache once we've successfully read it from disk
-    if (_apiKey) return _apiKey;
+    // Cache once we've successfully read it from disk (unless forced)
+    if (!forceReload && _apiKey) return _apiKey;
 
     const fromDisk = readApiKeyFromDisk();
     if (fromDisk) {
+        if (fromDisk !== _apiKey) {
+            console.log('[config] Discovered Prowlarr API key from config.xml');
+        }
         _apiKey = fromDisk;
-        console.log('[config] Discovered Prowlarr API key from config.xml');
     }
     return _apiKey || '';
+}
+
+function invalidateApiKeyCache() {
+    _apiKey = null;
 }
 
 function getConfig() {
@@ -76,4 +82,4 @@ function getConfig() {
     };
 }
 
-module.exports = { getConfig, STATIC };
+module.exports = { getConfig, STATIC, invalidateApiKeyCache };

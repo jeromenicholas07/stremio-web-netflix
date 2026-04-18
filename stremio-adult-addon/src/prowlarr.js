@@ -1,6 +1,6 @@
 const fetch = require('node-fetch');
 const { parseString } = require('xml2js');
-const { getConfig } = require('./config');
+const { getConfig, invalidateApiKeyCache } = require('./config');
 
 function parseXml(xml) {
     return new Promise((resolve, reject) => {
@@ -54,9 +54,14 @@ function parseItem(item) {
  * @returns {Promise<Array>} Array of parsed torrent items
  */
 async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', categories: categoriesOpt } = {}) {
-    const config = getConfig();
+    let config = getConfig();
     if (!config.prowlarrApiKey) {
-        throw new Error('Prowlarr API key not configured');
+        // Force-reload once in case Prowlarr only just wrote config.xml
+        invalidateApiKeyCache();
+        config = getConfig();
+        if (!config.prowlarrApiKey) {
+            throw new Error('Prowlarr API key not configured');
+        }
     }
 
     limit = limit || config.pageSize;
@@ -65,22 +70,37 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
         : config.adultCategories;
     const categories = categoryList.join(',');
 
-    // Use Prowlarr's search API endpoint
-    const params = new URLSearchParams({
-        query: query,
-        categories: categories,
-        offset: String(offset),
-        limit: String(limit),
-        type: 'search',
-    });
+    // Prowlarr accepts X-Api-Key header OR apikey query param. Sending both
+    // is belt-and-braces: works even when AuthenticationRequired=Enabled and
+    // the header gets dropped by an intermediary.
+    async function doFetch(apiKey) {
+        const params = new URLSearchParams({
+            query: query,
+            categories: categories,
+            offset: String(offset),
+            limit: String(limit),
+            type: 'search',
+            apikey: apiKey,
+        });
+        const url = `${config.prowlarrUrl}/api/v1/search?${params}`;
+        return fetch(url, {
+            headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' },
+        });
+    }
 
-    const url = `${config.prowlarrUrl}/api/v1/search?${params}`;
-    const response = await fetch(url, {
-        headers: {
-            'X-Api-Key': config.prowlarrApiKey,
-            'Accept': 'application/json',
-        },
-    });
+    let response = await doFetch(config.prowlarrApiKey);
+
+    // On 401, the on-disk key may have rotated (first-run Prowlarr writes a
+    // fresh key on boot, possibly after we cached an earlier stub). Bust the
+    // cache, re-read, retry once.
+    if (response.status === 401) {
+        console.warn('[prowlarr] 401 — re-reading API key from config.xml and retrying');
+        invalidateApiKeyCache();
+        config = getConfig();
+        if (config.prowlarrApiKey) {
+            response = await doFetch(config.prowlarrApiKey);
+        }
+    }
 
     if (!response.ok) {
         // Fallback: try Torznab API directly via indexers
@@ -125,10 +145,22 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
         ? categoriesOpt
         : config.adultCategories;
 
-    // Get list of indexers from Prowlarr
-    const indexersRes = await fetch(`${config.prowlarrUrl}/api/v1/indexer`, {
-        headers: { 'X-Api-Key': config.prowlarrApiKey },
-    });
+    // Get list of indexers from Prowlarr. Send key in header AND query-string.
+    async function fetchIndexers(apiKey) {
+        return fetch(`${config.prowlarrUrl}/api/v1/indexer?apikey=${encodeURIComponent(apiKey)}`, {
+            headers: { 'X-Api-Key': apiKey },
+        });
+    }
+    let indexersRes = await fetchIndexers(config.prowlarrApiKey);
+
+    if (indexersRes.status === 401) {
+        console.warn('[prowlarr/torznab] 401 on /indexer — re-reading key and retrying');
+        invalidateApiKeyCache();
+        const reloaded = getConfig();
+        if (reloaded.prowlarrApiKey) {
+            indexersRes = await fetchIndexers(reloaded.prowlarrApiKey);
+        }
+    }
 
     if (!indexersRes.ok) {
         throw new Error(`Failed to fetch Prowlarr indexers: ${indexersRes.status}`);
