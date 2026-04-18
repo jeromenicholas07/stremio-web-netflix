@@ -32,16 +32,17 @@ function base64UrlEncode(str) {
         .replace(/=+$/, '');
 }
 
+const DEFAULT_TRACKERS = [
+    'udp://tracker.opentrackr.org:1337/announce',
+    'udp://tracker.openbittorrent.com:6969/announce',
+    'udp://exodus.desync.com:6969/announce',
+    'udp://tracker.torrent.eu.org:451/announce',
+    'udp://open.stealth.si:80/announce'
+];
+
 function buildMagnet(infoHash, title) {
-    const trackers = [
-        'udp://tracker.opentrackr.org:1337/announce',
-        'udp://tracker.openbittorrent.com:6969/announce',
-        'udp://exodus.desync.com:6969/announce',
-        'udp://tracker.torrent.eu.org:451/announce',
-        'udp://open.stealth.si:80/announce'
-    ];
     const dn = title ? `&dn=${encodeURIComponent(title)}` : '';
-    const tr = trackers.map((t) => `&tr=${encodeURIComponent(t)}`).join('');
+    const tr = DEFAULT_TRACKERS.map((t) => `&tr=${encodeURIComponent(t)}`).join('');
     return `magnet:?xt=urn:btih:${infoHash}${dn}${tr}`;
 }
 
@@ -54,39 +55,57 @@ const Torrent = ({ urlParams }) => {
         if (ranRef.current) return;
         ranRef.current = true;
 
-        const raw = urlParams && urlParams.payload;
-        if (!raw) { setError('Missing torrent payload'); return; }
+        (async () => {
+            const raw = urlParams && urlParams.payload;
+            if (!raw) { setError('Missing torrent payload'); return; }
 
-        const json = base64UrlDecode(decodeURIComponent(raw));
-        if (!json) { setError('Invalid torrent payload'); return; }
+            const json = base64UrlDecode(decodeURIComponent(raw));
+            if (!json) { setError('Invalid torrent payload'); return; }
 
-        let payload;
-        try { payload = JSON.parse(json); } catch { setError('Corrupt torrent payload'); return; }
+            let payload;
+            try { payload = JSON.parse(json); } catch { setError('Corrupt torrent payload'); return; }
 
-        const infoHash = payload && typeof payload.infoHash === 'string' ? payload.infoHash : null;
-        if (!infoHash) { setError('Torrent has no infoHash'); return; }
+            const infoHash = payload && typeof payload.infoHash === 'string' ? payload.infoHash.toLowerCase() : null;
+            if (!infoHash || infoHash.length < 16) { setError('Torrent has no infoHash'); return; }
 
-        const title = payload.name || payload.title || '';
+            const title = payload.name || payload.title || '';
 
-        // Queue the torrent in the streaming server (RD auto-swaps if configured).
-        try {
-            core.transport.dispatch({
-                action: 'StreamingServer',
-                args: { action: 'CreateTorrent', args: buildMagnet(infoHash, title) }
-            });
-        } catch (err) {
-            console.error('Torrent route: CreateTorrent dispatch failed', err);
-        }
+            // Queue the torrent in the streaming server (RD auto-swaps if configured).
+            try {
+                core.transport.dispatch({
+                    action: 'StreamingServer',
+                    args: { action: 'CreateTorrent', args: buildMagnet(infoHash, title) }
+                });
+            } catch (err) {
+                console.error('[torrent-route] CreateTorrent dispatch failed', err);
+            }
 
-        // Build the stream object Player/decodeStream expects.
-        const streamObj = {
-            name: payload.name || 'Torrent',
-            title: title || 'Torrent',
-            infoHash,
-            behaviorHints: {}
-        };
-        const encoded = base64UrlEncode(JSON.stringify(streamObj));
-        window.location.replace(`#/player/${encoded}`);
+            // Stream shape matching stremio-core's Stream::Torrent variant.
+            // `announce` is required for serde to pick the Torrent variant.
+            const streamObj = {
+                name: payload.name || 'Torrent',
+                description: title || 'Torrent',
+                infoHash,
+                announce: DEFAULT_TRACKERS,
+                behaviorHints: { bingeGroup: `torrent:${infoHash}` }
+            };
+            const encoded = base64UrlEncode(JSON.stringify(streamObj));
+
+            try {
+                const decoded = await core.transport.decodeStream(encoded);
+                if (!decoded) {
+                    setError('Stremio rejected the stream payload (see DevTools console).');
+                    console.error('[torrent-route] decodeStream returned null for', streamObj);
+                    return;
+                }
+            } catch (err) {
+                setError('Stremio threw decoding the stream (see DevTools console).');
+                console.error('[torrent-route] decodeStream threw', err);
+                return;
+            }
+
+            window.location.replace(`#/player/${encoded}`);
+        })();
     }, [core, urlParams]);
 
     return (

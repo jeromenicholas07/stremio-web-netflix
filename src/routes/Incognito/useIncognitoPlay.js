@@ -27,56 +27,75 @@ function base64UrlEncode(str) {
         .replace(/=+$/, '');
 }
 
+const DEFAULT_TRACKERS = [
+    'udp://tracker.opentrackr.org:1337/announce',
+    'udp://tracker.openbittorrent.com:6969/announce',
+    'udp://exodus.desync.com:6969/announce',
+    'udp://tracker.torrent.eu.org:451/announce',
+    'udp://open.stealth.si:80/announce'
+];
+
 function buildMagnet(stream) {
-    const trackers = [
-        'udp://tracker.opentrackr.org:1337/announce',
-        'udp://tracker.openbittorrent.com:6969/announce',
-        'udp://exodus.desync.com:6969/announce',
-        'udp://tracker.torrent.eu.org:451/announce',
-        'udp://open.stealth.si:80/announce'
-    ];
     const dn = stream.title ? `&dn=${encodeURIComponent(stream.title)}` : '';
-    const tr = trackers.map((t) => `&tr=${encodeURIComponent(t)}`).join('');
+    const tr = DEFAULT_TRACKERS.map((t) => `&tr=${encodeURIComponent(t)}`).join('');
     return `magnet:?xt=urn:btih:${stream.infoHash}${dn}${tr}`;
 }
 
 const useIncognitoPlay = () => {
     const { core } = useServices();
 
-    return React.useCallback((stream) => {
-        if (!stream || typeof stream.infoHash !== 'string') {
-            console.warn('useIncognitoPlay: stream has no infoHash', stream);
+    return React.useCallback(async (stream) => {
+        if (!stream || typeof stream.infoHash !== 'string' || stream.infoHash.length < 16) {
+            console.warn('[incognito-play] stream has no valid infoHash', stream);
             return;
         }
 
-        // 1. Queue the torrent in the streaming server
+        // 1. Queue the torrent in the streaming server (RD auto-swaps if configured)
         const magnet = buildMagnet(stream);
         try {
             core.transport.dispatch({
                 action: 'StreamingServer',
-                args: {
-                    action: 'CreateTorrent',
-                    args: magnet
-                }
+                args: { action: 'CreateTorrent', args: magnet }
             });
         } catch (err) {
-            console.error('useIncognitoPlay: CreateTorrent dispatch failed', err);
+            console.error('[incognito-play] CreateTorrent dispatch failed', err);
         }
 
-        // 2. Shape the stream the way stremio-core's decodeStream expects
+        // 2. Shape the stream for stremio-core's decodeStream.
+        //    Torrent variant needs `infoHash` and explicit `announce` array —
+        //    without the latter, serde fails to select the Torrent variant
+        //    and Player renders blank.
         const streamObj = {
-            name: stream.name || '',
-            title: stream.title || stream.name || '',
-            infoHash: stream.infoHash,
-            behaviorHints: stream.behaviorHints || {}
+            name: stream.name || 'Torrent',
+            description: stream.title || stream.name || '',
+            infoHash: stream.infoHash.toLowerCase(),
+            announce: DEFAULT_TRACKERS,
+            behaviorHints: {
+                bingeGroup: stream.behaviorHints?.bingeGroup || `incognito:${stream.infoHash}`,
+                ...(stream.behaviorHints || {})
+            }
         };
         if (typeof stream.fileIdx === 'number') streamObj.fileIdx = stream.fileIdx;
-        if (typeof stream.fileIndex === 'number') streamObj.fileIdx = stream.fileIndex;
+        else if (typeof stream.fileIndex === 'number') streamObj.fileIdx = stream.fileIndex;
 
-        const encoded = base64UrlEncode(JSON.stringify(streamObj));
+        const json = JSON.stringify(streamObj);
+        const encoded = base64UrlEncode(json);
 
-        // 3. Navigate to Player with only the encoded stream (no transport URLs,
-        //    no meta — Player handles that gracefully per usePlayer.js:47-70).
+        // 3. Verify stremio-core can decode our payload; bail loud if not.
+        try {
+            const decoded = await core.transport.decodeStream(encoded);
+            if (!decoded) {
+                console.error('[incognito-play] decodeStream returned null for', streamObj);
+                alert('Stremio could not parse this stream. Check DevTools console for payload.');
+                return;
+            }
+        } catch (err) {
+            console.error('[incognito-play] decodeStream threw', err);
+            alert('Stremio rejected the stream payload. Check DevTools console.');
+            return;
+        }
+
+        // 4. Navigate to Player.
         window.location.hash = `#/player/${encoded}`;
     }, [core]);
 };
