@@ -53,14 +53,17 @@ function parseItem(item) {
  * @param {string} [options.sortBy] - 'seeders' or 'date' (default: date)
  * @returns {Promise<Array>} Array of parsed torrent items
  */
-async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date' } = {}) {
+async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', categories: categoriesOpt } = {}) {
     const config = getConfig();
     if (!config.prowlarrApiKey) {
         throw new Error('Prowlarr API key not configured');
     }
 
     limit = limit || config.pageSize;
-    const categories = config.adultCategories.join(',');
+    const categoryList = Array.isArray(categoriesOpt) && categoriesOpt.length > 0
+        ? categoriesOpt
+        : config.adultCategories;
+    const categories = categoryList.join(',');
 
     // Use Prowlarr's search API endpoint
     const params = new URLSearchParams({
@@ -81,7 +84,7 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date' }
 
     if (!response.ok) {
         // Fallback: try Torznab API directly via indexers
-        return searchViaTorznab({ query, offset, limit, sortBy });
+        return searchViaTorznab({ query, offset, limit, sortBy, categories: categoryList });
     }
 
     const data = await response.json();
@@ -116,8 +119,11 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date' }
 /**
  * Fallback: search via Torznab XML API on individual indexers
  */
-async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = 'date' } = {}) {
+async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = 'date', categories: categoriesOpt } = {}) {
     const config = getConfig();
+    const categoryList = Array.isArray(categoriesOpt) && categoriesOpt.length > 0
+        ? categoriesOpt
+        : config.adultCategories;
 
     // Get list of indexers from Prowlarr
     const indexersRes = await fetch(`${config.prowlarrUrl}/api/v1/indexer`, {
@@ -130,21 +136,21 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
 
     const indexers = await indexersRes.json();
 
-    // Filter to indexers that support adult categories
-    const adultIndexers = indexers.filter(idx => {
+    // Filter to indexers that support the requested categories
+    const matchingIndexers = indexers.filter(idx => {
         const caps = idx.capabilities?.categories || [];
-        return caps.some(cat => config.adultCategories.includes(cat.id));
+        return caps.some(cat => categoryList.includes(cat.id));
     });
 
-    if (adultIndexers.length === 0) {
+    if (matchingIndexers.length === 0) {
         return [];
     }
 
-    // Query each adult indexer via Torznab
+    // Query each indexer via Torznab
     const allItems = [];
-    const fetchPromises = adultIndexers.map(async (indexer) => {
+    const fetchPromises = matchingIndexers.map(async (indexer) => {
         try {
-            const torznabUrl = `${config.prowlarrUrl}/${indexer.id}/api?apikey=${config.prowlarrApiKey}&t=search&cat=${config.adultCategories.join(',')}&q=${encodeURIComponent(query)}&offset=${offset}&limit=${limit}`;
+            const torznabUrl = `${config.prowlarrUrl}/${indexer.id}/api?apikey=${config.prowlarrApiKey}&t=search&cat=${categoryList.join(',')}&q=${encodeURIComponent(query)}&offset=${offset}&limit=${limit}`;
 
             const res = await fetch(torznabUrl, { timeout: 10000 });
             if (!res.ok) return [];

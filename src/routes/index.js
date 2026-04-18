@@ -13,6 +13,7 @@ const { default: Settings } = require('./Settings');
 const Player = require('./Player');
 const Intro = require('./Intro');
 const Incognito = require('./Incognito');
+const Torrent = require('./Torrent');
 
 module.exports = {
     Addons,
@@ -27,5 +28,6 @@ module.exports = {
     Settings,
     Player,
     Intro,
-    Incognito
+    Incognito,
+    Torrent
 };

@@ -52,6 +52,10 @@ const routesRegexp = {
     incognito: {
         regexp: /^\/incognito(?:\/(details|search)\/([^/]+))?$/,
         urlParamsNames: ['subpage', 'subpageArg']
+    },
+    torrent: {
+        regexp: /^\/torrent\/([^/]+)$/,
+        urlParamsNames: ['payload']
     }
 };
 

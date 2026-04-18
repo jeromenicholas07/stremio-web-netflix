@@ -42,6 +42,10 @@ const routerViewsConfig = [
         {
             ...routesRegexp.incognito,
             component: routes.Incognito
+        },
+        {
+            ...routesRegexp.torrent,
+            component: routes.Torrent
         }
     ],
     [

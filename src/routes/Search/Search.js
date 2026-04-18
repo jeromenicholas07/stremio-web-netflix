@@ -9,6 +9,7 @@ const { default: Icon } = require('@stremio/stremio-icons/react');
 const { withCoreSuspender, getVisibleChildrenRange } = require('stremio/common');
 const { Image, MainNavBars, MetaItem, MetaRow } = require('stremio/components');
 const useSearch = require('./useSearch');
+const useProwlarrSearch = require('./useProwlarrSearch');
 const styles = require('./styles');
 
 const THRESHOLD = 100;
@@ -16,6 +17,10 @@ const THRESHOLD = 100;
 const Search = ({ queryParams }) => {
     const t = useTranslate();
     const [search, loadSearchRows] = useSearch(queryParams);
+    const searchQuery = React.useMemo(() => {
+        return queryParams?.get('search') ?? queryParams?.get('query') ?? null;
+    }, [queryParams]);
+    const prowlarr = useProwlarrSearch(searchQuery);
     const query = React.useMemo(() => {
         return search.selected !== null ?
             search.selected.extra.reduceRight((query, [name, value]) => {
@@ -74,17 +79,21 @@ const Search = ({ queryParams }) => {
                             </div>
                         </div>
                         :
-                        search.catalogs.length === 0 ?
-                            <div className={styles['message-container']}>
-                                <Image
-                                    className={styles['image']}
-                                    src={require('/assets/images/empty.png')}
-                                    alt={' '}
+                        <React.Fragment>
+                            {prowlarr.metas.length > 0 ? (
+                                <MetaRow
+                                    key="prowlarr-torrents"
+                                    className={classnames(styles['search-row'], styles['search-row-poster'], 'animation-fade-in')}
+                                    catalog={{
+                                        id: 'prowlarr-torrents',
+                                        name: 'Torrents (Prowlarr)',
+                                        content: { type: 'Ready', content: prowlarr.metas },
+                                    }}
+                                    title="Torrents (Prowlarr)"
+                                    itemComponent={MetaItem}
                                 />
-                                <div className={styles['message-label']}>{ t.string('STREMIO_TV_SEARCH_NO_ADDONS') }</div>
-                            </div>
-                            :
-                            search.catalogs.map((catalog, index) => {
+                            ) : null}
+                            {search.catalogs.map((catalog, index) => {
                                 switch (catalog.content?.type) {
                                     case 'Ready': {
                                         return (
@@ -120,7 +129,18 @@ const Search = ({ queryParams }) => {
                                         );
                                     }
                                 }
-                            })
+                            })}
+                            {search.catalogs.length === 0 && prowlarr.metas.length === 0 && !prowlarr.loading ? (
+                                <div className={styles['message-container']}>
+                                    <Image
+                                        className={styles['image']}
+                                        src={require('/assets/images/empty.png')}
+                                        alt={' '}
+                                    />
+                                    <div className={styles['message-label']}>{ t.string('STREMIO_TV_SEARCH_NO_ADDONS') }</div>
+                                </div>
+                            ) : null}
+                        </React.Fragment>
                 }
             </div>
         </MainNavBars>

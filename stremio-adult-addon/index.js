@@ -4,6 +4,7 @@ const { handleCatalog } = require('./src/catalog');
 const { handleSearch } = require('./src/search');
 const { handleMeta } = require('./src/meta');
 const { handleStream } = require('./src/stream');
+const { handleTorrentSearch } = require('./src/torrentSearch');
 const { getConfig } = require('./src/config');
 
 const GENRES = [
@@ -47,19 +48,31 @@ const manifest = {
                 { name: 'skip' },
             ],
         },
+        {
+            id: 'torrent-search',
+            type: 'other',
+            name: 'Torrents',
+            extra: [
+                { name: 'search', isRequired: true },
+                { name: 'skip' },
+            ],
+        },
     ],
     resources: ['catalog', 'meta', 'stream'],
     behaviorHints: {
         adult: true,
         configurable: false,
     },
-    idPrefixes: ['adult-'],
+    idPrefixes: ['adult-', 'torrent:'],
 };
 
 const builder = new addonBuilder(manifest);
 
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
     try {
+        if (id === 'torrent-search' && extra.search) {
+            return await handleTorrentSearch(extra.search, extra);
+        }
         if (id === 'adult-search' && extra.search) {
             return await handleSearch(extra.search, extra);
         }
