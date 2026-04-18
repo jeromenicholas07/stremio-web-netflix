@@ -2,6 +2,7 @@ const { searchProwlarr } = require('./prowlarr');
 const { deduplicateItems } = require('./dedup');
 const { registerGroup } = require('./meta');
 const { getConfig } = require('./config');
+const { buildDeepLinks, resolvePoster } = require('./poster');
 const { LRUCache } = require('lru-cache');
 
 const cache = new LRUCache({
@@ -11,20 +12,28 @@ const cache = new LRUCache({
 
 /**
  * Build a Stremio meta preview object from a deduplicated group.
+ *
+ * IMPORTANT: deepLinks.metaDetailsStreams points at the Incognito-specific
+ * route in stremio-web. MetaItem uses it as the click target, so omitting
+ * deepLinks makes catalog items unclickable — that was the root cause of
+ * the "grey unclickable cards" symptom.
  */
 function groupToMeta(group) {
     return {
         id: group.id,
         type: 'other',
         name: group.name,
-        poster: group.poster || undefined,
+        poster: resolvePoster(group),
         posterShape: 'poster',
+        background: resolvePoster(group),
         description: group.description,
         releaseInfo: group.pubDate ? new Date(group.pubDate).getFullYear().toString() : undefined,
         links: [],
         behaviorHints: {
+            adult: true,
             defaultVideoId: group.variants[0]?.id,
         },
+        deepLinks: buildDeepLinks(group.id),
     };
 }
 
@@ -39,7 +48,6 @@ async function handleCatalog(catalogId, extra = {}) {
     const genre = extra.genre || '';
     const search = extra.search || '';
 
-    // Build cache key
     const cacheKey = `catalog:${catalogId}:${skip}:${genre}:${search}`;
     const cached = cache.get(cacheKey);
     if (cached) return cached;

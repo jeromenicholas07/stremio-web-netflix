@@ -4,50 +4,59 @@ const ADDON_URL_KEY = 'incognito_addon_url';
 const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 
 function getAddonUrl() {
-    const stored = localStorage.getItem(ADDON_URL_KEY);
+    const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(ADDON_URL_KEY) : null;
     if (stored && stored.trim()) return stored.trim().replace(/\/+$/, '');
     return DEFAULT_ADDON_URL;
 }
 
 /**
- * Handles search directly via the incognito addon HTTP endpoint,
- * bypassing stremio-core to maintain isolation.
+ * URL-driven search hook. The `query` argument is the source of truth —
+ * it comes from the route (#/incognito/search/<urlencoded>). When the URL
+ * changes, the hook re-fetches; there is no internal query state.
  */
-const useIncognitoSearch = () => {
+const useIncognitoSearch = (query) => {
     const [results, setResults] = React.useState([]);
     const [loading, setLoading] = React.useState(false);
-    const [query, setQuery] = React.useState('');
 
-    const search = React.useCallback(async (searchQuery) => {
-        setQuery(searchQuery);
-
-        if (!searchQuery || searchQuery.trim().length === 0) {
+    React.useEffect(() => {
+        const trimmed = typeof query === 'string' ? query.trim() : '';
+        if (!trimmed) {
             setResults([]);
-            return;
+            setLoading(false);
+            return undefined;
         }
 
         const addonUrl = getAddonUrl();
         if (!addonUrl) {
             setResults([]);
-            return;
-        }
-
-        setLoading(true);
-        try {
-            const encoded = encodeURIComponent(searchQuery.trim());
-            const res = await fetch(`${addonUrl}/catalog/other/adult-search/search=${encoded}.json`);
-            if (!res.ok) throw new Error('Search failed');
-            const data = await res.json();
-            setResults(data.metas || []);
-        } catch (err) {
-            console.error('Incognito search error:', err);
-            setResults([]);
-        } finally {
             setLoading(false);
+            return undefined;
         }
-    }, []);
 
-    return { results, loading, query, search };
+        const controller = new AbortController();
+        setLoading(true);
+
+        const encoded = encodeURIComponent(trimmed);
+        fetch(`${addonUrl}/catalog/other/adult-search/search=${encoded}.json`, { signal: controller.signal })
+            .then((res) => {
+                if (!res.ok) throw new Error('Search failed');
+                return res.json();
+            })
+            .then((data) => {
+                setResults(data.metas || []);
+                setLoading(false);
+            })
+            .catch((err) => {
+                if (err.name === 'AbortError') return;
+                console.error('Incognito search error:', err);
+                setResults([]);
+                setLoading(false);
+            });
+
+        return () => controller.abort();
+    }, [query]);
+
+    return { results, loading, query: query || '' };
 };
 
 module.exports = useIncognitoSearch;

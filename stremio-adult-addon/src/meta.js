@@ -1,4 +1,5 @@
 const { LRUCache } = require('lru-cache');
+const { resolvePoster, buildDeepLinks } = require('./poster');
 
 const metaCache = new LRUCache({
     max: 500,
@@ -31,12 +32,14 @@ async function handleMeta(id) {
         return { meta: null };
     }
 
+    const poster = resolvePoster(groupData);
     const meta = {
         id: groupData.id,
         type: 'other',
         name: groupData.name,
-        poster: groupData.poster || undefined,
+        poster,
         posterShape: 'poster',
+        background: poster,
         description: groupData.description,
         releaseInfo: groupData.pubDate ? new Date(groupData.pubDate).getFullYear().toString() : undefined,
         videos: groupData.variants.map(variant => ({
@@ -46,8 +49,10 @@ async function handleMeta(id) {
             streams: [],
         })),
         behaviorHints: {
+            adult: true,
             defaultVideoId: groupData.variants[0]?.id,
         },
+        deepLinks: buildDeepLinks(groupData.id),
     };
 
     const result = { meta };

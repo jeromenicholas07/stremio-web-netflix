@@ -16,7 +16,8 @@ const useLocalSearch = require('./useLocalSearch');
 const styles = require('./styles');
 const useBinaryState = require('stremio/common/useBinaryState');
 
-const SearchBar = React.memo(({ className, query, active }) => {
+const SearchBar = React.memo(({ className, query, active, context }) => {
+    const isIncognito = context === 'incognito';
     const { t } = useTranslation();
     const routeFocused = useRouteFocused();
     const searchHistory = useSearchHistory();
@@ -31,9 +32,9 @@ const SearchBar = React.memo(({ className, query, active }) => {
 
     const searchBarOnClick = React.useCallback(() => {
         if (!active) {
-            window.location = '#/search';
+            window.location = isIncognito ? '#/incognito' : '#/search';
         }
-    }, [active]);
+    }, [active, isIncognito]);
 
     const searchHistoryOnClose = React.useCallback((event) => {
         if (historyOpen && containerRef.current && !containerRef.current.contains(event.target)) {
@@ -61,19 +62,23 @@ const SearchBar = React.memo(({ className, query, active }) => {
 
     const queryInputOnSubmit = React.useCallback((event) => {
         event.preventDefault();
-        const searchValue = `/search?search=${encodeURIComponent(event.target.value)}`;
+        const rawValue = event.target.value;
+        const trimmed = (rawValue || '').trim();
+        const searchValue = isIncognito
+            ? (trimmed ? `/incognito/search/${encodeURIComponent(trimmed)}` : '/incognito')
+            : `/search?search=${encodeURIComponent(rawValue)}`;
         setCurrentQuery(searchValue);
         if (searchInputRef.current && searchValue) {
             window.location.hash = searchValue;
             closeHistory();
         }
-    }, []);
+    }, [isIncognito]);
 
     const queryInputClear = React.useCallback(() => {
         searchInputRef.current.value = '';
         setCurrentQuery('');
-        window.location.hash = '/search';
-    }, []);
+        window.location.hash = isIncognito ? '/incognito' : '/search';
+    }, [isIncognito]);
 
     const updateLocalSearchDebounced = React.useCallback(debounce((query) => {
         localSearch.search(query);
@@ -127,7 +132,7 @@ const SearchBar = React.memo(({ className, query, active }) => {
                     </Button>
             }
             {
-                historyOpen && (searchHistory?.items?.length || localSearch?.items?.length) ?
+                !isIncognito && historyOpen && (searchHistory?.items?.length || localSearch?.items?.length) ?
                     <div className={styles['menu-container']}>
                         {
                             searchHistory?.items?.length > 0 ?
@@ -179,7 +184,8 @@ SearchBar.displayName = 'SearchBar';
 SearchBar.propTypes = {
     className: PropTypes.string,
     query: PropTypes.string,
-    active: PropTypes.bool
+    active: PropTypes.bool,
+    context: PropTypes.string
 };
 
 const SearchBarFallback = ({ className }) => {

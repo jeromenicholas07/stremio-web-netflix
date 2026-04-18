@@ -88,7 +88,12 @@ const HorizontalNavBar = React.memo(({ className, route, query, title, backButto
             <div className={styles['spacer']} />
             {
                 searchBar && route !== 'addons' ?
-                    <SearchBar className={styles['search-bar']} query={query} active={route === 'search'} />
+                    <SearchBar
+                        className={styles['search-bar']}
+                        query={query}
+                        active={route === 'search' || route === 'incognito'}
+                        context={route === 'incognito' ? 'incognito' : undefined}
+                    />
                     :
                     null
             }

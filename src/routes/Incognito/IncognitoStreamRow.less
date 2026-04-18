@@ -1,0 +1,82 @@
+.stream-row {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    width: 100%;
+    padding: 0.75rem 1rem;
+    background: var(--color-background-dark3, #20203a);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+    border-radius: 0.5rem;
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+    font-size: 0.9rem;
+    cursor: pointer;
+    text-align: left;
+    transition: background-color 0.15s ease, transform 0.15s ease;
+}
+
+.stream-row:hover {
+    background: var(--color-background-dark4, #2a2a4a);
+    transform: translateX(2px);
+}
+
+.quality-badge {
+    flex: 0 0 auto;
+    min-width: 3rem;
+    padding: 0.2rem 0.5rem;
+    border-radius: 0.3rem;
+    font-size: 0.8rem;
+    font-weight: 700;
+    text-align: center;
+    background: rgba(255, 255, 255, 0.1);
+    letter-spacing: 0.03em;
+}
+
+.q-4k     { background: rgba(231, 76, 60, 0.25);  color: #e74c3c; }
+.q-1080p  { background: rgba(46, 204, 113, 0.25); color: #2ecc71; }
+.q-720p   { background: rgba(52, 152, 219, 0.25); color: #3498db; }
+.q-480p   { background: rgba(241, 196, 15, 0.20); color: #f1c40f; }
+.q-360p   { background: rgba(149, 165, 166, 0.25); color: #95a5a6; }
+.q-sd     { background: rgba(149, 165, 166, 0.25); color: #95a5a6; }
+
+.stream-main {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.stream-name {
+    font-weight: 600;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.stream-meta {
+    color: var(--color-surface-light5-60, rgba(255, 255, 255, 0.6));
+    font-size: 0.8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.rd-badge {
+    flex: 0 0 auto;
+    padding: 0.15rem 0.45rem;
+    border-radius: 0.25rem;
+    background: rgba(255, 165, 0, 0.2);
+    color: #ffa500;
+    font-size: 0.75rem;
+    font-weight: 700;
+}
+
+.play-icon {
+    flex: 0 0 auto;
+    opacity: 0.6;
+    font-size: 0.9rem;
+}
+
+.stream-row:hover .play-icon {
+    opacity: 1;
+}
