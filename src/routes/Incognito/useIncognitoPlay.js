@@ -45,38 +45,66 @@ const useIncognitoPlay = () => {
     const { core } = useServices();
 
     return React.useCallback(async (stream) => {
-        if (!stream || typeof stream.infoHash !== 'string' || stream.infoHash.length < 16) {
-            console.warn('[incognito-play] stream has no valid infoHash', stream);
+        if (!stream) {
+            console.warn('[incognito-play] no stream provided');
             return;
         }
 
-        // 1. Queue the torrent in the streaming server (RD auto-swaps if configured)
-        const magnet = buildMagnet(stream);
-        try {
-            core.transport.dispatch({
-                action: 'StreamingServer',
-                args: { action: 'CreateTorrent', args: magnet }
-            });
-        } catch (err) {
-            console.error('[incognito-play] CreateTorrent dispatch failed', err);
+        // Extract an infoHash from any of the fields the addon might populate.
+        let infoHash = typeof stream.infoHash === 'string' ? stream.infoHash.toLowerCase() : '';
+        if (!/^[a-f0-9]{40}$/.test(infoHash)) {
+            // Try magnet URL fields
+            const magnetish = [stream.url, stream.magnetUrl].find(s => typeof s === 'string' && /btih:/i.test(s));
+            if (magnetish) {
+                const m = magnetish.match(/btih:([a-fA-F0-9]{40})/);
+                if (m) infoHash = m[1].toLowerCase();
+            }
+        }
+        const hasValidInfoHash = /^[a-f0-9]{40}$/.test(infoHash);
+        const hasUrl = typeof stream.url === 'string' && /^https?:\/\//.test(stream.url);
+
+        if (!hasValidInfoHash && !hasUrl) {
+            console.warn('[incognito-play] stream has no valid infoHash or url', stream);
+            alert('This source has no playable magnet/infoHash. Try another.');
+            return;
         }
 
-        // 2. Shape the stream for stremio-core's decodeStream.
-        //    Torrent variant needs `infoHash` and explicit `announce` array —
-        //    without the latter, serde fails to select the Torrent variant
-        //    and Player renders blank.
-        const streamObj = {
-            name: stream.name || 'Torrent',
-            description: stream.title || stream.name || '',
-            infoHash: stream.infoHash.toLowerCase(),
-            announce: DEFAULT_TRACKERS,
-            behaviorHints: {
-                bingeGroup: stream.behaviorHints?.bingeGroup || `incognito:${stream.infoHash}`,
-                ...(stream.behaviorHints || {})
+        // Queue the torrent in the streaming server (RD auto-swaps if configured)
+        if (hasValidInfoHash) {
+            const magnet = buildMagnet({ ...stream, infoHash });
+            try {
+                core.transport.dispatch({
+                    action: 'StreamingServer',
+                    args: { action: 'CreateTorrent', args: magnet }
+                });
+            } catch (err) {
+                console.error('[incognito-play] CreateTorrent dispatch failed', err);
             }
-        };
-        if (typeof stream.fileIdx === 'number') streamObj.fileIdx = stream.fileIdx;
-        else if (typeof stream.fileIndex === 'number') streamObj.fileIdx = stream.fileIndex;
+        }
+
+        // Build the stream shape stremio-core's decodeStream expects.
+        let streamObj;
+        if (hasValidInfoHash) {
+            streamObj = {
+                name: stream.name || 'Torrent',
+                description: stream.title || stream.name || '',
+                infoHash,
+                announce: DEFAULT_TRACKERS,
+                behaviorHints: {
+                    bingeGroup: stream.behaviorHints?.bingeGroup || `incognito:${infoHash}`,
+                    ...(stream.behaviorHints || {})
+                }
+            };
+            if (typeof stream.fileIdx === 'number') streamObj.fileIdx = stream.fileIdx;
+            else if (typeof stream.fileIndex === 'number') streamObj.fileIdx = stream.fileIndex;
+        } else {
+            streamObj = {
+                name: stream.name || 'Stream',
+                description: stream.title || '',
+                url: stream.url,
+                behaviorHints: stream.behaviorHints || {}
+            };
+        }
 
         const json = JSON.stringify(streamObj);
         const encoded = base64UrlEncode(json);

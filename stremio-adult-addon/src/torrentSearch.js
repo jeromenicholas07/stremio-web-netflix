@@ -135,7 +135,13 @@ async function handleTorrentSearch(query, extra = {}) {
         return { metas: [] };
     }
 
-    const metas = items
+    // Keep only items with a valid 40-char infoHash — anything else can't
+    // be resolved by the streaming server and just produces dead cards.
+    const playableItems = items.filter(it =>
+        typeof it.infoHash === 'string' && /^[a-f0-9]{40}$/i.test(it.infoHash)
+    );
+
+    const metas = playableItems
         .map(itemToMeta)
         .filter(Boolean)
         .slice(0, config.pageSize);

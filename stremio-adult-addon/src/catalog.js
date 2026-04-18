@@ -61,6 +61,8 @@ async function handleCatalog(catalogId, extra = {}) {
 
     if (search) {
         query = search;
+        // When searching, "most seeders first" is what users expect.
+        sortBy = 'seeders';
     } else if (genre) {
         query = genre;
     }
@@ -73,6 +75,11 @@ async function handleCatalog(catalogId, extra = {}) {
     });
 
     const groups = deduplicateItems(items);
+
+    // When searching, push the groups with the most seeders to the top.
+    if (sortBy === 'seeders') {
+        groups.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
+    }
 
     // Register each group for later meta/stream lookups
     for (const group of groups) {
