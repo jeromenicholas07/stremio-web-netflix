@@ -5,6 +5,7 @@ const { handleSearch } = require('./src/search');
 const { handleMeta } = require('./src/meta');
 const { handleStream } = require('./src/stream');
 const { handleTorrentSearch } = require('./src/torrentSearch');
+const { handleResolve: handleRdResolve } = require('./src/rd');
 const { getConfig } = require('./src/config');
 
 const GENRES = [
@@ -143,6 +144,13 @@ const server = http.createServer((req, res) => {
 
     if (pathname === '/status' || pathname === '/config' || pathname === '/config.json') {
         handleStatusEndpoint(req, res);
+        return;
+    }
+
+    if (pathname === '/rd/resolve') {
+        setCors(res);
+        if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
+        handleRdResolve(req, res);
         return;
     }
 

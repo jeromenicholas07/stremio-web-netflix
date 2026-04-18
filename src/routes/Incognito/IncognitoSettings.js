@@ -7,9 +7,29 @@ const styles = require('./IncognitoSettings.less');
 const ADDON_URL = 'http://127.0.0.1:7000';
 const PROWLARR_URL = 'http://127.0.0.1:9696';
 
+const RD_TOKEN_KEY = 'rd_token';
+
 const IncognitoSettings = React.memo(({ onClose, onResetPin }) => {
     const [status, setStatus] = React.useState(null);
     const [checking, setChecking] = React.useState(false);
+    const [rdToken, setRdToken] = React.useState(() => {
+        try { return localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { return ''; }
+    });
+    const [rdSaved, setRdSaved] = React.useState(false);
+
+    const handleRdTokenChange = React.useCallback((e) => {
+        setRdToken(e.target.value);
+        setRdSaved(false);
+    }, []);
+
+    const handleSaveRdToken = React.useCallback(() => {
+        try {
+            const trimmed = rdToken.trim();
+            if (trimmed) localStorage.setItem(RD_TOKEN_KEY, trimmed);
+            else localStorage.removeItem(RD_TOKEN_KEY);
+            setRdSaved(true);
+        } catch (_e) { /* ignore */ }
+    }, [rdToken]);
 
     // Probe the addon on mount so the user gets immediate feedback about
     // whether bundled services are up.
@@ -74,6 +94,28 @@ const IncognitoSettings = React.memo(({ onClose, onResetPin }) => {
                             {status.message}
                         </div>
                     ) : null}
+                </div>
+
+                <div className={styles['settings-description']} style={{ marginTop: '1rem' }}>
+                    Real-Debrid token (optional). Paste your API token from
+                    real-debrid.com/apitoken to stream through RD — torrents resolve to
+                    HTTPS links playable in the browser without local torrent client.
+                </div>
+                <div style={{ display: 'flex', gap: '0.5rem', margin: '0.5rem 0 1rem' }}>
+                    <input
+                        type="password"
+                        placeholder="Real-Debrid API token"
+                        value={rdToken}
+                        onChange={handleRdTokenChange}
+                        style={{ flex: 1, padding: '0.5rem', background: 'rgba(255,255,255,0.08)', color: '#fff', border: '1px solid rgba(255,255,255,0.15)', borderRadius: '4px' }}
+                    />
+                    <button
+                        className={classnames(styles['settings-button'], styles['primary'])}
+                        onClick={handleSaveRdToken}
+                        type="button"
+                    >
+                        {rdSaved ? 'Saved' : 'Save'}
+                    </button>
                 </div>
 
                 <div className={styles['settings-buttons']}>

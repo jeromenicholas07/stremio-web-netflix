@@ -18,6 +18,33 @@
 const React = require('react');
 const { useServices } = require('stremio/services');
 
+const ADDON_URL = 'http://127.0.0.1:7000';
+const RD_TOKEN_KEY = 'rd_token';
+
+async function resolveViaRD(infoHash, title) {
+    let token = '';
+    try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
+    if (!token) return null;
+    try {
+        const res = await fetch(`${ADDON_URL}/rd/resolve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ infoHash, title, token }),
+        });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            console.warn('[incognito-play] RD resolve failed', res.status, err);
+            return null;
+        }
+        const data = await res.json();
+        if (data && typeof data.url === 'string') return data;
+        return null;
+    } catch (err) {
+        console.warn('[incognito-play] RD resolve error', err);
+        return null;
+    }
+}
+
 function base64UrlEncode(str) {
     // btoa handles only Latin1; encode to UTF-8 first via encodeURIComponent.
     const utf8 = unescape(encodeURIComponent(str));
@@ -69,7 +96,37 @@ const useIncognitoPlay = () => {
             return;
         }
 
-        // Queue the torrent in the streaming server (RD auto-swaps if configured)
+        // First, try Real-Debrid via our addon's /rd/resolve endpoint.
+        // Stremio's built-in magnet→RD swap is unreliable for non-indexed
+        // adult torrents, so we do the full RD flow server-side and receive
+        // an HTTPS URL which the Player can stream without torrenting locally.
+        if (hasValidInfoHash) {
+            const rd = await resolveViaRD(infoHash, stream.title || stream.name || '');
+            if (rd && rd.url) {
+                const rdStream = {
+                    name: stream.name || 'RD',
+                    description: rd.filename || stream.title || '',
+                    url: rd.url,
+                    behaviorHints: {
+                        bingeGroup: stream.behaviorHints?.bingeGroup || `incognito-rd:${infoHash}`,
+                        ...(stream.behaviorHints || {}),
+                    },
+                };
+                const json = JSON.stringify(rdStream);
+                const encoded = base64UrlEncode(json);
+                try {
+                    const decoded = await core.transport.decodeStream(encoded);
+                    if (decoded) {
+                        window.location.hash = `#/player/${encoded}`;
+                        return;
+                    }
+                } catch (err) {
+                    console.warn('[incognito-play] RD stream decodeStream failed, falling back to magnet', err);
+                }
+            }
+        }
+
+        // Queue the torrent in the streaming server (fallback path)
         if (hasValidInfoHash) {
             const magnet = buildMagnet({ ...stream, infoHash });
             try {

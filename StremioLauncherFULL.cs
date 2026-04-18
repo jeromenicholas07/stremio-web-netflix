@@ -28,7 +28,7 @@ class StremioLauncherFULL
 {
     // ── Version & download URLs ──────────────────────────────
     // Bump PAYLOAD_VERSION whenever you update these URLs so users re-download.
-    const string PAYLOAD_VERSION = "1.4.0";
+    const string PAYLOAD_VERSION = "1.5.0";
 
     // Portable Node.js — just need node.exe for the addon
     const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";

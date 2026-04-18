@@ -32,6 +32,26 @@ function base64UrlEncode(str) {
         .replace(/=+$/, '');
 }
 
+const ADDON_URL = 'http://127.0.0.1:7000';
+const RD_TOKEN_KEY = 'rd_token';
+
+async function resolveViaRD(infoHash, title) {
+    let token = '';
+    try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
+    if (!token) return null;
+    try {
+        const res = await fetch(`${ADDON_URL}/rd/resolve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ infoHash, title, token }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        if (data && typeof data.url === 'string') return data;
+        return null;
+    } catch { return null; }
+}
+
 const DEFAULT_TRACKERS = [
     'udp://tracker.opentrackr.org:1337/announce',
     'udp://tracker.openbittorrent.com:6969/announce',
@@ -70,7 +90,28 @@ const Torrent = ({ urlParams }) => {
 
             const title = payload.name || payload.title || '';
 
-            // Queue the torrent in the streaming server (RD auto-swaps if configured).
+            // Try Real-Debrid first (HTTPS URL, no local torrenting).
+            const rd = await resolveViaRD(infoHash, title);
+            if (rd && rd.url) {
+                const rdStream = {
+                    name: payload.name || 'RD',
+                    description: rd.filename || title || 'Torrent',
+                    url: rd.url,
+                    behaviorHints: { bingeGroup: `torrent-rd:${infoHash}` },
+                };
+                const rdEncoded = base64UrlEncode(JSON.stringify(rdStream));
+                try {
+                    const decoded = await core.transport.decodeStream(rdEncoded);
+                    if (decoded) {
+                        window.location.replace(`#/player/${rdEncoded}`);
+                        return;
+                    }
+                } catch (err) {
+                    console.warn('[torrent-route] RD decodeStream failed, falling back to magnet', err);
+                }
+            }
+
+            // Queue the torrent in the streaming server (fallback).
             try {
                 core.transport.dispatch({
                     action: 'StreamingServer',
