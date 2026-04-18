@@ -1,13 +1,47 @@
 # build-launchers.ps1
-# Compiles StremioLauncher.exe + StremioLauncherFULL.exe, creates the addon zip,
-# and copies everything into ./build/ (which gets pushed to gh-pages).
+# One-shot build script: compiles the web bundle with the correct GH Pages
+# public path, compiles StremioLauncher.exe + StremioLauncherFULL.exe, creates
+# the addon zip, and leaves everything in ./build/ (which gets pushed to
+# gh-pages).
 #
-# Run AFTER `pnpm build`:
-#   pnpm build
-#   powershell -File build-launchers.ps1
+# Run with:
+#   powershell -ExecutionPolicy Bypass -File build-launchers.ps1
+#
+# --- IMPORTANT: publicPath gotcha ----------------------------------------
+# The web bundle MUST be built with PUBLIC_PATH=/stremio-web-netflix/.
+# Without it, webpack sets publicPath='/' and the deployed index.html will
+# reference `/<commit>/scripts/main.js`, which 404s on GitHub Pages because
+# the site is served under `/stremio-web-netflix/`, not root. Stremio shell
+# then loads a blank page and exits immediately. See BUILD.md section 1.
+#
+# Do NOT set PUBLIC_PATH from git-bash -- MSYS will mangle the leading slash
+# into a Windows path. This script uses PowerShell's env var, which is safe.
+# -------------------------------------------------------------------------
 
 $ErrorActionPreference = "Stop"
-Write-Host "=== Building launchers ===" -ForegroundColor Cyan
+
+$SkipWebBuild = $args -contains "--skip-web"
+
+Write-Host "=== Building stremio-web-netflix ===" -ForegroundColor Cyan
+
+# 0. Build the web bundle (unless caller already did it)
+if (-not $SkipWebBuild) {
+    Write-Host "`n[0/4] Building web bundle (pnpm build)..." -ForegroundColor Yellow
+    Write-Host "      PUBLIC_PATH=/stremio-web-netflix/"
+    $env:PUBLIC_PATH = '/stremio-web-netflix/'
+    & pnpm run build
+    if ($LASTEXITCODE -ne 0) { throw "pnpm build failed" }
+
+    # Sanity check -- deployed index.html MUST reference /stremio-web-netflix/<hash>/...
+    # If not, the deploy will 404 and the launcher will look broken.
+    $indexHtml = Get-Content "build\index.html" -Raw
+    if ($indexHtml -notmatch '/stremio-web-netflix/[a-f0-9]{40}/scripts/main\.js') {
+        throw "build\index.html does NOT reference /stremio-web-netflix/<hash>/scripts/main.js -- PUBLIC_PATH was not applied. DO NOT DEPLOY."
+    }
+    Write-Host "  OK: index.html references /stremio-web-netflix/<hash>/..." -ForegroundColor Green
+} else {
+    Write-Host "`n[0/4] Skipping web bundle build (--skip-web)" -ForegroundColor DarkGray
+}
 
 # Find csc.exe
 $csc = Get-ChildItem -Path "C:\Windows\Microsoft.NET\Framework64" -Filter "csc.exe" -Recurse |

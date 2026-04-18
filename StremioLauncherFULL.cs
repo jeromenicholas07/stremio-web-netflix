@@ -28,7 +28,7 @@ class StremioLauncherFULL
 {
     // ── Version & download URLs ──────────────────────────────
     // Bump PAYLOAD_VERSION whenever you update these URLs so users re-download.
-    const string PAYLOAD_VERSION = "1.5.0";
+    const string PAYLOAD_VERSION = "1.5.1";
 
     // Portable Node.js — just need node.exe for the addon
     const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";
@@ -45,6 +45,17 @@ class StremioLauncherFULL
     static Process _prowlarrProc;
     static Process _addonProc;
     static Process _baseProc;
+
+    // Hold the console open on exit so the user can read any output/errors.
+    // Double-clicking the exe otherwise closes the window the instant Main
+    // returns, which is how most users launch it.
+    static int ExitWithPause(int code)
+    {
+        Console.WriteLine();
+        Console.WriteLine("(press any key to close this window)");
+        try { Console.ReadKey(true); } catch { /* no console attached */ }
+        return code;
+    }
 
     static int Main()
     {
@@ -86,9 +97,7 @@ class StremioLauncherFULL
                 Console.WriteLine();
                 Console.WriteLine("Check your internet connection and try again.");
                 Console.WriteLine("To force re-download, delete: " + rootDir);
-                Console.WriteLine("Press any key to exit...");
-                Console.ReadKey();
-                return 1;
+                return ExitWithPause(1);
             }
         }
 
@@ -138,10 +147,8 @@ class StremioLauncherFULL
         if (!File.Exists(baseExe))
         {
             Console.WriteLine("[FATAL] StremioLauncher.exe missing from " + rootDir);
-            Console.WriteLine("Press any key to exit...");
-            Console.ReadKey();
             Shutdown();
-            return 1;
+            return ExitWithPause(1);
         }
 
         try
@@ -159,13 +166,15 @@ class StremioLauncherFULL
         {
             Console.WriteLine("[FATAL] Failed to start base launcher: " + ex.Message);
             Shutdown();
-            return 1;
+            return ExitWithPause(1);
         }
 
         _baseProc.WaitForExit();
         Console.WriteLine("Base launcher exited with code " + _baseProc.ExitCode);
         Shutdown();
-        return _baseProc.ExitCode;
+        // Always pause so users see output when Stremio quits — otherwise
+        // double-clickers never get to read why things ended.
+        return ExitWithPause(_baseProc.ExitCode);
     }
 
     // ── Download helpers ─────────────────────────────────────
