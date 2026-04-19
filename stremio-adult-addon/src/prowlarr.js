@@ -125,20 +125,25 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
     const categoryList = Array.isArray(categoriesOpt) && categoriesOpt.length > 0
         ? categoriesOpt
         : config.adultCategories;
-    const categories = categoryList.join(',');
 
     // Prowlarr accepts X-Api-Key header OR apikey query param. Sending both
     // is belt-and-braces: works even when AuthenticationRequired=Enabled and
     // the header gets dropped by an intermediary.
+    //
+    // IMPORTANT: Prowlarr 1.28+ rejects `categories=6000,6010,...` as a
+    // single comma-separated string (HTTP 400 "not a valid value"). It
+    // expects `categories` to be a repeated query parameter — one entry
+    // per category. Hence the explicit append loop below instead of a
+    // single `categories: list.join(',')` entry in the initial map.
     async function doFetch(apiKey) {
         const params = new URLSearchParams({
             query: query,
-            categories: categories,
             offset: String(offset),
             limit: String(limit),
             type: 'search',
             apikey: apiKey,
         });
+        for (const cat of categoryList) params.append('categories', String(cat));
         const url = `${config.prowlarrUrl}/api/v1/search?${params}`;
         return fetch(url, {
             headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' },
