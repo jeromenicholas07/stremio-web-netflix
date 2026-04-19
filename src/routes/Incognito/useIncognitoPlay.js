@@ -45,13 +45,17 @@ async function resolveViaRD(infoHash, title) {
     }
 }
 
-function base64UrlEncode(str) {
-    // btoa handles only Latin1; encode to UTF-8 first via encodeURIComponent.
-    const utf8 = unescape(encodeURIComponent(str));
-    return btoa(utf8)
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
+// stremio-core's Stream::decode requires zlib-deflate(JSON) + STANDARD base64
+// (not base64url). See src/routes/Torrent/Torrent.js for the full rationale.
+async function encodeStreamForCore(streamObj) {
+    const json = JSON.stringify(streamObj);
+    const compressed = await new Response(
+        new Blob([json]).stream().pipeThrough(new CompressionStream('deflate'))
+    ).arrayBuffer();
+    const bytes = new Uint8Array(compressed);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
 }
 
 const DEFAULT_TRACKERS = [
@@ -112,16 +116,17 @@ const useIncognitoPlay = () => {
                         ...(stream.behaviorHints || {}),
                     },
                 };
-                const json = JSON.stringify(rdStream);
-                const encoded = base64UrlEncode(json);
                 try {
+                    const encoded = await encodeStreamForCore(rdStream);
                     const decoded = await core.transport.decodeStream(encoded);
                     if (decoded) {
-                        window.location.hash = `#/player/${encoded}`;
+                        // encodeURIComponent so standard-base64's '+'/'/' survive the URL fragment.
+                        window.location.hash = `#/player/${encodeURIComponent(encoded)}`;
                         return;
                     }
+                    console.warn('[incognito-play] RD decodeStream returned null for', rdStream);
                 } catch (err) {
-                    console.warn('[incognito-play] RD stream decodeStream failed, falling back to magnet', err);
+                    console.warn('[incognito-play] RD stream encode/decode failed, falling back to magnet', err);
                 }
             }
         }
@@ -163,8 +168,14 @@ const useIncognitoPlay = () => {
             };
         }
 
-        const json = JSON.stringify(streamObj);
-        const encoded = base64UrlEncode(json);
+        let encoded;
+        try {
+            encoded = await encodeStreamForCore(streamObj);
+        } catch (err) {
+            console.error('[incognito-play] encodeStreamForCore threw', err);
+            alert('Failed to encode stream. See DevTools console.');
+            return;
+        }
 
         // 3. Verify stremio-core can decode our payload; bail loud if not.
         try {
@@ -180,8 +191,8 @@ const useIncognitoPlay = () => {
             return;
         }
 
-        // 4. Navigate to Player.
-        window.location.hash = `#/player/${encoded}`;
+        // 4. Navigate to Player. encodeURIComponent so standard-base64 '+'/'/' survive.
+        window.location.hash = `#/player/${encodeURIComponent(encoded)}`;
     }, [core]);
 };
 

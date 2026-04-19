@@ -24,12 +24,28 @@ function base64UrlDecode(s) {
     }
 }
 
-function base64UrlEncode(str) {
-    const utf8 = unescape(encodeURIComponent(str));
-    return btoa(utf8)
-        .replace(/\+/g, '-')
-        .replace(/\//g, '_')
-        .replace(/=+$/, '');
+// Stream encoding for stremio-core's Player.
+//
+// stremio-core's Rust code (types/resource/stream.rs Stream::encode) does:
+//   1. serde_json::to_string(stream)
+//   2. zlib-deflate (RFC 1950, with header + adler32)
+//   3. STANDARD base64 (not base64url) with '=' padding, '+'/'/' alphabet
+// stremio-core-web does NOT expose the symmetric `encodeStream` via
+// wasm_bindgen, so we replicate it here. The native CompressionStream API
+// (Chrome/Edge 80+, Firefox 113+, Safari 16.4+) gives us deflate with the
+// correct zlib wrapper — no pako dependency needed.
+async function encodeStreamForCore(streamObj) {
+    const json = JSON.stringify(streamObj);
+    const compressed = await new Response(
+        new Blob([json]).stream().pipeThrough(new CompressionStream('deflate'))
+    ).arrayBuffer();
+    const bytes = new Uint8Array(compressed);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    // Plain btoa — DO NOT url-safe this. stremio-core's base64 decoder is
+    // the STANDARD alphabet and rejects '-'/'_'. Percent-encode for the
+    // URL fragment so '+' and '/' survive the router.
+    return btoa(binary);
 }
 
 const ADDON_URL = 'http://127.0.0.1:7000';
@@ -106,15 +122,17 @@ const Torrent = ({ urlParams }) => {
                     url: rd.url,
                     behaviorHints: { bingeGroup: `torrent-rd:${infoHash}` },
                 };
-                const rdEncoded = base64UrlEncode(JSON.stringify(rdStream));
                 try {
+                    const rdEncoded = await encodeStreamForCore(rdStream);
                     const decoded = await core.transport.decodeStream(rdEncoded);
                     if (decoded) {
-                        window.location.replace(`#/player/${rdEncoded}`);
+                        // encodeURIComponent so standard-base64's '+' and '/' survive the URL fragment.
+                        window.location.replace(`#/player/${encodeURIComponent(rdEncoded)}`);
                         return;
                     }
+                    console.warn('[torrent-route] RD decodeStream returned null for', rdStream);
                 } catch (err) {
-                    console.warn('[torrent-route] RD decodeStream failed, falling back to magnet', err);
+                    console.warn('[torrent-route] RD encode/decodeStream failed, falling back to magnet', err);
                 }
             }
 
@@ -138,7 +156,14 @@ const Torrent = ({ urlParams }) => {
                 announce: DEFAULT_TRACKERS,
                 behaviorHints: { bingeGroup: `torrent:${infoHash}` }
             };
-            const encoded = base64UrlEncode(JSON.stringify(streamObj));
+            let encoded;
+            try {
+                encoded = await encodeStreamForCore(streamObj);
+            } catch (err) {
+                setError('Failed to encode stream payload (see DevTools console).');
+                console.error('[torrent-route] encodeStreamForCore threw', err);
+                return;
+            }
 
             try {
                 const decoded = await core.transport.decodeStream(encoded);
@@ -153,7 +178,7 @@ const Torrent = ({ urlParams }) => {
                 return;
             }
 
-            window.location.replace(`#/player/${encoded}`);
+            window.location.replace(`#/player/${encodeURIComponent(encoded)}`);
         })();
     }, [core, urlParams]);
 
