@@ -1,6 +1,7 @@
 const fetch = require('node-fetch');
 const { parseString } = require('xml2js');
 const { LRUCache } = require('lru-cache');
+const parseTorrent = require('parse-torrent');
 const { getConfig, invalidateApiKeyCache } = require('./config');
 
 // Cache resolved infoHashes keyed by downloadUrl — the HTTP 302 redirect
@@ -9,9 +10,17 @@ const infoHashCache = new LRUCache({ max: 2000, ttl: 6 * 60 * 60 * 1000 });
 
 /**
  * Many Prowlarr indexers return releases with no `infoHash` and no
- * `magnetUrl`, just a `downloadUrl` that 302-redirects to a magnet
- * (or returns the .torrent bytes). We follow the redirect manually
- * and extract the btih from the Location header.
+ * `magnetUrl`, just a `downloadUrl`. Prowlarr's /download endpoint can
+ * either:
+ *   (a) 302-redirect to a magnet URI (handled via Location header), or
+ *   (b) return the raw .torrent bytes (handled by bencode-parsing the
+ *       response body to extract the info-dict SHA-1).
+ *
+ * Case (b) is the common one for indexers that scrape HTTP-only trackers
+ * (MyPornClub, OneJAV, PornRips): Prowlarr fetches the .torrent file from
+ * the upstream and streams its bytes back. We need to parse those bytes
+ * to get the infoHash — without that, every such item gets dropped and
+ * the catalog looks empty.
  *
  * Returns lowercase 40-char hex infoHash or null.
  */
@@ -21,16 +30,40 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl) {
     if (cached !== undefined) return cached;
 
     try {
+        // Manual redirect so we can see the Location header directly —
+        // node-fetch errors ("Only absolute URLs are supported") when it
+        // tries to follow a magnet: URI, which is exactly what Prowlarr
+        // sends for case (a). We must intercept the 301/302 ourselves.
         const res = await fetch(downloadUrl, {
             redirect: 'manual',
-            timeout: 4000,
+            timeout: 7000,
         });
+
         let result = null;
+
         if (res.status >= 300 && res.status < 400) {
             const loc = res.headers.get('location') || '';
-            const m = loc.match(/btih:([a-fA-F0-9]{40})/);
-            if (m) result = m[1].toLowerCase();
+            // Case (a): Location is a magnet URI with btih.
+            const magnetMatch = loc.match(/btih:([a-fA-F0-9]{40})/i);
+            if (magnetMatch) {
+                result = magnetMatch[1].toLowerCase();
+            }
+            // Other HTTP redirect targets are rare from Prowlarr — skip
+            // chained follow-ups to keep latency bounded.
+        } else if (res.ok) {
+            // Case (b): body IS the .torrent bytes. Bencoded dicts start
+            // with ASCII 'd' (0x64). Parse to extract info-dict SHA-1.
+            const buf = Buffer.from(await res.arrayBuffer());
+            if (buf.length > 0 && buf[0] === 0x64) {
+                try {
+                    const parsed = parseTorrent(buf);
+                    if (parsed && typeof parsed.infoHash === 'string' && /^[a-f0-9]{40}$/i.test(parsed.infoHash)) {
+                        result = parsed.infoHash.toLowerCase();
+                    }
+                } catch { /* not a valid torrent file; fall through */ }
+            }
         }
+
         infoHashCache.set(downloadUrl, result);
         return result;
     } catch {
@@ -44,19 +77,25 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl) {
  * redirect. Runs in parallel with a small concurrency cap.
  */
 async function enrichMissingInfoHashes(items) {
-    const CONCURRENCY = 8;
     const needsResolution = items.filter(it =>
         !it.infoHash &&
         !(it.magnetUrl && /btih:/i.test(it.magnetUrl)) &&
         it.downloadUrl
     );
-    for (let i = 0; i < needsResolution.length; i += CONCURRENCY) {
-        const batch = needsResolution.slice(i, i + CONCURRENCY);
-        await Promise.all(batch.map(async (it) => {
+    // Prowlarr is loopback but each resolve triggers an upstream fetch
+    // against the real indexer site, which is slow and rate-limited. Too
+    // much concurrency → upstream starts 429-ing or dropping connections
+    // and most of them time out. 6 is a conservative sweet spot.
+    const CONCURRENCY = 6;
+    let idx = 0;
+    async function worker() {
+        while (idx < needsResolution.length) {
+            const it = needsResolution[idx++];
             const hash = await resolveInfoHashFromDownloadUrl(it.downloadUrl);
             if (hash) it.infoHash = hash;
-        }));
+        }
     }
+    await Promise.all(Array.from({ length: CONCURRENCY }, worker));
 }
 
 function parseXml(xml) {
@@ -145,12 +184,26 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
         });
         for (const cat of categoryList) params.append('categories', String(cat));
         const url = `${config.prowlarrUrl}/api/v1/search?${params}`;
+        // Hard 5s timeout. Prowlarr's aggregate /search endpoint waits for
+        // the SLOWEST indexer — so a single broken/slow indexer (e.g.
+        // MyPornClub, PornRips going 30s+ with empty query) hangs the whole
+        // call. The per-indexer Torznab fallback uses Promise.allSettled
+        // with individual timeouts, so it's immune to any single bad indexer.
+        // Keeping this short means we fail fast to Torznab rather than
+        // blocking the catalog for 10+ seconds.
         return fetch(url, {
             headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' },
+            timeout: 5000,
         });
     }
 
-    let response = await doFetch(config.prowlarrApiKey);
+    let response;
+    try {
+        response = await doFetch(config.prowlarrApiKey);
+    } catch (err) {
+        console.warn('[prowlarr] aggregate /search failed, falling through to Torznab:', err.message);
+        return searchViaTorznab({ query, offset, limit, sortBy, categories: categoryList });
+    }
 
     // On 401, the on-disk key may have rotated (first-run Prowlarr writes a
     // fresh key on boot, possibly after we cached an earlier stub). Bust the
@@ -160,7 +213,12 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
         invalidateApiKeyCache();
         config = getConfig();
         if (config.prowlarrApiKey) {
-            response = await doFetch(config.prowlarrApiKey);
+            try {
+                response = await doFetch(config.prowlarrApiKey);
+            } catch (err) {
+                console.warn('[prowlarr] retry failed, falling through to Torznab:', err.message);
+                return searchViaTorznab({ query, offset, limit, sortBy, categories: categoryList });
+            }
         }
     }
 
@@ -284,14 +342,26 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
         }
     }
 
-    // Sort
+    // Sort FIRST so we enrich only the top-N we actually return. Torznab
+    // can aggregate hundreds of items across indexers and enriching all of
+    // them (each a 302 redirect fetch) would take 30s+. We sort on the raw
+    // seeders/pubDate fields which are always present from Torznab.
     if (sortBy === 'seeders') {
         allItems.sort((a, b) => b.seeders - a.seeders);
     } else {
         allItems.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
     }
 
-    return allItems.slice(0, limit);
+    const sliced = allItems.slice(0, limit);
+
+    // Torznab responses usually expose only a downloadUrl that 302-redirects
+    // to a magnet — the `infohash`/`magneturl` torznab:attr fields are often
+    // missing. Without enrichment, every such item gets dropped downstream
+    // by the hex-regex filter in itemToMeta (which in turn leaves catalogs
+    // showing 0 cards even when Torznab returned hundreds of results).
+    await enrichMissingInfoHashes(sliced);
+
+    return sliced;
 }
 
 module.exports = { searchProwlarr };

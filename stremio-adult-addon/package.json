@@ -7,10 +7,11 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "stremio-addon-sdk": "^1.6.10",
-    "node-fetch": "^2.7.0",
     "fast-levenshtein": "^3.0.0",
-    "xml2js": "^0.6.2",
-    "lru-cache": "^10.0.0"
+    "lru-cache": "^10.0.0",
+    "node-fetch": "^2.7.0",
+    "parse-torrent": "^9.1.5",
+    "stremio-addon-sdk": "^1.6.10",
+    "xml2js": "^0.6.2"
   }
 }
