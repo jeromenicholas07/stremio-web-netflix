@@ -69,7 +69,13 @@ function buildMagnet(infoHash, title) {
 const Torrent = ({ urlParams }) => {
     const { core } = useServices();
     const [error, setError] = React.useState(null);
+    const [status, setStatus] = React.useState('Starting...');
     const ranRef = React.useRef(false);
+
+    // If the previous hash was /incognito/* keep that nav highlighted so
+    // clicking Back from Player returns to the incognito tab visually.
+    const fromIncognito = typeof document !== 'undefined' &&
+        (document.referrer || '').includes('/incognito');
 
     React.useEffect(() => {
         if (ranRef.current) return;
@@ -91,6 +97,7 @@ const Torrent = ({ urlParams }) => {
             const title = payload.name || payload.title || '';
 
             // Try Real-Debrid first (HTTPS URL, no local torrenting).
+            setStatus('Resolving via Real-Debrid...');
             const rd = await resolveViaRD(infoHash, title);
             if (rd && rd.url) {
                 const rdStream = {
@@ -112,6 +119,7 @@ const Torrent = ({ urlParams }) => {
             }
 
             // Queue the torrent in the streaming server (fallback).
+            setStatus('Queuing torrent in streaming server...');
             try {
                 core.transport.dispatch({
                     action: 'StreamingServer',
@@ -150,9 +158,9 @@ const Torrent = ({ urlParams }) => {
     }, [core, urlParams]);
 
     return (
-        <MainNavBars route={'search'}>
+        <MainNavBars route={fromIncognito ? 'incognito' : 'search'}>
             <div style={{ padding: 40, color: 'white', textAlign: 'center' }}>
-                {error ? `Error: ${error}` : 'Starting torrent…'}
+                {error ? `Error: ${error}` : status}
             </div>
         </MainNavBars>
     );

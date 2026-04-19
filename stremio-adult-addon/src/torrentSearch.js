@@ -79,9 +79,10 @@ function itemToMeta(item) {
     const quality = qualityFromTitle(item.title);
     const size = formatSize(item.size);
     const descParts = [];
-    if (quality) descParts.push(quality);
+    descParts.push(`S ${item.seeders || 0}`);
+    descParts.push(`L ${item.peers || 0}`);
     if (size) descParts.push(size);
-    if (item.seeders) descParts.push(`${item.seeders} seeders`);
+    if (quality) descParts.push(quality);
     if (item.indexer) descParts.push(item.indexer);
 
     const poster = item.poster && item.poster.trim().length > 0
