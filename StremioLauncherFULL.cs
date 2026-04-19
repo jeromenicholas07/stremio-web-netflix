@@ -22,13 +22,17 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Threading;
 
 class StremioLauncherFULL
 {
     // ── Version & download URLs ──────────────────────────────
     // Bump PAYLOAD_VERSION whenever you update these URLs so users re-download.
-    const string PAYLOAD_VERSION = "1.5.2";
+    // NOTE: Prowlarr config (indexers, API keys, app profiles) lives in the
+    // SHARED dir, NOT under this version. Bumping the version does NOT cost
+    // the user their Prowlarr setup — see `sharedProwlarrData` below.
+    const string PAYLOAD_VERSION = "1.5.3";
 
     // Portable Node.js — just need node.exe for the addon
     const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";
@@ -62,15 +66,29 @@ class StremioLauncherFULL
         // TLS 1.2 required for GitHub / nodejs.org downloads
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
 
-        string rootDir = Path.Combine(
+        string appRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-            "StremioLauncherFULL",
-            PAYLOAD_VERSION);
+            "StremioLauncherFULL");
+        string rootDir = Path.Combine(appRoot, PAYLOAD_VERSION);
+        // Shared state that must survive version bumps. Prowlarr's DB holds
+        // the user's configured indexers, API keys, and app-sync profiles —
+        // losing it on every upgrade means re-adding ~20 indexers by hand.
+        string sharedDir = Path.Combine(appRoot, "shared");
+        string sharedProwlarrData = Path.Combine(sharedDir, "prowlarr-data");
         string marker = Path.Combine(rootDir, ".ready");
 
         Console.WriteLine("=== StremioLauncherFULL " + PAYLOAD_VERSION + " ===");
         Console.WriteLine("Install root: " + rootDir);
+        Console.WriteLine("Shared data:  " + sharedDir);
         Console.WriteLine();
+
+        // Put ourselves + all children into a Win32 Job Object with
+        // KILL_ON_JOB_CLOSE so that when THIS process dies — by any means,
+        // including the user clicking the X on the console window or
+        // taskkill /F — the kernel guarantees every child dies too. This
+        // replaces the fragile ProcessExit / CancelKeyPress hooks which
+        // silently miss those shutdown paths.
+        InitJobObject();
 
         if (!File.Exists(marker))
         {
@@ -106,15 +124,24 @@ class StremioLauncherFULL
         string nodeExe = FindFile(rootDir, "node", "node.exe");
         // Prowlarr zip may extract to Prowlarr\ subfolder or flat
         string prowlarrExe = FindFile(rootDir, "prowlarr", "Prowlarr.exe");
-        string prowlarrDataDir = prowlarrExe != null
-            ? Path.Combine(Path.GetDirectoryName(prowlarrExe), "data")
-            : Path.Combine(rootDir, "prowlarr", "data");
+        string prowlarrDataDir = sharedProwlarrData;
         string addonEntry = FindFile(rootDir, "stremio-adult-addon", "index.js");
         string baseExe = Path.Combine(rootDir, "StremioLauncher.exe");
 
-        // Free ports
+        // Free ports FIRST so any Prowlarr from an older launcher releases
+        // its DB file before migration tries to copy it. The job object
+        // guarantees OUR children die with us, but older pre-job-object
+        // launchers (1.5.2 and earlier) could leak orphans.
         KillByPort(PROWLARR_PORT);
         KillByPort(ADDON_PORT);
+
+        // Prowlarr data: ALWAYS the shared dir, regardless of PAYLOAD_VERSION.
+        // If this is a first install on a machine that previously ran an
+        // older version, migrate that version's DB over so the user keeps
+        // all their indexers and settings. Runs after KillByPort so the
+        // source DB isn't locked.
+        Directory.CreateDirectory(sharedProwlarrData);
+        MigrateProwlarrDataIfNeeded(appRoot, sharedProwlarrData);
 
         Console.CancelKeyPress += delegate { Shutdown(); };
         AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
@@ -160,6 +187,7 @@ class StremioLauncherFULL
                 WorkingDirectory = rootDir
             };
             _baseProc = Process.Start(psi);
+            AddToJob(_baseProc);
             Console.WriteLine("[OK] Launched StremioLauncher (PID " + _baseProc.Id + ")");
         }
         catch (Exception ex)
@@ -252,6 +280,7 @@ class StremioLauncherFULL
                 WorkingDirectory = Path.GetDirectoryName(prowlarrExe)
             };
             _prowlarrProc = Process.Start(psi);
+            AddToJob(_prowlarrProc);
             Console.WriteLine("[OK] Started Prowlarr (PID " + _prowlarrProc.Id + ") on :" + PROWLARR_PORT);
             PipeOutput(_prowlarrProc, "prowlarr");
         }
@@ -278,6 +307,7 @@ class StremioLauncherFULL
             psi.EnvironmentVariables["PROWLARR_DATA_DIR"] = prowlarrDataDir;
 
             _addonProc = Process.Start(psi);
+            AddToJob(_addonProc);
             Console.WriteLine("[OK] Started Incognito addon (PID " + _addonProc.Id + ") on :" + ADDON_PORT);
             PipeOutput(_addonProc, "addon");
         }
@@ -344,6 +374,161 @@ class StremioLauncherFULL
     }
 
     // ── Port cleanup ─────────────────────────────────────────
+
+    // ── Win32 Job Object (kernel-guaranteed child cleanup) ──
+    //
+    // When our process dies by ANY means (normal exit, Ctrl-C, clicking
+    // the X on the console window, taskkill /F, a crash, or even the
+    // machine powering off), Windows decrements the job's handle count.
+    // The last handle is held by THIS process, so it reaches zero, the
+    // job closes, and KILL_ON_JOB_CLOSE forcibly terminates every process
+    // in the job — no cleanup code required.
+    //
+    // This replaces relying on ProcessExit / CancelKeyPress hooks, which
+    // silently don't fire on window-X-button or taskkill /F.
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+    {
+        public long PerProcessUserTimeLimit;
+        public long PerJobUserTimeLimit;
+        public uint LimitFlags;
+        public UIntPtr MinimumWorkingSetSize;
+        public UIntPtr MaximumWorkingSetSize;
+        public uint ActiveProcessLimit;
+        public UIntPtr Affinity;
+        public uint PriorityClass;
+        public uint SchedulingClass;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct IO_COUNTERS
+    {
+        public ulong ReadOperationCount;
+        public ulong WriteOperationCount;
+        public ulong OtherOperationCount;
+        public ulong ReadTransferCount;
+        public ulong WriteTransferCount;
+        public ulong OtherTransferCount;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+    {
+        public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+        public IO_COUNTERS IoInfo;
+        public UIntPtr ProcessMemoryLimit;
+        public UIntPtr JobMemoryLimit;
+        public UIntPtr PeakProcessMemoryUsed;
+        public UIntPtr PeakJobMemoryUsed;
+    }
+
+    const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x2000;
+    const int JobObjectExtendedLimitInformation = 9;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string name);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool SetInformationJobObject(IntPtr hJob, int infoClass, IntPtr lpInfo, uint cbLen);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool AssignProcessToJobObject(IntPtr job, IntPtr process);
+
+    static IntPtr _job = IntPtr.Zero;
+
+    static void InitJobObject()
+    {
+        try
+        {
+            _job = CreateJobObject(IntPtr.Zero, null);
+            if (_job == IntPtr.Zero) return;
+            var info = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            int size = Marshal.SizeOf(info);
+            IntPtr ptr = Marshal.AllocHGlobal(size);
+            try
+            {
+                Marshal.StructureToPtr(info, ptr, false);
+                SetInformationJobObject(_job, JobObjectExtendedLimitInformation, ptr, (uint)size);
+            }
+            finally { Marshal.FreeHGlobal(ptr); }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[WARN] Failed to create job object, child cleanup may be flaky: " + ex.Message);
+        }
+    }
+
+    static void AddToJob(Process p)
+    {
+        if (_job == IntPtr.Zero || p == null) return;
+        try { AssignProcessToJobObject(_job, p.Handle); }
+        catch (Exception ex) { Console.WriteLine("[WARN] AssignProcessToJobObject failed: " + ex.Message); }
+    }
+
+    // ── Prowlarr data migration ─────────────────────────────
+    //
+    // Older versions stored Prowlarr data under each versioned root
+    // (<version>\prowlarr\**\data\prowlarr.db), so bumping the launcher
+    // lost every indexer. Now it lives in <appRoot>\shared\prowlarr-data.
+    // On first run of a new version, if shared is empty, copy in the
+    // newest version's data so the user keeps their setup.
+    static void MigrateProwlarrDataIfNeeded(string appRoot, string sharedProwlarrData)
+    {
+        string dbPath = Path.Combine(sharedProwlarrData, "prowlarr.db");
+        if (File.Exists(dbPath)) return; // already populated — nothing to do
+
+        string bestSource = null;
+        DateTime bestMtime = DateTime.MinValue;
+        try
+        {
+            foreach (string dir in Directory.GetDirectories(appRoot))
+            {
+                string name = Path.GetFileName(dir);
+                if (name == "shared") continue;
+                // Find prowlarr.db anywhere under <version>\prowlarr\
+                string prowlarrDir = Path.Combine(dir, "prowlarr");
+                if (!Directory.Exists(prowlarrDir)) continue;
+                string[] dbs;
+                try { dbs = Directory.GetFiles(prowlarrDir, "prowlarr.db", SearchOption.AllDirectories); }
+                catch { continue; }
+                foreach (string db in dbs)
+                {
+                    DateTime mt = File.GetLastWriteTimeUtc(db);
+                    if (mt > bestMtime) { bestMtime = mt; bestSource = Path.GetDirectoryName(db); }
+                }
+            }
+        }
+        catch { /* directory walk failed — no migration is fine */ }
+
+        if (bestSource == null) return;
+        Console.WriteLine("[MIGRATE] Copying Prowlarr config from " + bestSource);
+        try
+        {
+            CopyDirectory(bestSource, sharedProwlarrData);
+            Console.WriteLine("[OK] Migration complete — your indexers carry over.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[WARN] Migration failed (" + ex.Message + "). You may need to re-add indexers.");
+        }
+    }
+
+    static void CopyDirectory(string src, string dst)
+    {
+        Directory.CreateDirectory(dst);
+        foreach (string file in Directory.GetFiles(src))
+        {
+            File.Copy(file, Path.Combine(dst, Path.GetFileName(file)), true);
+        }
+        foreach (string sub in Directory.GetDirectories(src))
+        {
+            string name = Path.GetFileName(sub);
+            // Skip log dirs — pure noise, and they can be large.
+            if (string.Equals(name, "logs", StringComparison.OrdinalIgnoreCase)) continue;
+            if (string.Equals(name, "UpdateLogFiles", StringComparison.OrdinalIgnoreCase)) continue;
+            CopyDirectory(sub, Path.Combine(dst, name));
+        }
+    }
 
     static void KillByPort(int port)
     {
