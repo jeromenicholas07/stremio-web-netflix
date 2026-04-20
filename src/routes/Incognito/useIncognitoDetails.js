@@ -6,7 +6,11 @@ const React = require('react');
 
 const ADDON_URL_KEY = 'incognito_addon_url';
 const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
-const CACHE_TTL_MS = 5 * 60 * 1000;
+// 3h: matches the catalog/search caches. Stream metadata for a given
+// torrent doesn't meaningfully change on shorter windows (seeders drift
+// slowly, and the infoHash/magnet is immutable), so re-fetching every
+// 5 min just makes the details page feel sluggish when re-opened.
+const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 
 const _cache = new Map(); // id -> { value: { meta, streams }, ts }
 

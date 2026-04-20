@@ -3,6 +3,14 @@ const React = require('react');
 const ADDON_URL_KEY = 'incognito_addon_url';
 const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 
+// 3-hour module-level search cache. Prowlarr aggregate /search is bounded
+// at ~5s per call by the addon's hard timeout, and individual indexers
+// (notably OneJAV, p95 ~1.6s) dominate that budget — repeating the same
+// query within 3h is wasteful and noticeably sluggish for the user.
+// Keyed by `${addonUrl}|${trimmedQuery}`.
+const SEARCH_CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+const _searchCache = new Map();
+
 function getAddonUrl() {
     const stored = typeof localStorage !== 'undefined' ? localStorage.getItem(ADDON_URL_KEY) : null;
     if (stored && stored.trim()) return stored.trim().replace(/\/+$/, '');
@@ -33,6 +41,14 @@ const useIncognitoSearch = (query) => {
             return undefined;
         }
 
+        const cacheKey = `${addonUrl}|${trimmed}`;
+        const cached = _searchCache.get(cacheKey);
+        if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
+            setResults(cached.metas);
+            setLoading(false);
+            return undefined;
+        }
+
         const controller = new AbortController();
         setLoading(true);
 
@@ -43,7 +59,9 @@ const useIncognitoSearch = (query) => {
                 return res.json();
             })
             .then((data) => {
-                setResults(data.metas || []);
+                const metas = data.metas || [];
+                _searchCache.set(cacheKey, { ts: Date.now(), metas });
+                setResults(metas);
                 setLoading(false);
             })
             .catch((err) => {

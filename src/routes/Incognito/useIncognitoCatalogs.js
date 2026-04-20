@@ -3,6 +3,15 @@ const React = require('react');
 const ADDON_URL_KEY = 'incognito_addon_url';
 const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 
+// 3-hour in-memory cache for built-in catalogs. The addon also caches
+// internally, but a) navigating away and back still goes through the
+// addon (localhost HTTP is fast but every request re-fetches the manifest
+// and triggers N catalog requests), and b) users flip between tabs often
+// enough that paying the "all catalogs in parallel" waterfall even once
+// every 15 min is noticeable. Keyed by addonUrl so switching addons busts.
+const CATALOG_CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+const _catalogsCache = new Map(); // addonUrl -> { ts, catalogs }
+
 function getAddonUrl() {
     const stored = localStorage.getItem(ADDON_URL_KEY);
     if (stored && stored.trim()) return stored.trim().replace(/\/+$/, '');
@@ -15,14 +24,32 @@ function getAddonUrl() {
  * bypassing stremio-core to maintain isolation.
  */
 const useIncognitoCatalogs = () => {
-    const [catalogs, setCatalogs] = React.useState([]);
-    const [loading, setLoading] = React.useState(false);
+    // Seed state from cache synchronously so first paint is instant when warm.
+    const cachedOnMount = React.useMemo(() => {
+        const url = getAddonUrl();
+        if (!url) return null;
+        const entry = _catalogsCache.get(url);
+        if (entry && Date.now() - entry.ts < CATALOG_CACHE_TTL_MS) return entry.catalogs;
+        return null;
+    }, []);
+
+    const [catalogs, setCatalogs] = React.useState(cachedOnMount || []);
+    const [loading, setLoading] = React.useState(!cachedOnMount);
     const addonUrl = getAddonUrl();
 
-    const fetchCatalogs = React.useCallback(async () => {
+    const fetchCatalogs = React.useCallback(async ({ force = false } = {}) => {
         if (!addonUrl) {
             setCatalogs([]);
             return;
+        }
+
+        if (!force) {
+            const entry = _catalogsCache.get(addonUrl);
+            if (entry && Date.now() - entry.ts < CATALOG_CACHE_TTL_MS) {
+                setCatalogs(entry.catalogs);
+                setLoading(false);
+                return;
+            }
         }
 
         setLoading(true);
@@ -58,7 +85,9 @@ const useIncognitoCatalogs = () => {
                 })
             );
 
-            setCatalogs(results.filter(Boolean));
+            const catalogsOut = results.filter(Boolean);
+            _catalogsCache.set(addonUrl, { ts: Date.now(), catalogs: catalogsOut });
+            setCatalogs(catalogsOut);
         } catch (err) {
             console.error('Failed to fetch incognito catalogs:', err);
             setCatalogs([]);

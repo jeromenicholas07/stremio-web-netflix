@@ -17,7 +17,11 @@ const { getConfig } = require('./config');
 const { fallbackPoster } = require('./poster');
 const { LRUCache } = require('lru-cache');
 
-const cache = new LRUCache({ max: 200, ttl: 15 * 60 * 1000 });
+// 3h TTL: aggregate Prowlarr searches take 2–5s cold (slowest indexer
+// dominates), and adult catalogs don't churn fast enough to warrant
+// revalidating more often. Users hitting the tab multiple times per
+// evening should see instant renders after the first fetch.
+const cache = new LRUCache({ max: 200, ttl: 3 * 60 * 60 * 1000 });
 
 function base64UrlEncode(str) {
     return Buffer.from(str, 'utf8').toString('base64')

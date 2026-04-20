@@ -12,7 +12,7 @@ const STATIC = {
     adultCategories: [6000, 6010, 6020, 6030, 6040, 6050, 6060, 6070],
     pageSize: 50,
     dedupThreshold: 0.8,
-    cacheTtl: 15 * 60 * 1000,
+    cacheTtl: 3 * 60 * 60 * 1000,
 };
 
 // Cached API key. Resolution is lazy so that the addon can boot before Prowlarr
