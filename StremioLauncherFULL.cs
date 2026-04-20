@@ -13,7 +13,7 @@
 //           StremioLauncherFULL.cs
 //
 // Ports (all loopback):
-//   7000  — adult addon          9696  — Prowlarr
+//   7000  — adult addon          9696  — Prowlarr       8191  — FlareSolverr
 //   11470 — streaming server     12470 — CORS proxy     12471 — audio extract
 using System;
 using System.Collections.Generic;
@@ -32,12 +32,17 @@ class StremioLauncherFULL
     // NOTE: Prowlarr config (indexers, API keys, app profiles) lives in the
     // SHARED dir, NOT under this version. Bumping the version does NOT cost
     // the user their Prowlarr setup — see `sharedProwlarrData` below.
-    const string PAYLOAD_VERSION = "1.5.3";
+    const string PAYLOAD_VERSION = "1.6.0";
 
     // Portable Node.js — just need node.exe for the addon
     const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";
     // Prowlarr (portable, .NET-included build)
     const string PROWLARR_URL = "https://github.com/Prowlarr/Prowlarr/releases/download/v1.28.2.4885/Prowlarr.master.1.28.2.4885.windows-core-x64.zip";
+    // FlareSolverr — Cloudflare/DDoS-GUARD bypass proxy. Prowlarr uses this via
+    // its Indexer Proxy setting (Settings → Indexers → Indexer Proxies →
+    // add FlareSolverr, host http://127.0.0.1:8191/) so indexers behind CF
+    // challenges (most adult indexers do) work from a cold start.
+    const string FLARESOLVERR_URL = "https://github.com/FlareSolverr/FlareSolverr/releases/download/v3.3.21/flaresolverr_windows_x64.zip";
     // Addon zip hosted on GitHub Pages alongside the web UI
     const string ADDON_URL = "https://jeromenicholas07.github.io/stremio-web-netflix/stremio-adult-addon.zip";
     // Base launcher (also on Pages)
@@ -45,9 +50,11 @@ class StremioLauncherFULL
 
     const int PROWLARR_PORT = 9696;
     const int ADDON_PORT = 7000;
+    const int FLARESOLVERR_PORT = 8191;
 
     static Process _prowlarrProc;
     static Process _addonProc;
+    static Process _flaresolverrProc;
     static Process _baseProc;
 
     // Hold the console open on exit so the user can read any output/errors.
@@ -100,6 +107,7 @@ class StremioLauncherFULL
                 Directory.CreateDirectory(rootDir);
                 DownloadAndExtract("Portable Node.js", NODE_URL, rootDir, "node");
                 DownloadAndExtract("Prowlarr", PROWLARR_URL, rootDir, "prowlarr");
+                DownloadAndExtract("FlareSolverr", FLARESOLVERR_URL, rootDir, "flaresolverr");
                 DownloadAndExtract("Incognito Addon", ADDON_URL, rootDir, "stremio-adult-addon");
                 DownloadFile("StremioLauncher.exe", BASE_LAUNCHER_URL, Path.Combine(rootDir, "StremioLauncher.exe"));
 
@@ -125,15 +133,20 @@ class StremioLauncherFULL
         // Prowlarr zip may extract to Prowlarr\ subfolder or flat
         string prowlarrExe = FindFile(rootDir, "prowlarr", "Prowlarr.exe");
         string prowlarrDataDir = sharedProwlarrData;
+        // FlareSolverr zip extracts to flaresolverr\flaresolverr.exe
+        string flaresolverrExe = FindFile(rootDir, "flaresolverr", "flaresolverr.exe");
         string addonEntry = FindFile(rootDir, "stremio-adult-addon", "index.js");
         string baseExe = Path.Combine(rootDir, "StremioLauncher.exe");
 
         // Free ports FIRST so any Prowlarr from an older launcher releases
         // its DB file before migration tries to copy it. The job object
         // guarantees OUR children die with us, but older pre-job-object
-        // launchers (1.5.2 and earlier) could leak orphans.
+        // launchers (1.5.2 and earlier) could leak orphans. Same story for
+        // FlareSolverr — it spawns a persistent Chromium that keeps :8191
+        // held long after the parent dies on a crash.
         KillByPort(PROWLARR_PORT);
         KillByPort(ADDON_PORT);
+        KillByPort(FLARESOLVERR_PORT);
 
         // Prowlarr data: ALWAYS the shared dir, regardless of PAYLOAD_VERSION.
         // If this is a first install on a machine that previously ran an
@@ -145,6 +158,21 @@ class StremioLauncherFULL
 
         Console.CancelKeyPress += delegate { Shutdown(); };
         AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
+
+        // Start FlareSolverr BEFORE Prowlarr so the proxy is ready when
+        // Prowlarr's indexer health checks run on startup — otherwise the
+        // first round of checks fails with "proxy unavailable" and Prowlarr
+        // marks CF-protected indexers as broken until the user opens the UI.
+        if (flaresolverrExe != null)
+        {
+            StartFlareSolverr(flaresolverrExe);
+            // Chromium cold-start + undetected-chromedriver init takes a while.
+            WaitForPort(FLARESOLVERR_PORT, "FlareSolverr", 40);
+        }
+        else
+        {
+            Console.WriteLine("[WARN] flaresolverr.exe not found in " + Path.Combine(rootDir, "flaresolverr"));
+        }
 
         // Start Prowlarr
         if (prowlarrExe != null)
@@ -290,6 +318,35 @@ class StremioLauncherFULL
         }
     }
 
+    static void StartFlareSolverr(string flaresolverrExe)
+    {
+        try
+        {
+            var psi = new ProcessStartInfo(flaresolverrExe)
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                WorkingDirectory = Path.GetDirectoryName(flaresolverrExe)
+            };
+            // Pin port/host so a stale %PORT% from a previous shell or a
+            // different FlareSolverr install can't shift our listener.
+            psi.EnvironmentVariables["PORT"] = FLARESOLVERR_PORT.ToString();
+            psi.EnvironmentVariables["HOST"] = "127.0.0.1";
+            psi.EnvironmentVariables["LOG_LEVEL"] = "info";
+
+            _flaresolverrProc = Process.Start(psi);
+            AddToJob(_flaresolverrProc);
+            Console.WriteLine("[OK] Started FlareSolverr (PID " + _flaresolverrProc.Id + ") on :" + FLARESOLVERR_PORT);
+            PipeOutput(_flaresolverrProc, "flaresolverr");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[WARN] Failed to start FlareSolverr: " + ex.Message);
+        }
+    }
+
     static void StartAddon(string nodeExe, string addonEntry, string prowlarrDataDir)
     {
         try
@@ -356,6 +413,9 @@ class StremioLauncherFULL
         Console.WriteLine("Shutting down...");
         SafeKill(_addonProc, "addon");
         SafeKill(_prowlarrProc, "prowlarr");
+        // FlareSolverr forks a Chromium tree; killing the parent relies on
+        // the job-object's KILL_ON_JOB_CLOSE to reap every descendent.
+        SafeKill(_flaresolverrProc, "flaresolverr");
         SafeKill(_baseProc, "base launcher");
     }
 
