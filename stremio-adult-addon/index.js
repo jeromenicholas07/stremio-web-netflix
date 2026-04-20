@@ -1,6 +1,6 @@
 const http = require('http');
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
-const { handleCatalog } = require('./src/catalog');
+const { handleCatalog, clearCatalogCache } = require('./src/catalog');
 const { handleSearch } = require('./src/search');
 const { handleMeta } = require('./src/meta');
 const { handleStream } = require('./src/stream');
@@ -151,6 +151,24 @@ const server = http.createServer((req, res) => {
         setCors(res);
         if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
         handleRdResolve(req, res);
+        return;
+    }
+
+    if (pathname === '/cache/clear') {
+        setCors(res);
+        if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
+        if (req.method !== 'POST' && req.method !== 'GET') {
+            res.statusCode = 405; res.end(); return;
+        }
+        try {
+            const cleared = clearCatalogCache();
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: true, cleared }));
+        } catch (err) {
+            res.statusCode = 500;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ ok: false, error: err.message }));
+        }
         return;
     }
 

@@ -179,4 +179,10 @@ async function handleCatalog(catalogId, extra = {}) {
     return result;
 }
 
-module.exports = { handleCatalog, itemToMeta };
+function clearCatalogCache() {
+    const size = cache.size;
+    cache.clear();
+    return size;
+}
+
+module.exports = { handleCatalog, itemToMeta, clearCatalogCache };

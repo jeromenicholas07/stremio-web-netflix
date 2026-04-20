@@ -151,4 +151,9 @@ const useIncognitoCatalogs = () => {
     return { catalogs, loading, fetchCatalogWithGenre, loadNextPage, addonUrl };
 };
 
+function clearCatalogsCache() {
+    _catalogsCache.clear();
+}
+
 module.exports = useIncognitoCatalogs;
+module.exports.clearCatalogsCache = clearCatalogsCache;

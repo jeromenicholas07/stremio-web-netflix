@@ -77,4 +77,9 @@ const useIncognitoSearch = (query) => {
     return { results, loading, query: query || '' };
 };
 
+function clearSearchCache() {
+    _searchCache.clear();
+}
+
 module.exports = useIncognitoSearch;
+module.exports.clearSearchCache = clearSearchCache;

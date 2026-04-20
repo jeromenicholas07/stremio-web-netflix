@@ -6,7 +6,12 @@ const {
     addCustomRow,
     removeCustomRow,
     refreshCustomRow,
+    clearAllCustomRowCaches,
 } = require('./useIncognitoCustomRows');
+const { clearCatalogsCache } = require('./useIncognitoCatalogs');
+const { clearSearchCache } = require('./useIncognitoSearch');
+const { clearDetailsCache } = require('./useIncognitoDetails');
+const { clearHistory: clearSearchHistory } = require('./incognitoSearchHistory');
 
 // Bundled defaults — every endpoint is loopback and deterministic, so there
 // is nothing the user needs (or should be able) to misconfigure here.
@@ -22,6 +27,7 @@ const IncognitoSettings = React.memo(({ onClose, onResetPin }) => {
         try { return localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { return ''; }
     });
     const [rdSaved, setRdSaved] = React.useState(false);
+    const [clearState, setClearState] = React.useState('idle'); // idle | clearing | done | error
 
     // Custom rows state. `customRows` mirrors localStorage and is the
     // source of truth inside this panel; `newRowName`/`newRowQuery` are
@@ -46,6 +52,35 @@ const IncognitoSettings = React.memo(({ onClose, onResetPin }) => {
 
     const handleRefreshRow = React.useCallback((id) => {
         refreshCustomRow(id);
+    }, []);
+
+    // "Clear Incognito cache" nukes every cache layer so the next view
+    // pulls fresh data from Prowlarr. Search history is also wiped — it's
+    // the single control users will reach for when they want a clean
+    // slate. Custom-row definitions are preserved (they're user config,
+    // not cache), just their results are re-fetched.
+    const handleClearCache = React.useCallback(async () => {
+        setClearState('clearing');
+        try {
+            // Frontend caches (synchronous, cannot fail)
+            try { clearCatalogsCache(); } catch (_e) { /* ignore */ }
+            try { clearSearchCache(); } catch (_e) { /* ignore */ }
+            try { clearDetailsCache(); } catch (_e) { /* ignore */ }
+            try { clearAllCustomRowCaches(); } catch (_e) { /* ignore */ }
+            try { clearSearchHistory(); } catch (_e) { /* ignore */ }
+
+            // Addon-side catalog LRU. Best-effort — if the addon is down
+            // the frontend caches are already gone which is 90% of the win.
+            try {
+                await fetch(`${ADDON_URL}/cache/clear`, { method: 'POST' });
+            } catch (_e) { /* ignore */ }
+
+            setClearState('done');
+            setTimeout(() => setClearState('idle'), 2000);
+        } catch (_e) {
+            setClearState('error');
+            setTimeout(() => setClearState('idle'), 3000);
+        }
     }, []);
 
     const handleRdTokenChange = React.useCallback((e) => {
@@ -217,6 +252,17 @@ const IncognitoSettings = React.memo(({ onClose, onResetPin }) => {
                 <div className={styles['settings-divider']} />
 
                 <div className={styles['settings-buttons']}>
+                    <button
+                        className={classnames(styles['settings-button'], styles['secondary'])}
+                        onClick={handleClearCache}
+                        disabled={clearState === 'clearing'}
+                        title="Drop all cached catalogs, searches, details and search history. Custom row definitions and your Real-Debrid token are kept."
+                        type="button"
+                    >
+                        {clearState === 'clearing' ? 'Clearing…' :
+                            clearState === 'done' ? 'Cleared ✓' :
+                            clearState === 'error' ? 'Clear failed' : 'Clear cache'}
+                    </button>
                     <button
                         className={classnames(styles['settings-button'], styles['danger'])}
                         onClick={onResetPin}

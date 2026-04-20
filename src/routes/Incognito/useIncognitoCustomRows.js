@@ -213,6 +213,18 @@ function refreshCustomRow(id) {
     writeRows(readRows()); // retrigger the hook
 }
 
+// Wipe every cached result row (but keep the row definitions themselves —
+// clearing caches should not destroy the user's configured rows). The
+// next useIncognitoCustomRows render re-fetches each one.
+function clearAllCustomRowCaches() {
+    try {
+        const rows = readRows();
+        for (const r of rows) clearCache(r.id);
+        // Ping the hook so it re-seeds and re-fetches.
+        window.dispatchEvent(new CustomEvent(ROWS_CHANGED_EVENT));
+    } catch (_e) { /* ignore */ }
+}
+
 module.exports = useIncognitoCustomRows;
 module.exports.useIncognitoCustomRows = useIncognitoCustomRows;
 module.exports.listCustomRows = listCustomRows;
@@ -220,3 +232,4 @@ module.exports.addCustomRow = addCustomRow;
 module.exports.updateCustomRow = updateCustomRow;
 module.exports.removeCustomRow = removeCustomRow;
 module.exports.refreshCustomRow = refreshCustomRow;
+module.exports.clearAllCustomRowCaches = clearAllCustomRowCaches;

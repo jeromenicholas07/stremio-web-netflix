@@ -67,4 +67,9 @@ const useIncognitoDetails = (id) => {
     return state;
 };
 
+function clearDetailsCache() {
+    _cache.clear();
+}
+
 module.exports = useIncognitoDetails;
+module.exports.clearDetailsCache = clearDetailsCache;

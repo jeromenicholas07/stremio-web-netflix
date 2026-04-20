@@ -146,6 +146,66 @@
                     background-color: rgba(255, 255, 255, 0.08);
                 }
             }
+
+            // Incognito-specific row: query text + trailing X delete button.
+            // Padding is set on inner elements so the X button's hover area
+            // visually detaches from the query-text hover highlight.
+            .incognito-item {
+                display: flex;
+                flex-direction: row;
+                align-items: center;
+                padding: 0;
+                background: transparent;
+
+                &:hover {
+                    background: transparent;
+                }
+
+                .incognito-item-text {
+                    flex: 1;
+                    min-width: 0;
+                    color: var(--primary-foreground-color);
+                    text-decoration: none;
+                    padding: 0.45rem 0.75rem;
+                    border-radius: 0.4rem;
+                    font-size: 0.85rem;
+                    font-weight: 400;
+                    overflow: hidden;
+                    text-overflow: ellipsis;
+                    white-space: nowrap;
+                    transition: background-color 0.12s ease;
+
+                    &:hover {
+                        background-color: rgba(255, 255, 255, 0.08);
+                    }
+                }
+
+                .incognito-item-remove {
+                    flex: none;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    width: 1.75rem;
+                    height: 1.75rem;
+                    margin-left: 0.25rem;
+                    background: transparent;
+                    border: none;
+                    border-radius: 50%;
+                    cursor: pointer;
+                    color: rgba(255, 255, 255, 0.35);
+                    transition: background-color 0.12s ease, color 0.12s ease;
+
+                    &:hover {
+                        background-color: rgba(255, 255, 255, 0.08);
+                        color: rgba(255, 255, 255, 0.9);
+                    }
+
+                    .icon {
+                        width: 0.85rem;
+                        height: 0.85rem;
+                    }
+                }
+            }
         }
     }
 }

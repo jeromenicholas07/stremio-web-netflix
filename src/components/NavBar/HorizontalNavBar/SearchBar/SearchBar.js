@@ -13,6 +13,7 @@ const useTorrent = require('stremio/common/useTorrent');
 const { withCoreSuspender } = require('stremio/common/CoreSuspender');
 const useSearchHistory = require('./useSearchHistory');
 const useLocalSearch = require('./useLocalSearch');
+const incognitoSearchHistory = require('stremio/routes/Incognito/incognitoSearchHistory');
 const styles = require('./styles');
 const useBinaryState = require('stremio/common/useBinaryState');
 
@@ -26,6 +27,18 @@ const SearchBar = React.memo(({ className, query, active, context }) => {
 
     const [historyOpen, openHistory, closeHistory, ] = useBinaryState(query === null ? true : false);
     const [currentQuery, setCurrentQuery] = React.useState(query || '');
+
+    // Incognito-only history (separate from core's). Re-reads on every
+    // mutation so clicking the X delete button immediately reflows the menu.
+    const [incognitoHistoryTick, setIncognitoHistoryTick] = React.useState(0);
+    React.useEffect(() => {
+        if (!isIncognito) return undefined;
+        return incognitoSearchHistory.subscribe(() => setIncognitoHistoryTick(t => t + 1));
+    }, [isIncognito]);
+    const incognitoSuggestions = React.useMemo(
+        () => (isIncognito ? incognitoSearchHistory.suggest(currentQuery) : []),
+        [isIncognito, currentQuery, incognitoHistoryTick]
+    );
 
     const searchInputRef = React.useRef(null);
     const containerRef = React.useRef(null);
@@ -68,6 +81,13 @@ const SearchBar = React.memo(({ className, query, active, context }) => {
             ? (trimmed ? `/incognito/search/${encodeURIComponent(trimmed)}` : '/incognito')
             : `/search?search=${encodeURIComponent(rawValue)}`;
         setCurrentQuery(searchValue);
+        if (isIncognito && trimmed) {
+            // Save to incognito-only history before navigating so the entry
+            // appears on the next open. Core's searchHistory intentionally
+            // receives nothing here — it would otherwise leak into Board/
+            // Discover suggestions.
+            incognitoSearchHistory.addEntry(trimmed);
+        }
         if (searchInputRef.current && searchValue) {
             window.location.hash = searchValue;
             closeHistory();
@@ -130,6 +150,63 @@ const SearchBar = React.memo(({ className, query, active, context }) => {
                     <Button className={styles['submit-button-container']}>
                         <Icon className={styles['icon']} name={'search'} />
                     </Button>
+            }
+            {
+                isIncognito && historyOpen && incognitoSuggestions.length > 0 ?
+                    <div className={styles['menu-container']}>
+                        <div className={styles['items']}>
+                            <div className={styles['title']}>
+                                <div className={styles['label']}>
+                                    {currentQuery && currentQuery.trim() ? t('SEARCH_SUGGESTIONS') : t('STREMIO_TV_SEARCH_HISTORY_TITLE')}
+                                </div>
+                                <button
+                                    className={styles['search-history-clear']}
+                                    onClick={(e) => {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        incognitoSearchHistory.clearHistory();
+                                    }}
+                                    type="button"
+                                >
+                                    { t('CLEAR_HISTORY') }
+                                </button>
+                            </div>
+                            {
+                                incognitoSuggestions.map(({ query: q }, index) => (
+                                    <div
+                                        key={index}
+                                        className={classnames(styles['item'], styles['incognito-item'])}
+                                    >
+                                        <a
+                                            className={styles['incognito-item-text']}
+                                            href={`#/incognito/search/${encodeURIComponent(q)}`}
+                                            onClick={() => {
+                                                // Re-save so recency floats it back to top.
+                                                incognitoSearchHistory.addEntry(q);
+                                                closeHistory();
+                                            }}
+                                        >
+                                            {q}
+                                        </a>
+                                        <button
+                                            className={styles['incognito-item-remove']}
+                                            title="Remove from history"
+                                            type="button"
+                                            onClick={(e) => {
+                                                e.preventDefault();
+                                                e.stopPropagation();
+                                                incognitoSearchHistory.removeEntry(q);
+                                            }}
+                                        >
+                                            <Icon className={styles['icon']} name={'close'} />
+                                        </button>
+                                    </div>
+                                ))
+                            }
+                        </div>
+                    </div>
+                    :
+                    null
             }
             {
                 !isIncognito && historyOpen && (searchHistory?.items?.length || localSearch?.items?.length) ?
