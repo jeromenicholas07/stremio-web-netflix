@@ -147,3 +147,53 @@
 .settings-status.disconnected {
     color: #e74c3c;
 }
+
+.custom-rows-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    max-height: 14rem;
+    overflow-y: auto;
+}
+
+.custom-row-item {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: var(--color-background-dark4, #2a2a4a);
+    border: 1px solid var(--color-surface-light5-20, rgba(255, 255, 255, 0.1));
+    border-radius: 0.5rem;
+    padding: 0.5rem 0.75rem;
+}
+
+.custom-row-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
+}
+
+.custom-row-name {
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+    font-size: 0.95rem;
+    font-weight: 500;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.custom-row-query {
+    color: var(--color-surface-light5-40, rgba(255, 255, 255, 0.45));
+    font-size: 0.78rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.custom-row-add {
+    display: grid;
+    grid-template-columns: 1fr 1fr auto;
+    gap: 0.5rem;
+    align-items: center;
+}

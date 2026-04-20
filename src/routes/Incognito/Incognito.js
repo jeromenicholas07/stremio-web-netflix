@@ -8,12 +8,14 @@ const IncognitoSettings = require('./IncognitoSettings');
 const IncognitoDetails = require('./IncognitoDetails');
 const IncognitoSearchResults = require('./IncognitoSearchResults');
 const useIncognitoCatalogs = require('./useIncognitoCatalogs');
+const useIncognitoCustomRows = require('./useIncognitoCustomRows');
 const styles = require('./styles');
 
 const Incognito = ({ urlParams }) => {
     const { state: pinState, createPin, verifyPin, resetPin, lock } = usePinGate();
     const [showSettings, setShowSettings] = React.useState(false);
     const { catalogs, loading: catalogsLoading, addonUrl } = useIncognitoCatalogs();
+    const customCatalogs = useIncognitoCustomRows();
 
     const subpage = urlParams && urlParams.subpage;
     const subpageArg = urlParams && urlParams.subpageArg;
@@ -115,20 +117,38 @@ const Incognito = ({ urlParams }) => {
                 <div className={styles['catalog-rows']}>
                     {catalogsLoading ? (
                         <div className={styles['loading-container']}>Loading catalogs…</div>
-                    ) : catalogs.length === 0 ? (
+                    ) : catalogs.length === 0 && customCatalogs.length === 0 ? (
                         <div className={styles['empty-message']}>
                             No catalogs available. Check your addon connection in settings.
                         </div>
                     ) : (
-                        catalogs.map((catalog) => (
-                            <MetaRow
-                                key={catalog.id}
-                                className={classnames(styles['catalog-row'], 'animation-fade-in')}
-                                title={catalog.name}
-                                catalog={catalog}
-                                itemComponent={MetaItem}
-                            />
-                        ))
+                        <React.Fragment>
+                            {catalogs.map((catalog) => (
+                                <MetaRow
+                                    key={catalog.id}
+                                    className={classnames(styles['catalog-row'], 'animation-fade-in')}
+                                    title={catalog.name}
+                                    catalog={catalog}
+                                    itemComponent={MetaItem}
+                                />
+                            ))}
+                            {customCatalogs.map((catalog) => {
+                                // Hide rows that haven't fetched yet (cold first
+                                // visit). Cached rows show instantly; errored
+                                // rows render empty rather than vanishing, so
+                                // the user still sees the title they added.
+                                if (catalog._customStatus === 'loading') return null;
+                                return (
+                                    <MetaRow
+                                        key={catalog.id}
+                                        className={classnames(styles['catalog-row'], 'animation-fade-in')}
+                                        title={catalog.name}
+                                        catalog={catalog}
+                                        itemComponent={MetaItem}
+                                    />
+                                );
+                            })}
+                        </React.Fragment>
                     )}
                 </div>
             </React.Fragment>
