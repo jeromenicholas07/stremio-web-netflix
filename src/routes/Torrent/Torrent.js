@@ -62,6 +62,25 @@ async function rdFiles(infoHash, title, token) {
     } catch { return null; }
 }
 
+// Lazy resolve a downloadUrl/magnetUrl → infoHash. Used when the catalog
+// item came through without an enriched hash (adult indexers often return
+// HTML instead of .torrent bytes, which breaks server-side enrichment;
+// asking the addon to retry on click succeeds often enough to be worth it).
+async function resolveHashFromUrl({ downloadUrl, magnetUrl }) {
+    try {
+        const res = await fetch(`${ADDON_URL}/rd/resolve-url`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ downloadUrl, magnetUrl }),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data && typeof data.infoHash === 'string' && /^[a-f0-9]{40}$/i.test(data.infoHash)
+            ? data.infoHash.toLowerCase()
+            : null;
+    } catch { return null; }
+}
+
 async function rdResolve(infoHash, title, token, fileId) {
     if (!token) return null;
     try {
@@ -139,12 +158,28 @@ const Torrent = ({ urlParams }) => {
 
     const ranRef = React.useRef(false);
     const startedMagnetRef = React.useRef(false);
+    // Mirrors the current infoHash state so the play* callbacks — which
+    // are memoised before lazy resolution completes — can read the latest
+    // value without waiting for a re-render cycle.
+    const hashRef = React.useRef('');
 
     const payload = React.useMemo(() => decodePayload(urlParams), [urlParams]);
-    const infoHash = payload && typeof payload.infoHash === 'string'
+    const payloadHash = payload && typeof payload.infoHash === 'string'
         ? payload.infoHash.toLowerCase() : '';
+    // infoHash is stateful because catalog items without server-side
+    // enrichment arrive hash-less; we lazy-resolve via /rd/resolve-url on
+    // mount and then flip the state so downstream RD/magnet callbacks
+    // re-memo with the resolved value.
+    const [infoHash, setInfoHashState] = React.useState(payloadHash);
+    // Seed the ref so SSR / first paint can reference it before the effect
+    // runs; kept in sync with state via setInfoHash below.
+    if (hashRef.current === '' && payloadHash) hashRef.current = payloadHash;
+    const setInfoHash = React.useCallback((h) => {
+        hashRef.current = h || '';
+        setInfoHashState(h || '');
+    }, []);
     const title = (payload && (payload.name || payload.title)) || 'Torrent';
-    const tint = React.useMemo(() => tintFromHash(infoHash), [infoHash]);
+    const tint = React.useMemo(() => tintFromHash(infoHash || payloadHash), [infoHash, payloadHash]);
     const sizeStr = payload ? formatSize(payload.size) : '';
     const seeders = payload && typeof payload.seeders === 'number' ? payload.seeders : null;
     const peers = payload && typeof payload.peers === 'number' ? payload.peers : null;
@@ -155,15 +190,19 @@ const Torrent = ({ urlParams }) => {
         (document.referrer || '').includes('/incognito');
 
     // Fallback path: queue magnet in streaming server, encode an infoHash
-    // Stream, hand off to the Player.
+    // Stream, hand off to the Player. Reads `hashRef` (not the state
+    // closure) so a lazy-resolved hash from /rd/resolve-url is visible
+    // even if the callback was memoised before the state flipped.
     const playViaMagnet = React.useCallback(async () => {
         if (startedMagnetRef.current) return;
         startedMagnetRef.current = true;
+        const hash = hashRef.current;
+        if (!hash) { setError('Missing infoHash — cannot queue torrent.'); return; }
         setStatus('Queuing torrent in streaming server...');
         try {
             core.transport.dispatch({
                 action: 'StreamingServer',
-                args: { action: 'CreateTorrent', args: buildMagnet(infoHash, title) }
+                args: { action: 'CreateTorrent', args: buildMagnet(hash, title) }
             });
         } catch (err) {
             console.error('[torrent-route] CreateTorrent dispatch failed', err);
@@ -172,9 +211,9 @@ const Torrent = ({ urlParams }) => {
         const streamObj = {
             name: payload?.name || 'Torrent',
             description: title || 'Torrent',
-            infoHash,
+            infoHash: hash,
             announce: DEFAULT_TRACKERS,
-            behaviorHints: { bingeGroup: `torrent:${infoHash}` }
+            behaviorHints: { bingeGroup: `torrent:${hash}` }
         };
         let encoded;
         try {
@@ -196,20 +235,22 @@ const Torrent = ({ urlParams }) => {
             return;
         }
         window.location.replace(`#/player/${encodeURIComponent(encoded)}`);
-    }, [core, infoHash, title, payload]);
+    }, [core, title, payload]);
 
     // RD resolve path (optionally with fileId). On success redirects to
     // /player; on failure falls back to magnet.
     const playViaRD = React.useCallback(async (fileId) => {
         setPicking(false);
         setStatus('Resolving via Real-Debrid...');
+        const hash = hashRef.current;
+        if (!hash) { await playViaMagnet(); return; }
         let token = '';
         try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
         if (!token) {
             await playViaMagnet();
             return;
         }
-        const rd = await rdResolve(infoHash, title, token, fileId);
+        const rd = await rdResolve(hash, title, token, fileId);
         if (!rd || !rd.url) {
             await playViaMagnet();
             return;
@@ -218,7 +259,7 @@ const Torrent = ({ urlParams }) => {
             name: payload?.name || 'RD',
             description: rd.filename || title || 'Torrent',
             url: rd.url,
-            behaviorHints: { bingeGroup: `torrent-rd:${infoHash}` },
+            behaviorHints: { bingeGroup: `torrent-rd:${hash}` },
         };
         try {
             const rdEncoded = await encodeStreamForCore(rdStream);
@@ -232,7 +273,7 @@ const Torrent = ({ urlParams }) => {
             console.warn('[torrent-route] RD encode/decodeStream failed', err);
         }
         await playViaMagnet();
-    }, [core, infoHash, title, payload, playViaMagnet]);
+    }, [core, title, payload, playViaMagnet]);
 
     React.useEffect(() => {
         if (ranRef.current) return;
@@ -240,7 +281,24 @@ const Torrent = ({ urlParams }) => {
 
         (async () => {
             if (!payload) { setError('Invalid torrent payload'); return; }
-            if (!infoHash || infoHash.length < 16) { setError('Torrent has no infoHash'); return; }
+
+            // Lazy-resolve the hash if the catalog entry arrived without
+            // one (adult indexers frequently return HTML instead of
+            // .torrent bytes, breaking the server-side enrichment step).
+            let hash = infoHash;
+            if (!hash || hash.length < 16) {
+                const dl = payload.downloadUrl || '';
+                const mag = payload.magnetUrl || '';
+                if (!dl && !mag) { setError('Torrent has no infoHash'); return; }
+                setStatus('Resolving release…');
+                const resolved = await resolveHashFromUrl({ downloadUrl: dl, magnetUrl: mag });
+                if (!resolved) {
+                    setError('This release could not be resolved to a magnet. Try another result.');
+                    return;
+                }
+                hash = resolved;
+                setInfoHash(resolved);
+            }
 
             let token = '';
             try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
@@ -252,7 +310,7 @@ const Torrent = ({ urlParams }) => {
             }
 
             setStatus('Checking Real-Debrid…');
-            const list = await rdFiles(infoHash, title, token);
+            const list = await rdFiles(hash, title, token);
             if (!Array.isArray(list) || list.length === 0) {
                 // RD failed or returned nothing usable — let resolve try its
                 // own path (it may still succeed; otherwise playViaRD falls

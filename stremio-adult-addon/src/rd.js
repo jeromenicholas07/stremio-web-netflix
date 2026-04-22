@@ -21,6 +21,7 @@
 
 const fetch = require('node-fetch');
 const { LRUCache } = require('lru-cache');
+const { resolveInfoHashFromDownloadUrl } = require('./prowlarr');
 
 const RD_BASE = 'https://api.real-debrid.com/rest/1.0';
 
@@ -241,6 +242,44 @@ async function handleResolve(req, res) {
     }
 }
 
+/**
+ * POST /rd/resolve-url — { downloadUrl, magnetUrl? } → { infoHash }
+ *
+ * Lazy resolver used when a catalog item came through without an
+ * enriched infoHash (enrichment commonly fails on adult indexers that
+ * return HTML instead of .torrent bytes). Torrent.js calls this on click,
+ * then re-invokes /rd/files or /rd/resolve with the freshly resolved hash.
+ * No RD token required — this is purely a hash-extraction step.
+ */
+async function handleResolveUrl(req, res) {
+    if (req.method !== 'POST') { sendJson(res, 405, { error: 'POST required' }); return; }
+    const payload = await readJsonBody(req);
+    if (!payload || typeof payload !== 'object') { sendJson(res, 400, { error: 'invalid body' }); return; }
+
+    // Shortcut: magnet already carries the hash.
+    const magnet = typeof payload.magnetUrl === 'string' ? payload.magnetUrl : '';
+    const magnetMatch = magnet.match(/btih:([a-fA-F0-9]{40})/i);
+    if (magnetMatch) {
+        sendJson(res, 200, { infoHash: magnetMatch[1].toLowerCase() });
+        return;
+    }
+
+    const downloadUrl = typeof payload.downloadUrl === 'string' ? payload.downloadUrl : '';
+    if (!downloadUrl) { sendJson(res, 400, { error: 'downloadUrl required' }); return; }
+
+    try {
+        const infoHash = await resolveInfoHashFromDownloadUrl(downloadUrl);
+        if (!infoHash) {
+            sendJson(res, 404, { error: 'could not resolve infoHash for this release' });
+            return;
+        }
+        sendJson(res, 200, { infoHash });
+    } catch (err) {
+        console.error('[rd] resolve-url failed:', err.message);
+        sendJson(res, 502, { error: err.message || 'resolve-url failed' });
+    }
+}
+
 /** POST /rd/files — { infoHash, title, token } → { files: [{id, path, bytes, isVideo}] } */
 async function handleFiles(req, res) {
     if (req.method !== 'POST') { sendJson(res, 405, { error: 'POST required' }); return; }
@@ -265,4 +304,4 @@ async function handleFiles(req, res) {
     }
 }
 
-module.exports = { handleResolve, handleFiles, resolveWithRD };
+module.exports = { handleResolve, handleFiles, handleResolveUrl, resolveWithRD };

@@ -389,4 +389,4 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
     return sliced;
 }
 
-module.exports = { searchProwlarr };
+module.exports = { searchProwlarr, resolveInfoHashFromDownloadUrl };

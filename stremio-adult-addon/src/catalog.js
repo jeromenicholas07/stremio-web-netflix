@@ -61,13 +61,36 @@ function cleanTitle(raw) {
         .trim();
 }
 
+// Stable fingerprint for items we can't resolve to an infoHash — used as
+// the dedupe key and baked into the encoded id so click-to-play can lazy
+// resolve via /rd/resolve-url on the addon side.
+function fingerprint(downloadUrl, title) {
+    const seed = `${downloadUrl || ''}|${title || ''}`;
+    let h = 5381;
+    for (let i = 0; i < seed.length; i++) {
+        h = ((h << 5) + h + seed.charCodeAt(i)) | 0;
+    }
+    return (h >>> 0).toString(16).padStart(8, '0');
+}
+
 /**
- * Convert a raw Prowlarr torrent item into a catalog meta. Returns null
- * if the item isn't playable (no infoHash could be resolved).
+ * Convert a raw Prowlarr torrent item into a catalog meta. Always returns
+ * a meta — items without a resolved infoHash carry their `downloadUrl` so
+ * Torrent.js can lazy-resolve them at click time via /rd/resolve-url.
+ * Dropping un-enriched items entirely would leave the catalog looking
+ * empty whenever enrichment hits a run of "Invalid torrent file contents"
+ * errors from Prowlarr — which is common on adult indexers where the
+ * upstream tracker serves HTML instead of .torrent bytes.
  */
 function itemToMeta(item) {
-    const infoHash = typeof item.infoHash === 'string' ? item.infoHash.toLowerCase() : '';
-    if (!/^[a-f0-9]{40}$/.test(infoHash)) return null;
+    const rawHash = typeof item.infoHash === 'string' ? item.infoHash.toLowerCase() : '';
+    const infoHash = /^[a-f0-9]{40}$/.test(rawHash) ? rawHash : '';
+    const downloadUrl = typeof item.downloadUrl === 'string' ? item.downloadUrl : '';
+    const magnetUrl = typeof item.magnetUrl === 'string' ? item.magnetUrl : '';
+
+    // Must have SOMETHING we can use to play this later — otherwise the
+    // card is pure noise.
+    if (!infoHash && !downloadUrl && !magnetUrl) return null;
 
     const displayName = cleanTitle(item.title) || item.title || 'Untitled';
     const quality = qualityFromTitle(item.title);
@@ -82,6 +105,11 @@ function itemToMeta(item) {
     // screen doesn't need a second fetch to display seeders/size/indexer.
     const payload = {
         infoHash,
+        // Carry the downloadUrl for lazy resolve when the aggregate couldn't
+        // enrich the item. Torrent.js asks the addon to resolve → infoHash
+        // on click, then proceeds with the normal RD/magnet flow.
+        downloadUrl: infoHash ? '' : downloadUrl,
+        magnetUrl: infoHash ? '' : magnetUrl,
         name: displayName,
         title: item.title,
         indexer,
@@ -125,6 +153,9 @@ function itemToMeta(item) {
         size: sizeStr,
         quality,
         indexer,
+        // Exposed on the meta so handleCatalog can dedupe on infoHash
+        // when present (collapsing cross-indexer duplicates).
+        infoHash,
         behaviorHints: {
             adult: true,
         },
@@ -177,17 +208,20 @@ async function handleCatalog(catalogId, extra = {}) {
         return { metas: [] };
     }
 
-    // Map to meta; drop items with no resolvable infoHash (can't be played).
-    // Then dedupe by infoHash so duplicate cross-indexer releases don't
-    // show up as multiple identical cards.
+    // Map to meta; items without a resolvable infoHash still come through
+    // carrying their `downloadUrl` — Torrent.js lazy-resolves on click.
+    // Dedupe on infoHash when present, else on a fingerprint of
+    // downloadUrl+title so duplicate cross-indexer releases collapse.
     const seen = new Set();
     const metas = [];
     for (const item of items) {
         const meta = itemToMeta(item);
         if (!meta) continue;
-        const hash = meta.id; // already includes infoHash in the encoded payload
-        if (seen.has(hash)) continue;
-        seen.add(hash);
+        const dedupeKey = meta.infoHash
+            ? `h:${meta.infoHash}`
+            : `f:${fingerprint(item.downloadUrl || '', item.title || '')}`;
+        if (seen.has(dedupeKey)) continue;
+        seen.add(dedupeKey);
         metas.push(meta);
     }
 
@@ -202,7 +236,12 @@ async function handleCatalog(catalogId, extra = {}) {
     }
 
     const result = { metas: metas.slice(0, limit) };
-    cache.set(cacheKey, result);
+    // Don't cache empty results — an indexer blip or aggregate timeout
+    // that yielded zero items should NOT poison the next 3 hours of
+    // requests. Retry on the next request instead.
+    if (result.metas.length > 0) {
+        cache.set(cacheKey, result);
+    }
     return result;
 }
 
