@@ -80,13 +80,17 @@ async function enrichMissingInfoHashes(items) {
     const needsResolution = items.filter(it =>
         !it.infoHash &&
         !(it.magnetUrl && /btih:/i.test(it.magnetUrl)) &&
-        it.downloadUrl
+        it.downloadUrl &&
+        // Skip zero-seeder items: even if we resolve the hash, nobody's
+        // seeding so the torrent is unplayable. Not worth the round-trip
+        // and it inflates tail latency by hogging worker slots.
+        (Number(it.seeders) || 0) > 0
     );
-    // Prowlarr is loopback but each resolve triggers an upstream fetch
-    // against the real indexer site, which is slow and rate-limited. Too
-    // much concurrency → upstream starts 429-ing or dropping connections
-    // and most of them time out. 6 is a conservative sweet spot.
-    const CONCURRENCY = 6;
+    // 10 concurrent resolves — the surviving adult indexers (MyPornClub,
+    // OneJAV, PornoLab, TorrentGalaxyClone) tolerate this level after
+    // PornRips / BigFANGroup were deliberately disabled upstream. More
+    // than 10 still risks 429s from PornoLab.
+    const CONCURRENCY = 10;
     let idx = 0;
     async function worker() {
         while (idx < needsResolution.length) {
@@ -255,16 +259,23 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
         };
     });
 
-    // For items still missing infoHash, follow the downloadUrl redirect
-    // (Prowlarr usually 302s to a magnet URI).
-    await enrichMissingInfoHashes(items);
-
-    // Sort (now that infoHashes are resolved, seeders is the useful signal)
+    // Sort FIRST so we only enrich the top-N we'd actually return. The
+    // aggregate /search often comes back with 100+ items; enriching every
+    // one of them (each a 302 redirect) is the bulk of the 30-60 s tail
+    // latency. We can sort on raw seeders/pubDate before enrichment
+    // because those fields ship in the original Prowlarr response.
     if (sortBy === 'seeders') {
         items.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
     } else {
         items.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
     }
+
+    // Enrich only the top slice. limit is typically 50 (pageSize) but the
+    // UI usually shows 20 in the first viewport, so 20 is the right
+    // budget for enrichment without starving the page.
+    const ENRICH_TOP = Math.min(items.length, Math.max(20, limit));
+    const head = items.slice(0, ENRICH_TOP);
+    await enrichMissingInfoHashes(head);
 
     return items;
 }

@@ -3,12 +3,14 @@ const React = require('react');
 const ADDON_URL_KEY = 'incognito_addon_url';
 const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 
-// 3-hour module-level search cache. Prowlarr aggregate /search is bounded
-// at ~5s per call by the addon's hard timeout, and individual indexers
-// (notably OneJAV, p95 ~1.6s) dominate that budget — repeating the same
-// query within 3h is wasteful and noticeably sluggish for the user.
-// Keyed by `${addonUrl}|${trimmedQuery}`.
-const SEARCH_CACHE_TTL_MS = 3 * 60 * 60 * 1000;
+// Two-tier cache: fresh (<3h) render-and-done; stale (3h–7d) render
+// immediately then refresh in the background. Persist to localStorage so
+// a full browser restart still paints cached searches instantly. LRU-cap
+// to 50 most-recent queries to stay well under the 5 MB origin quota.
+const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
+const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_ENTRIES = 50;
+const LS_KEY = 'incognito_search_cache_v1';
 const _searchCache = new Map();
 
 function getAddonUrl() {
@@ -17,52 +19,156 @@ function getAddonUrl() {
     return DEFAULT_ADDON_URL;
 }
 
+function safeParse(raw) {
+    try { return JSON.parse(raw); } catch { return null; }
+}
+
+function readStore() {
+    try {
+        const raw = localStorage.getItem(LS_KEY);
+        if (!raw) return {};
+        const parsed = safeParse(raw);
+        return (parsed && typeof parsed === 'object') ? parsed : {};
+    } catch { return {}; }
+}
+
+function writeStore(store) {
+    // LRU-evict by oldest `ts` until we're under MAX_ENTRIES.
+    const keys = Object.keys(store);
+    if (keys.length > MAX_ENTRIES) {
+        const sorted = keys.map(k => [k, store[k]?.ts || 0]).sort((a, b) => a[1] - b[1]);
+        const toDrop = sorted.slice(0, keys.length - MAX_ENTRIES);
+        for (const [k] of toDrop) delete store[k];
+    }
+    try {
+        localStorage.setItem(LS_KEY, JSON.stringify(store));
+    } catch (_e) {
+        // QuotaExceededError — drop the oldest remaining entry and retry.
+        try {
+            const remaining = Object.entries(store);
+            if (remaining.length > 0) {
+                remaining.sort((a, b) => (a[1]?.ts || 0) - (b[1]?.ts || 0));
+                delete store[remaining[0][0]];
+                localStorage.setItem(LS_KEY, JSON.stringify(store));
+            }
+        } catch { /* give up silently */ }
+    }
+}
+
+function readCacheEntry(key) {
+    const mem = _searchCache.get(key);
+    if (mem) return mem;
+    const store = readStore();
+    const entry = store[key];
+    if (entry && typeof entry.ts === 'number' && Array.isArray(entry.metas)) {
+        _searchCache.set(key, entry);
+        return entry;
+    }
+    return null;
+}
+
+function writeCacheEntry(key, metas) {
+    const entry = { ts: Date.now(), metas };
+    _searchCache.set(key, entry);
+    const store = readStore();
+    store[key] = entry;
+    writeStore(store);
+}
+
+function classifyEntry(entry) {
+    if (!entry) return 'missing';
+    const age = Date.now() - entry.ts;
+    if (age < FRESH_TTL_MS) return 'fresh';
+    if (age < STALE_TTL_MS) return 'stale';
+    return 'expired';
+}
+
 /**
  * URL-driven search hook. The `query` argument is the source of truth —
- * it comes from the route (#/incognito/search/<urlencoded>). When the URL
- * changes, the hook re-fetches; there is no internal query state.
+ * it comes from the route (#/incognito/search/<urlencoded>).
  */
 const useIncognitoSearch = (query) => {
-    const [results, setResults] = React.useState([]);
-    const [loading, setLoading] = React.useState(false);
+    const trimmed = typeof query === 'string' ? query.trim() : '';
+    const addonUrl = getAddonUrl();
+    const cacheKey = trimmed ? `${addonUrl}|${trimmed}` : '';
+
+    // Seed synchronously so cached hits paint on first render.
+    const initial = React.useMemo(() => {
+        if (!cacheKey) return { results: [], loading: false, stale: false };
+        const entry = readCacheEntry(cacheKey);
+        const cls = classifyEntry(entry);
+        if (cls === 'fresh') return { results: entry.metas, loading: false, stale: false };
+        if (cls === 'stale') return { results: entry.metas, loading: false, stale: true };
+        return { results: [], loading: true, stale: false };
+    }, [cacheKey]);
+
+    const [results, setResults] = React.useState(initial.results);
+    const [loading, setLoading] = React.useState(initial.loading);
+    const [stale, setStale] = React.useState(initial.stale);
 
     React.useEffect(() => {
-        const trimmed = typeof query === 'string' ? query.trim() : '';
         if (!trimmed) {
             setResults([]);
             setLoading(false);
+            setStale(false);
             return undefined;
         }
-
-        const addonUrl = getAddonUrl();
         if (!addonUrl) {
             setResults([]);
             setLoading(false);
+            setStale(false);
             return undefined;
         }
 
-        const cacheKey = `${addonUrl}|${trimmed}`;
-        const cached = _searchCache.get(cacheKey);
-        if (cached && Date.now() - cached.ts < SEARCH_CACHE_TTL_MS) {
-            setResults(cached.metas);
+        const entry = readCacheEntry(cacheKey);
+        const cls = classifyEntry(entry);
+
+        if (cls === 'fresh') {
+            setResults(entry.metas);
             setLoading(false);
+            setStale(false);
             return undefined;
         }
 
         const controller = new AbortController();
-        setLoading(true);
+        const doFetch = async () => {
+            const encoded = encodeURIComponent(trimmed);
+            const res = await fetch(
+                `${addonUrl}/catalog/other/adult-search/search=${encoded}.json`,
+                { signal: controller.signal }
+            );
+            if (!res.ok) throw new Error('Search failed');
+            const data = await res.json();
+            return data.metas || [];
+        };
 
-        const encoded = encodeURIComponent(trimmed);
-        fetch(`${addonUrl}/catalog/other/adult-search/search=${encoded}.json`, { signal: controller.signal })
-            .then((res) => {
-                if (!res.ok) throw new Error('Search failed');
-                return res.json();
-            })
-            .then((data) => {
-                const metas = data.metas || [];
-                _searchCache.set(cacheKey, { ts: Date.now(), metas });
+        if (cls === 'stale') {
+            // Paint stale immediately, refresh in background.
+            setResults(entry.metas);
+            setLoading(false);
+            setStale(true);
+            doFetch()
+                .then((metas) => {
+                    writeCacheEntry(cacheKey, metas);
+                    setResults(metas);
+                    setStale(false);
+                })
+                .catch((err) => {
+                    if (err.name !== 'AbortError') {
+                        console.warn('[incognito-search] stale refresh failed:', err);
+                    }
+                });
+            return () => controller.abort();
+        }
+
+        // Cold miss — show spinner.
+        setLoading(true);
+        doFetch()
+            .then((metas) => {
+                writeCacheEntry(cacheKey, metas);
                 setResults(metas);
                 setLoading(false);
+                setStale(false);
             })
             .catch((err) => {
                 if (err.name === 'AbortError') return;
@@ -72,13 +178,14 @@ const useIncognitoSearch = (query) => {
             });
 
         return () => controller.abort();
-    }, [query]);
+    }, [trimmed, addonUrl, cacheKey]);
 
-    return { results, loading, query: query || '' };
+    return { results, loading, stale, query: query || '' };
 };
 
 function clearSearchCache() {
     _searchCache.clear();
+    try { localStorage.removeItem(LS_KEY); } catch (_e) { /* ignore */ }
 }
 
 module.exports = useIncognitoSearch;

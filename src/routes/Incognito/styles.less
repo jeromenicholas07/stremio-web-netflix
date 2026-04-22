@@ -185,3 +185,67 @@
     from { opacity: 0; transform: translateY(8px); }
     to { opacity: 1; transform: translateY(0); }
 }
+
+// --- Search results grid ---------------------------------------------------
+// Replaces the old single-`MetaRow` horizontal strip with a responsive grid
+// that spans the viewport. Column width tracks the Incognito card aspect
+// (2:3, ~9rem wide) so cards stay legible on both laptops and large TVs.
+
+.search-results-root {
+    width: 100%;
+    padding: 0 2rem;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
+.search-results-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    padding: 0.5rem 0;
+}
+
+.search-results-title {
+    color: var(--color-surface-light5-90, rgba(255, 255, 255, 0.9));
+    font-size: 1.1rem;
+    font-weight: 600;
+}
+
+.search-results-stale {
+    color: var(--color-surface-light5-60, rgba(255, 255, 255, 0.55));
+    font-size: 0.8rem;
+    font-style: italic;
+    padding: 0.2rem 0.55rem;
+    border-radius: 1rem;
+    background: rgba(255, 255, 255, 0.06);
+}
+
+.search-results-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
+    gap: 0.85rem;
+}
+
+.search-results-cell {
+    width: 100%;
+}
+
+.search-results-skeleton {
+    aspect-ratio: 2 / 3;
+    border-radius: 0.25rem;
+    background: linear-gradient(
+        90deg,
+        rgba(255, 255, 255, 0.04) 0%,
+        rgba(255, 255, 255, 0.08) 50%,
+        rgba(255, 255, 255, 0.04) 100%
+    );
+    background-size: 200% 100%;
+    animation: skeletonShimmer 1.4s ease-in-out infinite;
+}
+
+@keyframes skeletonShimmer {
+    0%   { background-position: 100% 0; }
+    100% { background-position: -100% 0; }
+}

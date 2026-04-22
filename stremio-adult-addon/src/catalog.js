@@ -70,24 +70,37 @@ function itemToMeta(item) {
     if (!/^[a-f0-9]{40}$/.test(infoHash)) return null;
 
     const displayName = cleanTitle(item.title) || item.title || 'Untitled';
+    const quality = qualityFromTitle(item.title);
+    const sizeBytes = Number(item.size) || 0;
+    const sizeStr = formatSize(sizeBytes);
+    const seeders = Number(item.seeders) || 0;
+    const peers = Number(item.peers) || 0;
+    const indexer = typeof item.indexer === 'string' ? item.indexer : '';
+
+    // The torrent payload encoded in the id also powers the "Resolving via
+    // Real-Debrid…" screen — carry the full at-a-glance metadata so that
+    // screen doesn't need a second fetch to display seeders/size/indexer.
     const payload = {
         infoHash,
         name: displayName,
         title: item.title,
+        indexer,
+        seeders,
+        peers,
+        size: sizeBytes,
+        quality,
     };
     const id = 'torrent:' + base64UrlEncode(JSON.stringify(payload));
     const href = `#/torrent/${encodeURIComponent(id.slice('torrent:'.length))}`;
 
     // Compact description: seeders · leechers · size · quality · indexer
     // Users want seeders/leechers at a glance so we lead with them.
-    const quality = qualityFromTitle(item.title);
-    const size = formatSize(item.size);
     const parts = [];
-    parts.push(`S ${item.seeders || 0}`);
-    parts.push(`L ${item.peers || 0}`);
-    if (size) parts.push(size);
+    parts.push(`S ${seeders}`);
+    parts.push(`L ${peers}`);
+    if (sizeStr) parts.push(sizeStr);
     if (quality) parts.push(quality);
-    if (item.indexer) parts.push(item.indexer);
+    if (indexer) parts.push(indexer);
     const description = parts.join(' · ');
 
     const poster = item.poster && item.poster.trim().length > 0
@@ -103,6 +116,15 @@ function itemToMeta(item) {
         background: poster,
         description,
         releaseInfo: item.pubDate ? new Date(item.pubDate).getFullYear().toString() : undefined,
+        // Explicit structured fields so the Incognito MetaItem variant can
+        // render badges without parsing the description string.
+        seeders,
+        peers,
+        leechers: peers,
+        sizeBytes,
+        size: sizeStr,
+        quality,
+        indexer,
         behaviorHints: {
             adult: true,
         },

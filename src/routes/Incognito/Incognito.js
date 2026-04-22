@@ -1,12 +1,13 @@
 const React = require('react');
 const classnames = require('classnames');
 const { default: Icon } = require('@stremio/stremio-icons/react');
-const { MainNavBars, MetaItem, MetaRow } = require('stremio/components');
+const { MainNavBars, MetaRow } = require('stremio/components');
 const usePinGate = require('./usePinGate');
 const PinDialog = require('./PinDialog');
 const IncognitoSettings = require('./IncognitoSettings');
 const IncognitoDetails = require('./IncognitoDetails');
 const IncognitoSearchResults = require('./IncognitoSearchResults');
+const IncognitoCard = require('./IncognitoCard');
 const useIncognitoCatalogs = require('./useIncognitoCatalogs');
 const useIncognitoCustomRows = require('./useIncognitoCustomRows');
 const styles = require('./styles');
@@ -129,7 +130,7 @@ const Incognito = ({ urlParams }) => {
                                     className={classnames(styles['catalog-row'], 'animation-fade-in')}
                                     title={catalog.name}
                                     catalog={catalog}
-                                    itemComponent={MetaItem}
+                                    itemComponent={IncognitoCard}
                                 />
                             ))}
                             {customCatalogs.map((catalog) => {
@@ -144,7 +145,7 @@ const Incognito = ({ urlParams }) => {
                                         className={classnames(styles['catalog-row'], 'animation-fade-in')}
                                         title={catalog.name}
                                         catalog={catalog}
-                                        itemComponent={MetaItem}
+                                        itemComponent={IncognitoCard}
                                     />
                                 );
                             })}

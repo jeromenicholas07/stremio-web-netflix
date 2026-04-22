@@ -1,0 +1,138 @@
+// Resolving / queuing screen.
+//
+// Mirrors HeroBanner's two-gradient backdrop pattern
+// (src/components/HeroBanner/styles.less:89–109): one absolute layer fading
+// up from the bottom, one fading in from the left. Colour layer behind
+// them is a hash-derived tint (set inline from the decoded infoHash).
+//
+// The content is deliberately stacked on top in a single left-aligned
+// column so the eye lands on the title first, then the spinner/status,
+// then the torrent stats. Kept at `max-width: 720px` so very long titles
+// stay readable without sprawling across ultrawides.
+
+.resolving-root {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 32rem;
+    overflow: hidden;
+    color: #fff;
+}
+
+.resolving-backdrop {
+    position: absolute;
+    inset: 0;
+    background-color: #1f2430;
+    z-index: 0;
+}
+
+.resolving-gradient-bottom {
+    position: absolute;
+    inset: auto 0 0 0;
+    height: 45%;
+    background: linear-gradient(0deg, rgba(15, 15, 25, 1), rgba(15, 15, 25, 0));
+    z-index: 1;
+    pointer-events: none;
+}
+
+.resolving-gradient-left {
+    position: absolute;
+    inset: 0 40% 0 0;
+    background: linear-gradient(90deg, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+    z-index: 1;
+    pointer-events: none;
+}
+
+.resolving-content {
+    position: relative;
+    z-index: 2;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    width: 100%;
+    max-width: 48rem;
+    height: 100%;
+    padding: 4rem 3rem 3.5rem;
+    gap: 1.25rem;
+}
+
+.resolving-title {
+    font-size: 2.25rem;
+    font-weight: 700;
+    line-height: 1.15;
+    color: #fff;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.6);
+    // Two-line clamp keeps the layout consistent across releases with long names.
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    overflow: hidden;
+    word-break: break-word;
+}
+
+.resolving-status {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    font-size: 1rem;
+    color: rgba(255, 255, 255, 0.82);
+
+    &.error {
+        color: #ff8a8a;
+    }
+}
+
+.resolving-spinner {
+    width: 1rem;
+    height: 1rem;
+    border: 2px solid rgba(255, 255, 255, 0.25);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: resolvingSpin 0.9s linear infinite;
+    flex-shrink: 0;
+}
+
+@keyframes resolvingSpin {
+    to { transform: rotate(360deg); }
+}
+
+.resolving-badges {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+}
+
+.badge {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.15rem;
+    padding: 0.45rem 0.75rem;
+    border-radius: 0.35rem;
+    background: rgba(255, 255, 255, 0.09);
+    backdrop-filter: blur(6px);
+    min-width: 4rem;
+}
+
+.badge-label {
+    font-size: 0.68rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgba(255, 255, 255, 0.6);
+    line-height: 1;
+}
+
+.badge-value {
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: #fff;
+    line-height: 1.1;
+}
+
+.badge-seed .badge-value {
+    color: #5cd169;
+}
+
+.badge-peer .badge-value {
+    color: #e36b6b;
+}

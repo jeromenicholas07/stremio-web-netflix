@@ -185,4 +185,20 @@ server.listen(config.addonPort, () => {
     console.log(`Config:   http://127.0.0.1:${config.addonPort}/config`);
     console.log(`Prowlarr URL: ${config.prowlarrUrl}`);
     console.log(`Prowlarr API Key: ${config.prowlarrApiKey ? '(configured)' : '(NOT SET)'}`);
+
+    // Fire-and-forget prefetch so the very first user request is warm.
+    // 2s settle-delay gives Prowlarr a chance to finish booting — on
+    // fresh first-run machines Prowlarr needs a few seconds to become
+    // reachable, and we'd rather the prefetch land than the cache stay
+    // cold.
+    setTimeout(() => {
+        console.log('[prefetch] warming catalog caches');
+        const started = Date.now();
+        Promise.allSettled([
+            handleCatalog('adult-latest'),
+            handleCatalog('adult-popular'),
+        ]).then(() => {
+            console.log(`[prefetch] catalog caches warm in ${Date.now() - started}ms`);
+        });
+    }, 2000);
 });
