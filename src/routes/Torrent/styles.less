@@ -26,6 +26,31 @@
     z-index: 0;
 }
 
+// Animated diagonal sweep mirroring HeroBanner's loading shimmer aesthetic.
+// Absolute-positioned between the flat backdrop tint and the fade gradients
+// so it reads as light passing over the card — matches IncognitoCard sheen.
+.resolving-shimmer {
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+        105deg,
+        transparent 30%,
+        rgba(255, 255, 255, 0.04) 45%,
+        rgba(255, 255, 255, 0.08) 50%,
+        rgba(255, 255, 255, 0.04) 55%,
+        transparent 70%
+    );
+    background-size: 200% 100%;
+    animation: resolvingShimmer 4.5s ease-in-out infinite;
+    z-index: 0;
+    pointer-events: none;
+}
+
+@keyframes resolvingShimmer {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
 .resolving-gradient-bottom {
     position: absolute;
     inset: auto 0 0 0;
@@ -135,4 +160,72 @@
 
 .badge-peer .badge-value {
     color: #e36b6b;
+}
+
+// --- Multi-file picker -----------------------------------------------------
+// Shown when the resolved torrent contains more than one video file.
+// User chooses the video before we kick off the RD selectFiles/poll/link
+// flow, so the resolving spinner only appears once they've committed.
+
+.file-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    margin-top: 0.5rem;
+    max-width: 44rem;
+}
+
+.file-picker-hint {
+    font-size: 0.85rem;
+    color: rgba(255, 255, 255, 0.7);
+    letter-spacing: 0.01em;
+}
+
+.file-picker-list {
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+    max-height: 22rem;
+    overflow-y: auto;
+    padding-right: 0.25rem;
+}
+
+.file-picker-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    width: 100%;
+    padding: 0.65rem 0.9rem;
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 0.35rem;
+    background: rgba(255, 255, 255, 0.06);
+    color: #fff;
+    text-align: left;
+    cursor: pointer;
+    transition: background-color 120ms ease-out, border-color 120ms ease-out, transform 120ms ease-out;
+
+    &:hover, &:focus {
+        background: rgba(255, 255, 255, 0.12);
+        border-color: rgba(255, 255, 255, 0.22);
+        transform: translateX(2px);
+        outline: none;
+    }
+}
+
+.file-picker-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: #fff;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.file-picker-size {
+    flex-shrink: 0;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    color: rgba(255, 255, 255, 0.6);
 }

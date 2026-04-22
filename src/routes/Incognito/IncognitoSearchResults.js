@@ -1,11 +1,11 @@
-// Full-viewport grid of IncognitoCards. The previous single-`MetaRow`
-// layout only showed one horizontally-scrolling row for search results,
-// which wasted the bulk of the screen. CSS-grid auto-fill + minmax gives
-// a Discover-style reflowing multi-row grid without any JS measurement.
+// Full-viewport grid of IncognitoCards with infinite scroll.
 //
-// Data flow is unchanged: `useIncognitoSearch` owns the fetch + cache,
-// we just render its `results` array as a grid of cards and surface
-// `stale` as a subtle badge.
+// Data flow: `useIncognitoSearch` hands back the first page (cache-seeded
+// or fetched), plus a `loadMore()` that appends the next page. We wire an
+// IntersectionObserver to a sentinel div at the bottom of the grid —
+// whenever it scrolls into view we trigger another fetch, stopping when
+// `hasMore` flips false. This keeps the grid reading as one continuous
+// stream of results instead of a capped single page.
 
 const React = require('react');
 const classnames = require('classnames');
@@ -14,7 +14,29 @@ const IncognitoCard = require('./IncognitoCard');
 const styles = require('./styles');
 
 function IncognitoSearchResults({ query }) {
-    const { results, loading, stale } = useIncognitoSearch(query);
+    const { results, loading, loadingMore, stale, hasMore, loadMore } = useIncognitoSearch(query);
+    const sentinelRef = React.useRef(null);
+
+    // IntersectionObserver → loadMore. We reuse a single observer that
+    // watches the sentinel; `loadMore` itself guards against double-fire.
+    React.useEffect(() => {
+        if (!sentinelRef.current) return undefined;
+        if (!hasMore) return undefined;
+        if (typeof IntersectionObserver === 'undefined') return undefined;
+
+        const observer = new IntersectionObserver((entries) => {
+            for (const entry of entries) {
+                if (entry.isIntersecting) loadMore();
+            }
+        }, {
+            // Trigger ~1 viewport below so there's time to fetch before the
+            // user hits the literal bottom of the grid.
+            rootMargin: '400px 0px',
+            threshold: 0,
+        });
+        observer.observe(sentinelRef.current);
+        return () => observer.disconnect();
+    }, [hasMore, loadMore]);
 
     if (!query || !query.trim()) {
         return <div className={styles['empty-message']}>Type a query in the search bar above.</div>;
@@ -35,7 +57,7 @@ function IncognitoSearchResults({ query }) {
 
             {loading && results.length === 0 ? (
                 <div className={styles['search-results-grid']}>
-                    {Array.from({ length: 18 }).map((_, i) => (
+                    {Array.from({ length: 24 }).map((_, i) => (
                         <div key={i} className={styles['search-results-skeleton']} />
                     ))}
                 </div>
@@ -50,6 +72,11 @@ function IncognitoSearchResults({ query }) {
                             className={styles['search-results-cell']}
                         />
                     ))}
+                    {hasMore ? (
+                        <div ref={sentinelRef} className={styles['search-results-load-sentinel']}>
+                            {loadingMore ? 'Loading more…' : ' '}
+                        </div>
+                    ) : null}
                 </div>
             )}
         </div>

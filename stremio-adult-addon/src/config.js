@@ -10,7 +10,7 @@ const STATIC = {
     addonPort: 7000,
     // 6000 = XXX parent + standard XXX subcategories
     adultCategories: [6000, 6010, 6020, 6030, 6040, 6050, 6060, 6070],
-    pageSize: 50,
+    pageSize: 100,
     dedupThreshold: 0.8,
     cacheTtl: 3 * 60 * 60 * 1000,
 };

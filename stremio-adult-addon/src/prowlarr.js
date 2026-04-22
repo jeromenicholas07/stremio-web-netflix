@@ -77,19 +77,18 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl) {
  * redirect. Runs in parallel with a small concurrency cap.
  */
 async function enrichMissingInfoHashes(items) {
+    // IMPORTANT: do NOT filter by seeders here. Real-Debrid's cache often has
+    // a copy even when public trackers show 0 seeders, so pre-filtering
+    // destroys genuinely playable content. We resolve every item that's
+    // missing a hash; Torrent.js will try RD first before falling back to
+    // peer-to-peer, so "0 seeders" ≠ "unplayable".
     const needsResolution = items.filter(it =>
         !it.infoHash &&
         !(it.magnetUrl && /btih:/i.test(it.magnetUrl)) &&
-        it.downloadUrl &&
-        // Skip zero-seeder items: even if we resolve the hash, nobody's
-        // seeding so the torrent is unplayable. Not worth the round-trip
-        // and it inflates tail latency by hogging worker slots.
-        (Number(it.seeders) || 0) > 0
+        it.downloadUrl
     );
-    // 10 concurrent resolves — the surviving adult indexers (MyPornClub,
-    // OneJAV, PornoLab, TorrentGalaxyClone) tolerate this level after
-    // PornRips / BigFANGroup were deliberately disabled upstream. More
-    // than 10 still risks 429s from PornoLab.
+    // 10 concurrent resolves. The surviving adult indexers tolerate this
+    // level; going higher risks 429s from PornoLab.
     const CONCURRENCY = 10;
     let idx = 0;
     async function worker() {
@@ -188,16 +187,15 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
         });
         for (const cat of categoryList) params.append('categories', String(cat));
         const url = `${config.prowlarrUrl}/api/v1/search?${params}`;
-        // Hard 5s timeout. Prowlarr's aggregate /search endpoint waits for
-        // the SLOWEST indexer — so a single broken/slow indexer (e.g.
-        // MyPornClub, PornRips going 30s+ with empty query) hangs the whole
-        // call. The per-indexer Torznab fallback uses Promise.allSettled
-        // with individual timeouts, so it's immune to any single bad indexer.
-        // Keeping this short means we fail fast to Torznab rather than
-        // blocking the catalog for 10+ seconds.
+        // 12s aggregate timeout — generous enough to let the faster indexers
+        // (MyPornClub ~1s, PornoLab ~2.5s, OneJAV ~3s) finish even under
+        // load, while still capping worst-case on a completely dead indexer
+        // (TorrentGalaxyClone DNS timeouts can run 30s+). On timeout we fall
+        // through to per-indexer Torznab, which uses Promise.allSettled so a
+        // single dead indexer never breaks the row.
         return fetch(url, {
             headers: { 'X-Api-Key': apiKey, 'Accept': 'application/json' },
-            timeout: 5000,
+            timeout: 12000,
         });
     }
 
@@ -260,22 +258,32 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
     });
 
     // Sort FIRST so we only enrich the top-N we'd actually return. The
-    // aggregate /search often comes back with 100+ items; enriching every
-    // one of them (each a 302 redirect) is the bulk of the 30-60 s tail
-    // latency. We can sort on raw seeders/pubDate before enrichment
-    // because those fields ship in the original Prowlarr response.
+    // aggregate /search often comes back with 100+ items; we can sort on raw
+    // seeders/pubDate before enrichment because those fields ship in the
+    // original Prowlarr response.
     if (sortBy === 'seeders') {
         items.sort((a, b) => (b.seeders || 0) - (a.seeders || 0));
     } else {
         items.sort((a, b) => new Date(b.pubDate) - new Date(a.pubDate));
     }
 
-    // Enrich only the top slice. limit is typically 50 (pageSize) but the
-    // UI usually shows 20 in the first viewport, so 20 is the right
-    // budget for enrichment without starving the page.
-    const ENRICH_TOP = Math.min(items.length, Math.max(20, limit));
-    const head = items.slice(0, ENRICH_TOP);
+    // Enrich up to `limit` items. We want the full requested page to be
+    // playable, not a subset — the IncognitoCard grid can scroll far beyond
+    // the first 20, and we don't want the tail to silently drop.
+    const head = items.slice(0, limit);
     await enrichMissingInfoHashes(head);
+
+    // If aggregate came back empty (common when every indexer timed out
+    // inside Prowlarr's own 30s budget but the HTTP call itself succeeded),
+    // try the per-indexer Torznab path — it uses Promise.allSettled so it's
+    // immune to single-indexer failures and often returns something.
+    if (items.length === 0) {
+        try {
+            return await searchViaTorznab({ query, offset, limit, sortBy, categories: categoryList });
+        } catch (err) {
+            console.warn('[prowlarr] empty aggregate, Torznab fallback also failed:', err.message);
+        }
+    }
 
     return items;
 }
@@ -328,7 +336,9 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
         try {
             const torznabUrl = `${config.prowlarrUrl}/${indexer.id}/api?apikey=${config.prowlarrApiKey}&t=search&cat=${categoryList.join(',')}&q=${encodeURIComponent(query)}&offset=${offset}&limit=${limit}`;
 
-            const res = await fetch(torznabUrl, { timeout: 10000 });
+            // 15s per-indexer. One slow indexer never blocks the others
+            // because fetchPromises runs under Promise.allSettled below.
+            const res = await fetch(torznabUrl, { timeout: 15000 });
             if (!res.ok) return [];
 
             const xml = await res.text();
@@ -350,6 +360,10 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
     for (const result of results) {
         if (result.status === 'fulfilled' && result.value) {
             allItems.push(...result.value);
+        } else if (result.status === 'rejected') {
+            // Log per-indexer failure so we can see which indexer is sick
+            // without killing the whole fallback path.
+            console.warn('[prowlarr/torznab] indexer failed:', result.reason?.message || result.reason);
         }
     }
 

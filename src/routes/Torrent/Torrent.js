@@ -1,19 +1,20 @@
-// /torrent/<payload> — thin play-through route.
+// /torrent/<payload> — play-through route.
 //
 // The payload is base64url(JSON.stringify({infoHash, name, title, indexer,
 // seeders, peers, size, quality})), produced by the addon's torrent-search
-// handler. We:
-//   1. Decode the payload.
-//   2. Build a magnet URI and tell stremio-core's streaming server to queue it.
-//   3. Redirect to #/player/<encoded-stream>.
+// handler.
+//
+// Normally: decode payload → POST /rd/files → if 1 playable video, straight
+// to /rd/resolve → encode the returned HTTPS URL for stremio-core's Player
+// and redirect. When `files.length > 1` we show a picker so the user
+// chooses which file to play; the spinner only re-appears after selection.
+//
+// Fallback: if RD isn't configured or every step fails, we queue the magnet
+// with the local streaming server and hand off an infoHash Stream to the
+// Player (existing behaviour — preserved).
 //
 // No PIN gate here — this is the regular (non-Incognito) torrent play path
 // used by the Prowlarr row in the main Search page.
-//
-// The visible UI while that's happening is a HeroBanner-style layered
-// gradient backdrop with the torrent's details (indexer, seeders, leechers,
-// size, quality) surfaced as badges, so the user isn't staring at a blank
-// "Resolving..." string during the 1–5 s Real-Debrid round-trip.
 
 const React = require('react');
 const classnames = require('classnames');
@@ -32,16 +33,7 @@ function base64UrlDecode(s) {
     }
 }
 
-// Stream encoding for stremio-core's Player.
-//
-// stremio-core's Rust code (types/resource/stream.rs Stream::encode) does:
-//   1. serde_json::to_string(stream)
-//   2. zlib-deflate (RFC 1950, with header + adler32)
-//   3. STANDARD base64 (not base64url) with '=' padding, '+'/'/' alphabet
-// stremio-core-web does NOT expose the symmetric `encodeStream` via
-// wasm_bindgen, so we replicate it here. The native CompressionStream API
-// (Chrome/Edge 80+, Firefox 113+, Safari 16.4+) gives us deflate with the
-// correct zlib wrapper — no pako dependency needed.
+// stremio-core's Stream::encode: serde_json → deflate → standard base64.
 async function encodeStreamForCore(streamObj) {
     const json = JSON.stringify(streamObj);
     const compressed = await new Response(
@@ -50,29 +42,39 @@ async function encodeStreamForCore(streamObj) {
     const bytes = new Uint8Array(compressed);
     let binary = '';
     for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-    // Plain btoa — DO NOT url-safe this. stremio-core's base64 decoder is
-    // the STANDARD alphabet and rejects '-'/'_'. Percent-encode for the
-    // URL fragment so '+' and '/' survive the router.
     return btoa(binary);
 }
 
 const ADDON_URL = 'http://127.0.0.1:7000';
 const RD_TOKEN_KEY = 'rd_token';
 
-async function resolveViaRD(infoHash, title) {
-    let token = '';
-    try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
+async function rdFiles(infoHash, title, token) {
     if (!token) return null;
     try {
-        const res = await fetch(`${ADDON_URL}/rd/resolve`, {
+        const res = await fetch(`${ADDON_URL}/rd/files`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ infoHash, title, token }),
         });
         if (!res.ok) return null;
         const data = await res.json();
-        if (data && typeof data.url === 'string') return data;
-        return null;
+        return Array.isArray(data.files) ? data.files : null;
+    } catch { return null; }
+}
+
+async function rdResolve(infoHash, title, token, fileId) {
+    if (!token) return null;
+    try {
+        const body = { infoHash, title, token };
+        if (fileId) body.fileId = fileId;
+        const res = await fetch(`${ADDON_URL}/rd/resolve`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!res.ok) return null;
+        const data = await res.json();
+        return data && typeof data.url === 'string' ? data : null;
     } catch { return null; }
 }
 
@@ -90,8 +92,6 @@ function buildMagnet(infoHash, title) {
     return `magnet:?xt=urn:btih:${infoHash}${dn}${tr}`;
 }
 
-// Format a size value that may be either a number of bytes (preferred, sent
-// by the updated addon) or a preformatted string (legacy).
 function formatSize(size) {
     if (typeof size === 'string' && size.trim()) return size.trim();
     if (typeof size !== 'number' || !isFinite(size) || size <= 0) return '';
@@ -101,8 +101,6 @@ function formatSize(size) {
     return `${n.toFixed(n < 10 && i > 1 ? 1 : 0)} ${units[i]}`;
 }
 
-// Derive a stable tint from the first 6 hex chars of infoHash so the
-// backdrop is visually distinct per-torrent without a network fetch.
 function tintFromHash(hash) {
     if (!hash || hash.length < 6) return 'rgb(30, 36, 48)';
     const r = parseInt(hash.slice(0, 2), 16) || 30;
@@ -112,7 +110,6 @@ function tintFromHash(hash) {
     return `rgb(${mix(r)}, ${mix(g)}, ${mix(b)})`;
 }
 
-// Decode the payload eagerly so render has something to show immediately.
 function decodePayload(urlParams) {
     const raw = urlParams && urlParams.payload;
     if (!raw) return null;
@@ -121,11 +118,27 @@ function decodePayload(urlParams) {
     try { return JSON.parse(json); } catch { return null; }
 }
 
+// Shorten `path/to/some/release/main-file.mkv` to `main-file.mkv` for the
+// picker button label; fall back to the full path if no separator found.
+function basename(p) {
+    if (typeof p !== 'string') return '';
+    const idx = Math.max(p.lastIndexOf('/'), p.lastIndexOf('\\'));
+    return idx >= 0 ? p.slice(idx + 1) : p;
+}
+
 const Torrent = ({ urlParams }) => {
     const { core } = useServices();
     const [error, setError] = React.useState(null);
     const [status, setStatus] = React.useState('Starting...');
+
+    // Multi-file picker state. `files === null` while we haven't asked RD
+    // yet; an empty array means we asked and got nothing playable (fall
+    // through to magnet).
+    const [files, setFiles] = React.useState(null);
+    const [picking, setPicking] = React.useState(false);
+
     const ranRef = React.useRef(false);
+    const startedMagnetRef = React.useRef(false);
 
     const payload = React.useMemo(() => decodePayload(urlParams), [urlParams]);
     const infoHash = payload && typeof payload.infoHash === 'string'
@@ -138,10 +151,88 @@ const Torrent = ({ urlParams }) => {
     const quality = payload && payload.quality ? String(payload.quality) : '';
     const indexer = payload && payload.indexer ? String(payload.indexer) : '';
 
-    // If the previous hash was /incognito/* keep that nav highlighted so
-    // clicking Back from Player returns to the incognito tab visually.
     const fromIncognito = typeof document !== 'undefined' &&
         (document.referrer || '').includes('/incognito');
+
+    // Fallback path: queue magnet in streaming server, encode an infoHash
+    // Stream, hand off to the Player.
+    const playViaMagnet = React.useCallback(async () => {
+        if (startedMagnetRef.current) return;
+        startedMagnetRef.current = true;
+        setStatus('Queuing torrent in streaming server...');
+        try {
+            core.transport.dispatch({
+                action: 'StreamingServer',
+                args: { action: 'CreateTorrent', args: buildMagnet(infoHash, title) }
+            });
+        } catch (err) {
+            console.error('[torrent-route] CreateTorrent dispatch failed', err);
+        }
+
+        const streamObj = {
+            name: payload?.name || 'Torrent',
+            description: title || 'Torrent',
+            infoHash,
+            announce: DEFAULT_TRACKERS,
+            behaviorHints: { bingeGroup: `torrent:${infoHash}` }
+        };
+        let encoded;
+        try {
+            encoded = await encodeStreamForCore(streamObj);
+        } catch (err) {
+            setError('Failed to encode stream payload (see DevTools console).');
+            console.error('[torrent-route] encodeStreamForCore threw', err);
+            return;
+        }
+        try {
+            const decoded = await core.transport.decodeStream(encoded);
+            if (!decoded) {
+                setError('Stremio rejected the stream payload (see DevTools console).');
+                return;
+            }
+        } catch (err) {
+            setError('Stremio threw decoding the stream (see DevTools console).');
+            console.error('[torrent-route] decodeStream threw', err);
+            return;
+        }
+        window.location.replace(`#/player/${encodeURIComponent(encoded)}`);
+    }, [core, infoHash, title, payload]);
+
+    // RD resolve path (optionally with fileId). On success redirects to
+    // /player; on failure falls back to magnet.
+    const playViaRD = React.useCallback(async (fileId) => {
+        setPicking(false);
+        setStatus('Resolving via Real-Debrid...');
+        let token = '';
+        try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
+        if (!token) {
+            await playViaMagnet();
+            return;
+        }
+        const rd = await rdResolve(infoHash, title, token, fileId);
+        if (!rd || !rd.url) {
+            await playViaMagnet();
+            return;
+        }
+        const rdStream = {
+            name: payload?.name || 'RD',
+            description: rd.filename || title || 'Torrent',
+            url: rd.url,
+            behaviorHints: { bingeGroup: `torrent-rd:${infoHash}` },
+        };
+        try {
+            const rdEncoded = await encodeStreamForCore(rdStream);
+            const decoded = await core.transport.decodeStream(rdEncoded);
+            if (decoded) {
+                window.location.replace(`#/player/${encodeURIComponent(rdEncoded)}`);
+                return;
+            }
+            console.warn('[torrent-route] RD decodeStream returned null');
+        } catch (err) {
+            console.warn('[torrent-route] RD encode/decodeStream failed', err);
+        }
+        await playViaMagnet();
+    }, [core, infoHash, title, payload, playViaMagnet]);
 
     React.useEffect(() => {
         if (ranRef.current) return;
@@ -151,75 +242,43 @@ const Torrent = ({ urlParams }) => {
             if (!payload) { setError('Invalid torrent payload'); return; }
             if (!infoHash || infoHash.length < 16) { setError('Torrent has no infoHash'); return; }
 
-            // Try Real-Debrid first (HTTPS URL, no local torrenting).
-            setStatus('Resolving via Real-Debrid...');
-            const rd = await resolveViaRD(infoHash, title);
-            if (rd && rd.url) {
-                const rdStream = {
-                    name: payload.name || 'RD',
-                    description: rd.filename || title || 'Torrent',
-                    url: rd.url,
-                    behaviorHints: { bingeGroup: `torrent-rd:${infoHash}` },
-                };
-                try {
-                    const rdEncoded = await encodeStreamForCore(rdStream);
-                    const decoded = await core.transport.decodeStream(rdEncoded);
-                    if (decoded) {
-                        // encodeURIComponent so standard-base64's '+' and '/' survive the URL fragment.
-                        window.location.replace(`#/player/${encodeURIComponent(rdEncoded)}`);
-                        return;
-                    }
-                    console.warn('[torrent-route] RD decodeStream returned null for', rdStream);
-                } catch (err) {
-                    console.warn('[torrent-route] RD encode/decodeStream failed, falling back to magnet', err);
-                }
-            }
+            let token = '';
+            try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
 
-            // Queue the torrent in the streaming server (fallback).
-            setStatus('Queuing torrent in streaming server...');
-            try {
-                core.transport.dispatch({
-                    action: 'StreamingServer',
-                    args: { action: 'CreateTorrent', args: buildMagnet(infoHash, title) }
-                });
-            } catch (err) {
-                console.error('[torrent-route] CreateTorrent dispatch failed', err);
-            }
-
-            // Stream shape matching stremio-core's Stream::Torrent variant.
-            // `announce` is required for serde to pick the Torrent variant.
-            const streamObj = {
-                name: payload.name || 'Torrent',
-                description: title || 'Torrent',
-                infoHash,
-                announce: DEFAULT_TRACKERS,
-                behaviorHints: { bingeGroup: `torrent:${infoHash}` }
-            };
-            let encoded;
-            try {
-                encoded = await encodeStreamForCore(streamObj);
-            } catch (err) {
-                setError('Failed to encode stream payload (see DevTools console).');
-                console.error('[torrent-route] encodeStreamForCore threw', err);
+            // No RD token → skip the file enumeration round-trip entirely.
+            if (!token) {
+                await playViaMagnet();
                 return;
             }
 
-            try {
-                const decoded = await core.transport.decodeStream(encoded);
-                if (!decoded) {
-                    setError('Stremio rejected the stream payload (see DevTools console).');
-                    console.error('[torrent-route] decodeStream returned null for', streamObj);
-                    return;
-                }
-            } catch (err) {
-                setError('Stremio threw decoding the stream (see DevTools console).');
-                console.error('[torrent-route] decodeStream threw', err);
+            setStatus('Checking Real-Debrid…');
+            const list = await rdFiles(infoHash, title, token);
+            if (!Array.isArray(list) || list.length === 0) {
+                // RD failed or returned nothing usable — let resolve try its
+                // own path (it may still succeed; otherwise playViaRD falls
+                // through to magnet).
+                await playViaRD(null);
                 return;
             }
 
-            window.location.replace(`#/player/${encodeURIComponent(encoded)}`);
+            const videos = list.filter(f => f.isVideo);
+            if (videos.length <= 1) {
+                // Single playable video (or none identified — resolve will
+                // pick the biggest file as fallback). No picker needed.
+                await playViaRD(null);
+                return;
+            }
+
+            // Multiple videos → show picker.
+            setFiles(videos);
+            setPicking(true);
+            setStatus('Choose a video to play');
         })();
-    }, [core, payload, infoHash, title]);
+    }, [payload, infoHash, title, playViaRD, playViaMagnet]);
+
+    const handlePick = React.useCallback((fileId) => {
+        playViaRD(fileId);
+    }, [playViaRD]);
 
     return (
         <MainNavBars route={fromIncognito ? 'incognito' : 'search'}>
@@ -228,13 +287,15 @@ const Torrent = ({ urlParams }) => {
                     className={styles['resolving-backdrop']}
                     style={{ backgroundColor: tint }}
                 />
+                {/* HeroBanner-style animated sheen over the tint */}
+                <div className={styles['resolving-shimmer']} />
                 <div className={styles['resolving-gradient-bottom']} />
                 <div className={styles['resolving-gradient-left']} />
 
                 <div className={styles['resolving-content']}>
                     <div className={styles['resolving-title']} title={title}>{title}</div>
                     <div className={classnames(styles['resolving-status'], error && styles['error'])}>
-                        {error ? null : <span className={styles['resolving-spinner']} aria-hidden="true" />}
+                        {error || picking ? null : <span className={styles['resolving-spinner']} aria-hidden="true" />}
                         <span>{error ? `Error: ${error}` : status}</span>
                     </div>
 
@@ -270,6 +331,27 @@ const Torrent = ({ urlParams }) => {
                             </div>
                         ) : null}
                     </div>
+
+                    {picking && files && files.length > 1 ? (
+                        <div className={styles['file-picker']}>
+                            <div className={styles['file-picker-hint']}>
+                                {files.length} videos in this torrent — pick one:
+                            </div>
+                            <div className={styles['file-picker-list']}>
+                                {files.map((f) => (
+                                    <button
+                                        key={f.id}
+                                        className={styles['file-picker-item']}
+                                        onClick={() => handlePick(f.id)}
+                                        type="button"
+                                    >
+                                        <span className={styles['file-picker-name']}>{basename(f.path)}</span>
+                                        <span className={styles['file-picker-size']}>{formatSize(f.bytes)}</span>
+                                    </button>
+                                ))}
+                            </div>
+                        </div>
+                    ) : null}
                 </div>
             </div>
         </MainNavBars>

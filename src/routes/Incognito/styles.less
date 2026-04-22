@@ -224,8 +224,10 @@
 
 .search-results-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
-    gap: 0.85rem;
+    // Landscape cards read as thumbnails, so narrower columns pack more
+    // per row. 12rem min ≈ 5 cols on a 1080p viewport with gutters.
+    grid-template-columns: repeat(auto-fill, minmax(12rem, 1fr));
+    gap: 0.75rem;
 }
 
 .search-results-cell {
@@ -233,8 +235,8 @@
 }
 
 .search-results-skeleton {
-    aspect-ratio: 2 / 3;
-    border-radius: 0.25rem;
+    aspect-ratio: 16 / 9;
+    border-radius: 0.3rem;
     background: linear-gradient(
         90deg,
         rgba(255, 255, 255, 0.04) 0%,
@@ -243,6 +245,20 @@
     );
     background-size: 200% 100%;
     animation: skeletonShimmer 1.4s ease-in-out infinite;
+}
+
+.search-results-load-sentinel {
+    // IntersectionObserver target. Made visible-ish so it still works in
+    // browsers without IO (IE fallback), and full-width so it triggers
+    // reliably when scrolled into view.
+    grid-column: 1 / -1;
+    height: 3rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: rgba(255, 255, 255, 0.55);
+    font-size: 0.85rem;
+    font-style: italic;
 }
 
 @keyframes skeletonShimmer {

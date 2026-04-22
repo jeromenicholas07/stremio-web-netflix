@@ -1,8 +1,9 @@
-// Styles for the Incognito card variant. The card is a flat tinted
-// rectangle (no poster) with three badge regions: top-left for
-// seeders/leechers, top-right for quality/size, bottom strip for the
-// indexer name. Layout is intentionally minimal so cards stay dense in
-// a grid and legible against any tint derived from infoHash.
+// Styles for the Incognito card variant. Landscape rectangle (16:9) so
+// cards fit more densely in the grid and read like thumbnails rather than
+// posters — user called the old portrait layout too big/empty without
+// artwork. Badge regions: top-left for seeders/leechers, top-right for
+// quality/size, bottom strip for indexer (same aesthetic as the resolving
+// page badges).
 
 @import (reference) '~stremio/common/screen-sizes.less';
 
@@ -12,9 +13,9 @@
     flex-direction: column;
     justify-content: center;
     align-items: center;
-    padding: 1rem 0.75rem;
-    aspect-ratio: 2 / 3;
-    border-radius: 0.25rem;
+    padding: 0.6rem 0.7rem 1.1rem;
+    aspect-ratio: 16 / 9;
+    border-radius: 0.3rem;
     overflow: hidden;
     cursor: pointer;
     background-color: #1f2430; // overridden inline with hash tint
@@ -22,45 +23,64 @@
     color: inherit;
     text-decoration: none;
 
+    // Subtle diagonal sheen to match the resolving page shimmer aesthetic.
+    // Slow + low-opacity so it isn't distracting on a dense grid.
+    &::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(
+            105deg,
+            transparent 30%,
+            rgba(255, 255, 255, 0.04) 45%,
+            rgba(255, 255, 255, 0.07) 50%,
+            rgba(255, 255, 255, 0.04) 55%,
+            transparent 70%
+        );
+        background-size: 220% 100%;
+        animation: incognito-card-sheen 6s ease-in-out infinite;
+        pointer-events: none;
+        z-index: 0;
+    }
+
     &:hover, &:focus {
         transform: translateY(-2px);
-        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+        box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
         outline: none;
     }
 }
 
+@keyframes incognito-card-sheen {
+    0%   { background-position: 200% 0; }
+    100% { background-position: -200% 0; }
+}
+
 .badge-top-left {
     position: absolute;
-    top: 0.4rem;
-    left: 0.4rem;
+    top: 0.35rem;
+    left: 0.35rem;
     display: flex;
-    gap: 0.35rem;
-    padding: 0.2rem 0.4rem;
+    gap: 0.3rem;
+    padding: 0.18rem 0.38rem;
     border-radius: 0.2rem;
     background-color: rgba(0, 0, 0, 0.55);
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: 600;
     line-height: 1;
     z-index: 2;
 
-    .seed {
-        color: #5cd169;
-    }
-
-    .leech {
-        color: #e36b6b;
-    }
+    .seed  { color: #5cd169; }
+    .leech { color: #e36b6b; }
 }
 
 .badge-top-right {
     position: absolute;
-    top: 0.4rem;
-    right: 0.4rem;
+    top: 0.35rem;
+    right: 0.35rem;
     display: flex;
-    flex-direction: column;
-    gap: 0.2rem;
-    align-items: flex-end;
-    font-size: 0.7rem;
+    flex-direction: row;
+    gap: 0.25rem;
+    font-size: 0.65rem;
     font-weight: 600;
     line-height: 1;
     z-index: 2;
@@ -68,7 +88,7 @@
     .quality {
         padding: 0.2rem 0.35rem;
         border-radius: 0.2rem;
-        background-color: rgba(255, 200, 0, 0.85);
+        background-color: rgba(255, 200, 0, 0.9);
         color: #111;
         text-transform: uppercase;
     }
@@ -85,18 +105,18 @@
     position: relative;
     z-index: 1;
     width: 100%;
-    padding: 0 0.25rem;
+    padding: 0 0.35rem;
     color: #fff;
-    font-size: 0.95rem;
+    font-size: 0.8rem;
     font-weight: 600;
     line-height: 1.2;
     text-align: center;
     word-break: break-word;
     display: -webkit-box;
-    -webkit-line-clamp: 4;
+    -webkit-line-clamp: 3;
     -webkit-box-orient: vertical;
     overflow: hidden;
-    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
 }
 
 .badge-bottom {
@@ -104,10 +124,10 @@
     bottom: 0;
     left: 0;
     right: 0;
-    padding: 0.3rem 0.5rem;
-    background: linear-gradient(0deg, rgba(0, 0, 0, 0.7), rgba(0, 0, 0, 0));
+    padding: 0.22rem 0.5rem;
+    background: linear-gradient(0deg, rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
     color: rgba(255, 255, 255, 0.85);
-    font-size: 0.7rem;
+    font-size: 0.62rem;
     font-weight: 500;
     text-align: center;
     text-overflow: ellipsis;
@@ -115,4 +135,3 @@
     overflow: hidden;
     z-index: 2;
 }
-

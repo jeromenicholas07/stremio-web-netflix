@@ -145,8 +145,13 @@ async function handleCatalog(catalogId, extra = {}) {
     const skip = parseInt(extra.skip || '0', 10);
     const genre = extra.genre || '';
     const search = extra.search || '';
+    // Allow the client to request a custom page size up to a hard ceiling.
+    // Bigger pages = fewer round-trips when scrolling; the ceiling (200)
+    // keeps Prowlarr happy and the JSON payload under ~120 KB.
+    const rawLimit = parseInt(extra.limit || '0', 10);
+    const limit = rawLimit > 0 ? Math.min(rawLimit, 200) : config.pageSize;
 
-    const cacheKey = `catalog:${catalogId}:${skip}:${genre}:${search}`;
+    const cacheKey = `catalog:${catalogId}:${skip}:${limit}:${genre}:${search}`;
     const cached = cache.get(cacheKey);
     if (cached) return cached;
 
@@ -164,7 +169,7 @@ async function handleCatalog(catalogId, extra = {}) {
         items = await searchProwlarr({
             query,
             offset: skip,
-            limit: config.pageSize,
+            limit,
             sortBy,
         });
     } catch (err) {
@@ -196,7 +201,7 @@ async function handleCatalog(catalogId, extra = {}) {
         });
     }
 
-    const result = { metas: metas.slice(0, config.pageSize) };
+    const result = { metas: metas.slice(0, limit) };
     cache.set(cacheKey, result);
     return result;
 }
