@@ -1,4 +1,5 @@
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 
 // Everything is bundled and runs on loopback, so URLs and ports are deterministic.
@@ -75,6 +76,42 @@ function invalidateApiKeyCache() {
     _apiKey = null;
 }
 
+// Persistent data dir for the addon's own caches (infoHashes, etc.). We
+// co-locate with Prowlarr's data dir when the launcher tells us where that
+// is — the launcher already guarantees `shared/` survives upgrades. Falls
+// back to a platform-appropriate cache dir, then finally cwd.
+function resolveCacheDir() {
+    if (process.env.INCOGNITO_CACHE_DIR) return process.env.INCOGNITO_CACHE_DIR;
+
+    if (process.env.PROWLARR_DATA_DIR) {
+        return path.join(path.dirname(process.env.PROWLARR_DATA_DIR), 'incognito-addon-cache');
+    }
+
+    if (process.platform === 'win32' && process.env.LOCALAPPDATA) {
+        return path.join(process.env.LOCALAPPDATA, 'IncognitoAddon', 'cache');
+    }
+
+    if (process.env.HOME) {
+        return path.join(process.env.HOME, '.cache', 'incognito-addon');
+    }
+
+    return path.join(os.tmpdir(), 'incognito-addon-cache');
+}
+
+let _cacheDir = null;
+function getCacheDir() {
+    if (_cacheDir) return _cacheDir;
+    const dir = resolveCacheDir();
+    try {
+        fs.mkdirSync(dir, { recursive: true });
+        _cacheDir = dir;
+    } catch (err) {
+        console.warn('[config] cache dir create failed, caches will be in-memory only:', err.message);
+        _cacheDir = null;
+    }
+    return _cacheDir;
+}
+
 function getConfig() {
     return {
         ...STATIC,
@@ -82,4 +119,4 @@ function getConfig() {
     };
 }
 
-module.exports = { getConfig, STATIC, invalidateApiKeyCache };
+module.exports = { getConfig, STATIC, invalidateApiKeyCache, getCacheDir };

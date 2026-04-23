@@ -63,22 +63,41 @@ async function rdFiles(infoHash, title, token) {
 }
 
 // Lazy resolve a downloadUrl/magnetUrl → infoHash. Used when the catalog
-// item came through without an enriched hash (adult indexers often return
-// HTML instead of .torrent bytes, which breaks server-side enrichment;
-// asking the addon to retry on click succeeds often enough to be worth it).
-async function resolveHashFromUrl({ downloadUrl, magnetUrl }) {
+// item came through without an enriched hash (ratio-limited / captcha /
+// HTML-serving indexers often can't be enriched eagerly without blowing
+// quotas; asking the addon to retry on click is cheap and avoids wasting
+// daily quota on items the user never clicks).
+//
+// Returns one of:
+//   { infoHash: '<40-hex>' }                         — resolved
+//   { error: 'quota_exceeded', indexer, message }    — daily cap reached
+//   { error: 'not_resolvable', message }             — hash truly unavailable
+//   { error: 'network', message }                    — addon unreachable
+async function resolveHashFromUrl({ downloadUrl, magnetUrl, indexer }) {
     try {
         const res = await fetch(`${ADDON_URL}/rd/resolve-url`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ downloadUrl, magnetUrl }),
+            body: JSON.stringify({ downloadUrl, magnetUrl, indexer }),
         });
-        if (!res.ok) return null;
-        const data = await res.json();
-        return data && typeof data.infoHash === 'string' && /^[a-f0-9]{40}$/i.test(data.infoHash)
-            ? data.infoHash.toLowerCase()
-            : null;
-    } catch { return null; }
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data && typeof data.infoHash === 'string' && /^[a-f0-9]{40}$/i.test(data.infoHash)) {
+            return { infoHash: data.infoHash.toLowerCase() };
+        }
+        if (res.status === 429 && data && data.error === 'quota_exceeded') {
+            return {
+                error: 'quota_exceeded',
+                indexer: data.indexer || indexer || '',
+                message: data.message || `${indexer || 'This indexer'} daily limit reached — try another indexer`,
+            };
+        }
+        return {
+            error: 'not_resolvable',
+            message: (data && data.message) || 'Could not resolve this release',
+        };
+    } catch (err) {
+        return { error: 'network', message: 'Addon unreachable' };
+    }
 }
 
 async function rdResolve(infoHash, title, token, fileId) {
@@ -291,13 +310,24 @@ const Torrent = ({ urlParams }) => {
                 const mag = payload.magnetUrl || '';
                 if (!dl && !mag) { setError('Torrent has no infoHash'); return; }
                 setStatus('Resolving release…');
-                const resolved = await resolveHashFromUrl({ downloadUrl: dl, magnetUrl: mag });
-                if (!resolved) {
-                    setError('This release could not be resolved to a magnet. Try another result.');
+                const resolved = await resolveHashFromUrl({
+                    downloadUrl: dl,
+                    magnetUrl: mag,
+                    indexer: payload.indexer || '',
+                });
+                if (resolved && resolved.infoHash) {
+                    hash = resolved.infoHash;
+                    setInfoHash(resolved.infoHash);
+                } else if (resolved && resolved.error === 'quota_exceeded') {
+                    // PornoLab-style daily cap. Show a distinct, actionable
+                    // message so the user knows exactly what went wrong and
+                    // can pick a different indexer instead of retrying.
+                    setError(resolved.message);
+                    return;
+                } else {
+                    setError((resolved && resolved.message) || 'This release could not be resolved to a magnet. Try another result.');
                     return;
                 }
-                hash = resolved;
-                setInfoHash(resolved);
             }
 
             let token = '';

@@ -1,101 +1,245 @@
+const fs = require('fs');
+const path = require('path');
 const fetch = require('node-fetch');
 const { parseString } = require('xml2js');
 const { LRUCache } = require('lru-cache');
 const parseTorrent = require('parse-torrent');
-const { getConfig, invalidateApiKeyCache } = require('./config');
+const { getConfig, invalidateApiKeyCache, getCacheDir } = require('./config');
 
 // Cache resolved infoHashes keyed by downloadUrl — the HTTP 302 redirect
 // from Prowlarr's /download endpoint is deterministic per release.
-const infoHashCache = new LRUCache({ max: 2000, ttl: 6 * 60 * 60 * 1000 });
+// No TTL: once a downloadUrl maps to an infoHash, the mapping never changes
+// (the infoHash IS the content identity). Capped at 20k entries (~4MB on
+// disk) so a year of casual browsing doesn't explode the cache file.
+const infoHashCache = new LRUCache({ max: 20000 });
+
+// Persistent mirror of infoHashCache. A single JSON file under the addon's
+// cache dir — survives launcher restarts so we never re-spend a quota slot
+// on the same PornoLab release twice. Writes are throttled.
+const INFOHASH_CACHE_FILE = (() => {
+    const dir = getCacheDir();
+    return dir ? path.join(dir, 'infohashes.json') : null;
+})();
+
+function loadInfoHashCacheFromDisk() {
+    if (!INFOHASH_CACHE_FILE) return;
+    try {
+        if (!fs.existsSync(INFOHASH_CACHE_FILE)) return;
+        const raw = fs.readFileSync(INFOHASH_CACHE_FILE, 'utf8');
+        const obj = JSON.parse(raw);
+        let loaded = 0;
+        for (const [k, v] of Object.entries(obj)) {
+            // Historical entries may be null (negative cache). Keep them —
+            // they're why we don't re-try dead links every page load.
+            infoHashCache.set(k, v);
+            loaded++;
+        }
+        console.log(`[prowlarr] loaded ${loaded} infohash entries from disk`);
+    } catch (err) {
+        console.warn('[prowlarr] infohash cache load failed:', err.message);
+    }
+}
+
+let _saveTimer = null;
+function scheduleInfoHashCacheSave() {
+    if (!INFOHASH_CACHE_FILE) return;
+    if (_saveTimer) return;
+    // Coalesce bursts of writes (e.g. 50 enrichments from one search) into a
+    // single disk write 3s later.
+    _saveTimer = setTimeout(() => {
+        _saveTimer = null;
+        try {
+            const obj = {};
+            for (const [k, v] of infoHashCache.entries()) obj[k] = v;
+            const tmp = INFOHASH_CACHE_FILE + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(obj));
+            fs.renameSync(tmp, INFOHASH_CACHE_FILE);
+        } catch (err) {
+            console.warn('[prowlarr] infohash cache save failed:', err.message);
+        }
+    }, 3000);
+    // Don't hold the event loop open for this.
+    if (_saveTimer.unref) _saveTimer.unref();
+}
+
+loadInfoHashCacheFromDisk();
+
+// Adaptive per-indexer cold-state. When an indexer returns too many
+// non-torrent responses in a short window, we flag it cold and stop eagerly
+// enriching its items for the next `COLD_MS` minutes. Lazy-resolve at click
+// time still works — users only spend quota on items they actually play.
+//
+// This auto-handles PornoLab's 5/day cap and any other ratio-limited
+// private tracker that silently returns HTML instead of .torrent bytes.
+const COLD_FAILURE_THRESHOLD = 3;        // 3 failures → cold
+const COLD_FAILURE_WINDOW_MS = 10 * 60 * 1000; // within 10 minutes
+const COLD_MS = 60 * 60 * 1000;          // cold for 1 hour
+const indexerState = new Map();          // name → { failures: [ts], coldUntil }
+
+function isIndexerCold(name) {
+    if (!name) return false;
+    const s = indexerState.get(name);
+    if (!s) return false;
+    return s.coldUntil && s.coldUntil > Date.now();
+}
+
+function recordIndexerFailure(name, reason) {
+    if (!name) return;
+    let s = indexerState.get(name);
+    if (!s) { s = { failures: [], coldUntil: 0 }; indexerState.set(name, s); }
+    const now = Date.now();
+    s.failures = s.failures.filter(ts => now - ts < COLD_FAILURE_WINDOW_MS);
+    s.failures.push(now);
+    if (s.failures.length >= COLD_FAILURE_THRESHOLD && !(s.coldUntil > now)) {
+        s.coldUntil = now + COLD_MS;
+        console.warn(`[prowlarr] indexer ${name} went cold (${s.failures.length} failures, reason=${reason}); skipping eager enrichment for ${COLD_MS / 60000}min`);
+    }
+}
+
+function recordIndexerSuccess(name) {
+    if (!name) return;
+    const s = indexerState.get(name);
+    if (!s) return;
+    s.failures = [];
+    s.coldUntil = 0;
+}
 
 /**
- * Many Prowlarr indexers return releases with no `infoHash` and no
- * `magnetUrl`, just a `downloadUrl`. Prowlarr's /download endpoint can
- * either:
+ * Resolve a Prowlarr downloadUrl to an infoHash.
+ *
+ * Prowlarr's /download endpoint can either:
  *   (a) 302-redirect to a magnet URI (handled via Location header), or
- *   (b) return the raw .torrent bytes (handled by bencode-parsing the
- *       response body to extract the info-dict SHA-1).
+ *   (b) return the raw .torrent bytes (bencode-parsed for info-dict SHA-1).
  *
- * Case (b) is the common one for indexers that scrape HTTP-only trackers
- * (MyPornClub, OneJAV, PornRips): Prowlarr fetches the .torrent file from
- * the upstream and streams its bytes back. We need to parse those bytes
- * to get the infoHash — without that, every such item gets dropped and
- * the catalog looks empty.
+ * Case (b) is common for HTTP-tracker indexers (MyPornClub, OneJAV): Prowlarr
+ * fetches the .torrent from upstream and streams it back. On private
+ * quota-limited trackers (PornoLab), the upstream returns an HTML quota page
+ * once the daily cap is hit — Prowlarr wraps that as HTTP 500 "Invalid torrent
+ * file contents." We detect that specifically and report `quota_exceeded` so
+ * the frontend can show a meaningful message.
  *
- * Returns lowercase 40-char hex infoHash or null.
+ * Returns `{ infoHash, reason }`:
+ *   - reason 'cache'           — served from cache (may or may not have hash)
+ *   - reason 'magnet_redirect' — 301/302 to magnet, hash extracted from Location
+ *   - reason 'bencode'         — raw .torrent bytes parsed successfully
+ *   - reason 'quota_exceeded'  — upstream tracker rate-limited us (PornoLab 5/day)
+ *   - reason 'bad_bytes'       — response wasn't a .torrent and wasn't a magnet redirect
+ *   - reason 'http_error'      — non-2xx/3xx response
+ *   - reason 'network'         — fetch threw (DNS/TCP/timeout)
  */
-async function resolveInfoHashFromDownloadUrl(downloadUrl) {
-    if (!downloadUrl) return null;
+async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}) {
+    if (!downloadUrl) return { infoHash: null, reason: 'network' };
     const cached = infoHashCache.get(downloadUrl);
-    if (cached !== undefined) return cached;
+    if (cached !== undefined) return { infoHash: cached, reason: 'cache' };
 
     try {
-        // Manual redirect so we can see the Location header directly —
-        // node-fetch errors ("Only absolute URLs are supported") when it
-        // tries to follow a magnet: URI, which is exactly what Prowlarr
-        // sends for case (a). We must intercept the 301/302 ourselves.
-        const res = await fetch(downloadUrl, {
-            redirect: 'manual',
-            timeout: 7000,
-        });
-
-        let result = null;
+        // Manual redirect: node-fetch errors ("Only absolute URLs are supported")
+        // when trying to follow a magnet: URI. Intercept the 3xx ourselves.
+        const res = await fetch(downloadUrl, { redirect: 'manual', timeout: 7000 });
 
         if (res.status >= 300 && res.status < 400) {
             const loc = res.headers.get('location') || '';
-            // Case (a): Location is a magnet URI with btih.
             const magnetMatch = loc.match(/btih:([a-fA-F0-9]{40})/i);
             if (magnetMatch) {
-                result = magnetMatch[1].toLowerCase();
+                const hash = magnetMatch[1].toLowerCase();
+                infoHashCache.set(downloadUrl, hash);
+                scheduleInfoHashCacheSave();
+                recordIndexerSuccess(indexer);
+                return { infoHash: hash, reason: 'magnet_redirect' };
             }
-            // Other HTTP redirect targets are rare from Prowlarr — skip
-            // chained follow-ups to keep latency bounded.
-        } else if (res.ok) {
-            // Case (b): body IS the .torrent bytes. Bencoded dicts start
-            // with ASCII 'd' (0x64). Parse to extract info-dict SHA-1.
+            // Other redirect targets aren't useful.
+            infoHashCache.set(downloadUrl, null);
+            scheduleInfoHashCacheSave();
+            recordIndexerFailure(indexer, 'bad_redirect');
+            return { infoHash: null, reason: 'bad_bytes' };
+        }
+
+        if (res.ok) {
             const buf = Buffer.from(await res.arrayBuffer());
+            // Bencoded dicts start with ASCII 'd' (0x64). Parse to extract SHA-1.
             if (buf.length > 0 && buf[0] === 0x64) {
                 try {
                     const parsed = parseTorrent(buf);
                     if (parsed && typeof parsed.infoHash === 'string' && /^[a-f0-9]{40}$/i.test(parsed.infoHash)) {
-                        result = parsed.infoHash.toLowerCase();
+                        const hash = parsed.infoHash.toLowerCase();
+                        infoHashCache.set(downloadUrl, hash);
+                        scheduleInfoHashCacheSave();
+                        recordIndexerSuccess(indexer);
+                        return { infoHash: hash, reason: 'bencode' };
                     }
-                } catch { /* not a valid torrent file; fall through */ }
+                } catch { /* fall through to bad_bytes */ }
+            }
+            // 2xx non-bencode → upstream served HTML (quota page, login wall, etc.)
+            recordIndexerFailure(indexer, 'non_bencode_2xx');
+            // Don't negative-cache this — transient, might clear next day.
+            return { infoHash: null, reason: 'bad_bytes' };
+        }
+
+        // 5xx with "Invalid torrent file contents" is Prowlarr's fingerprint
+        // for upstream-returned-HTML (which, on PornoLab, means the 5/day cap
+        // has been hit — "Invalid torrent file" is just how Prowlarr reports
+        // "expected bencode, got HTML").
+        if (res.status === 500) {
+            let body = '';
+            try { body = await res.text(); } catch { /* ignore */ }
+            if (/Invalid torrent file contents/i.test(body)) {
+                recordIndexerFailure(indexer, 'quota_exceeded');
+                // Don't cache — the limit resets; a fresh request tomorrow may succeed.
+                return { infoHash: null, reason: 'quota_exceeded' };
             }
         }
 
-        infoHashCache.set(downloadUrl, result);
-        return result;
-    } catch {
-        infoHashCache.set(downloadUrl, null);
-        return null;
+        recordIndexerFailure(indexer, 'http_' + res.status);
+        return { infoHash: null, reason: 'http_error' };
+    } catch (err) {
+        recordIndexerFailure(indexer, 'network');
+        // Don't negative-cache network failures — try again next time.
+        return { infoHash: null, reason: 'network' };
     }
 }
 
 /**
  * Enrich items missing infoHash/magnetUrl by following their downloadUrl
  * redirect. Runs in parallel with a small concurrency cap.
+ *
+ * Skips items whose indexer is currently "cold" (see indexerState above).
+ * A cold indexer has returned enough quota/auth failures recently that
+ * eager enrichment would be wasteful and actively counterproductive — each
+ * call counts against the user's daily quota on private trackers like
+ * PornoLab. Cold items still enter the catalog carrying `downloadUrl`; we
+ * lazy-resolve them at click time via /rd/resolve-url, so the user only
+ * spends a quota slot on items they actually intend to play.
  */
 async function enrichMissingInfoHashes(items) {
     // IMPORTANT: do NOT filter by seeders here. Real-Debrid's cache often has
     // a copy even when public trackers show 0 seeders, so pre-filtering
-    // destroys genuinely playable content. We resolve every item that's
-    // missing a hash; Torrent.js will try RD first before falling back to
-    // peer-to-peer, so "0 seeders" ≠ "unplayable".
-    const needsResolution = items.filter(it =>
-        !it.infoHash &&
-        !(it.magnetUrl && /btih:/i.test(it.magnetUrl)) &&
-        it.downloadUrl
-    );
-    // 10 concurrent resolves. The surviving adult indexers tolerate this
-    // level; going higher risks 429s from PornoLab.
+    // destroys genuinely playable content.
+    const needsResolution = items.filter(it => {
+        if (it.infoHash) return false;
+        if (it.magnetUrl && /btih:/i.test(it.magnetUrl)) return false;
+        if (!it.downloadUrl) return false;
+        // Skip indexers currently flagged as ratio/quota-limited.
+        if (isIndexerCold(it.indexer)) return false;
+        return true;
+    });
+
+    if (items.some(it => isIndexerCold(it.indexer))) {
+        const coldNames = [...new Set(items.filter(it => isIndexerCold(it.indexer)).map(it => it.indexer))];
+        console.log(`[prowlarr] skipping eager enrichment for cold indexers: ${coldNames.join(', ')} (will lazy-resolve at click time)`);
+    }
+
+    // 10 concurrent resolves. Going higher risks 429s from ratio-limited indexers;
+    // the cold-state tracker will back off anyway if failures pile up.
     const CONCURRENCY = 10;
     let idx = 0;
     async function worker() {
         while (idx < needsResolution.length) {
             const it = needsResolution[idx++];
-            const hash = await resolveInfoHashFromDownloadUrl(it.downloadUrl);
-            if (hash) it.infoHash = hash;
+            const { infoHash } = await resolveInfoHashFromDownloadUrl(it.downloadUrl, { indexer: it.indexer });
+            if (infoHash) it.infoHash = infoHash;
+            // If an indexer went cold mid-batch, bail out early — no point
+            // burning more attempts at it.
+            if (isIndexerCold(it.indexer)) break;
         }
     }
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));

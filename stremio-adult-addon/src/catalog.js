@@ -82,9 +82,36 @@ function fingerprint(downloadUrl, title) {
  * errors from Prowlarr — which is common on adult indexers where the
  * upstream tracker serves HTML instead of .torrent bytes.
  */
+// Pull a 40-hex infoHash out of any field that might carry one. Priority:
+//   1. Explicit `infoHash` field (already validated 40-hex).
+//   2. `magnetUrl` — regex `btih:<hash>`. Free win when the indexer emits
+//      a magnet in its Torznab feed; no network round-trip needed and
+//      bypasses Prowlarr's `.torrent` fetch which frequently 500s on
+//      adult indexers serving HTML instead of bencode.
+//   3. `downloadUrl` — some Prowlarr download links are themselves magnets
+//      (rare, but cheap to check).
+// Returns '' if nothing yields a valid 40-hex hash.
+function extractInfoHash(item) {
+    const raw = typeof item.infoHash === 'string' ? item.infoHash.toLowerCase() : '';
+    if (/^[a-f0-9]{40}$/.test(raw)) return raw;
+
+    const tryMagnet = (s) => {
+        if (typeof s !== 'string') return '';
+        const m = s.match(/btih:([a-fA-F0-9]{40})/i);
+        return m ? m[1].toLowerCase() : '';
+    };
+
+    const fromMagnet = tryMagnet(item.magnetUrl);
+    if (fromMagnet) return fromMagnet;
+
+    const fromDownload = tryMagnet(item.downloadUrl);
+    if (fromDownload) return fromDownload;
+
+    return '';
+}
+
 function itemToMeta(item) {
-    const rawHash = typeof item.infoHash === 'string' ? item.infoHash.toLowerCase() : '';
-    const infoHash = /^[a-f0-9]{40}$/.test(rawHash) ? rawHash : '';
+    const infoHash = extractInfoHash(item);
     const downloadUrl = typeof item.downloadUrl === 'string' ? item.downloadUrl : '';
     const magnetUrl = typeof item.magnetUrl === 'string' ? item.magnetUrl : '';
 

@@ -267,13 +267,32 @@ async function handleResolveUrl(req, res) {
     const downloadUrl = typeof payload.downloadUrl === 'string' ? payload.downloadUrl : '';
     if (!downloadUrl) { sendJson(res, 400, { error: 'downloadUrl required' }); return; }
 
+    const indexer = typeof payload.indexer === 'string' ? payload.indexer : '';
+
     try {
-        const infoHash = await resolveInfoHashFromDownloadUrl(downloadUrl);
-        if (!infoHash) {
-            sendJson(res, 404, { error: 'could not resolve infoHash for this release' });
+        const { infoHash, reason } = await resolveInfoHashFromDownloadUrl(downloadUrl, { indexer });
+        if (infoHash) {
+            sendJson(res, 200, { infoHash });
             return;
         }
-        sendJson(res, 200, { infoHash });
+        // Quota is special — surface it with a distinct status + code so the
+        // frontend can show a tailored message ("PornoLab daily limit reached")
+        // instead of a generic "could not resolve" error.
+        if (reason === 'quota_exceeded') {
+            sendJson(res, 429, {
+                error: 'quota_exceeded',
+                indexer: indexer || 'this indexer',
+                message: indexer
+                    ? `${indexer} daily limit reached — try another indexer`
+                    : 'Daily download limit reached on this indexer — try another',
+            });
+            return;
+        }
+        sendJson(res, 404, {
+            error: 'not_resolvable',
+            reason,
+            message: 'Could not resolve infoHash for this release',
+        });
     } catch (err) {
         console.error('[rd] resolve-url failed:', err.message);
         sendJson(res, 502, { error: err.message || 'resolve-url failed' });
