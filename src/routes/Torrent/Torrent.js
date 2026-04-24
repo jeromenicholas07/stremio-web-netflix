@@ -85,10 +85,12 @@ async function resolveHashFromUrl({ downloadUrl, magnetUrl, indexer }) {
             return { infoHash: data.infoHash.toLowerCase() };
         }
         if (res.status === 429 && data && data.error === 'quota_exceeded') {
+            const mins = typeof data.minutesRemaining === 'number' ? data.minutesRemaining : 60;
             return {
                 error: 'quota_exceeded',
                 indexer: data.indexer || indexer || '',
-                message: data.message || `${indexer || 'This indexer'} daily limit reached — try another indexer`,
+                minutesRemaining: mins,
+                message: data.message || `${indexer || 'This indexer'} daily limit reached — try another indexer (retries in ~${mins}min)`,
             };
         }
         return {
@@ -306,6 +308,15 @@ const Torrent = ({ urlParams }) => {
             // .torrent bytes, breaking the server-side enrichment step).
             let hash = infoHash;
             if (!hash || hash.length < 16) {
+                // Short-circuit: the catalog already told us this indexer is
+                // ratio-capped. Don't even hit the addon — tell the user
+                // immediately and save both of us a round-trip.
+                if (payload.cold) {
+                    const indexerName = payload.indexer || 'This indexer';
+                    const mins = payload.coldMinutesRemaining || 60;
+                    setError(`${indexerName} daily limit reached — try another indexer (retries in ~${mins}min)`);
+                    return;
+                }
                 const dl = payload.downloadUrl || '';
                 const mag = payload.magnetUrl || '';
                 if (!dl && !mag) { setError('Torrent has no infoHash'); return; }

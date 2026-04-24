@@ -27,14 +27,22 @@ function loadInfoHashCacheFromDisk() {
         if (!fs.existsSync(INFOHASH_CACHE_FILE)) return;
         const raw = fs.readFileSync(INFOHASH_CACHE_FILE, 'utf8');
         const obj = JSON.parse(raw);
-        let loaded = 0;
+        let loaded = 0, skipped = 0;
         for (const [k, v] of Object.entries(obj)) {
-            // Historical entries may be null (negative cache). Keep them —
-            // they're why we don't re-try dead links every page load.
-            infoHashCache.set(k, v);
-            loaded++;
+            // Only load POSITIVE entries (real 40-hex infoHashes). Previous
+            // versions of this addon negative-cached `null` for failures —
+            // but those failures were often quota/transient, not permanent,
+            // and keeping them across restarts meant users never recovered.
+            // The indexer-state cache handles "don't hit X right now"
+            // correctly; per-URL nulls here are obsolete.
+            if (typeof v === 'string' && /^[a-f0-9]{40}$/.test(v)) {
+                infoHashCache.set(k, v);
+                loaded++;
+            } else {
+                skipped++;
+            }
         }
-        console.log(`[prowlarr] loaded ${loaded} infohash entries from disk`);
+        console.log(`[prowlarr] loaded ${loaded} infohash entries from disk (skipped ${skipped} stale negatives)`);
     } catch (err) {
         console.warn('[prowlarr] infohash cache load failed:', err.message);
     }
@@ -50,7 +58,11 @@ function scheduleInfoHashCacheSave() {
         _saveTimer = null;
         try {
             const obj = {};
-            for (const [k, v] of infoHashCache.entries()) obj[k] = v;
+            // Persist only positive entries — negatives are either transient
+            // (retry next time) or handled by indexer-level cold state.
+            for (const [k, v] of infoHashCache.entries()) {
+                if (typeof v === 'string' && /^[a-f0-9]{40}$/.test(v)) obj[k] = v;
+            }
             const tmp = INFOHASH_CACHE_FILE + '.tmp';
             fs.writeFileSync(tmp, JSON.stringify(obj));
             fs.renameSync(tmp, INFOHASH_CACHE_FILE);
@@ -67,32 +79,126 @@ loadInfoHashCacheFromDisk();
 // Adaptive per-indexer cold-state. When an indexer returns too many
 // non-torrent responses in a short window, we flag it cold and stop eagerly
 // enriching its items for the next `COLD_MS` minutes. Lazy-resolve at click
-// time still works — users only spend quota on items they actually play.
+// time short-circuits to the cached cold-state so users don't burn more
+// quota on items we already know will fail.
 //
 // This auto-handles PornoLab's 5/day cap and any other ratio-limited
 // private tracker that silently returns HTML instead of .torrent bytes.
+//
+// The cold state is persisted to disk (same dir as infohashes.json) so
+// launcher restarts don't force us to re-discover the cold-state the hard
+// way — which, on PornoLab, means re-burning the day's entire quota.
 const COLD_FAILURE_THRESHOLD = 3;        // 3 failures → cold
 const COLD_FAILURE_WINDOW_MS = 10 * 60 * 1000; // within 10 minutes
 const COLD_MS = 60 * 60 * 1000;          // cold for 1 hour
-const indexerState = new Map();          // name → { failures: [ts], coldUntil }
+const indexerState = new Map();          // name → { failures: [ts], coldUntil, reason }
+
+const INDEXER_STATE_FILE = (() => {
+    const dir = getCacheDir();
+    return dir ? path.join(dir, 'indexer-state.json') : null;
+})();
+
+function loadIndexerStateFromDisk() {
+    if (!INDEXER_STATE_FILE) return;
+    try {
+        if (!fs.existsSync(INDEXER_STATE_FILE)) return;
+        const raw = fs.readFileSync(INDEXER_STATE_FILE, 'utf8');
+        const obj = JSON.parse(raw);
+        const now = Date.now();
+        for (const [name, s] of Object.entries(obj)) {
+            if (!s || typeof s !== 'object') continue;
+            // Drop expired cold states — they only matter while within window.
+            if (s.coldUntil && s.coldUntil > now) {
+                indexerState.set(name, {
+                    failures: Array.isArray(s.failures) ? s.failures.filter(ts => now - ts < COLD_FAILURE_WINDOW_MS) : [],
+                    coldUntil: s.coldUntil,
+                    reason: s.reason || 'unknown',
+                });
+            }
+        }
+        const coldList = [...indexerState.entries()]
+            .filter(([, v]) => v.coldUntil > now)
+            .map(([k, v]) => `${k}(${Math.round((v.coldUntil - now) / 60000)}min,${v.reason})`);
+        if (coldList.length) {
+            console.log(`[prowlarr] restored cold indexer state from disk: ${coldList.join(', ')}`);
+        }
+    } catch (err) {
+        console.warn('[prowlarr] indexer state load failed:', err.message);
+    }
+}
+
+let _indexerStateSaveTimer = null;
+function scheduleIndexerStateSave() {
+    if (!INDEXER_STATE_FILE) return;
+    if (_indexerStateSaveTimer) return;
+    _indexerStateSaveTimer = setTimeout(() => {
+        _indexerStateSaveTimer = null;
+        try {
+            const obj = {};
+            const now = Date.now();
+            for (const [name, s] of indexerState.entries()) {
+                if (s.coldUntil && s.coldUntil > now) {
+                    obj[name] = {
+                        failures: s.failures,
+                        coldUntil: s.coldUntil,
+                        reason: s.reason,
+                    };
+                }
+            }
+            const tmp = INDEXER_STATE_FILE + '.tmp';
+            fs.writeFileSync(tmp, JSON.stringify(obj));
+            fs.renameSync(tmp, INDEXER_STATE_FILE);
+        } catch (err) {
+            console.warn('[prowlarr] indexer state save failed:', err.message);
+        }
+    }, 1000);
+    if (_indexerStateSaveTimer.unref) _indexerStateSaveTimer.unref();
+}
+
+loadIndexerStateFromDisk();
+
+function getIndexerColdInfo(name) {
+    if (!name) return null;
+    const s = indexerState.get(name);
+    if (!s) return null;
+    const now = Date.now();
+    if (s.coldUntil && s.coldUntil > now) {
+        return { coldUntil: s.coldUntil, reason: s.reason || 'unknown', minutesRemaining: Math.ceil((s.coldUntil - now) / 60000) };
+    }
+    return null;
+}
 
 function isIndexerCold(name) {
-    if (!name) return false;
-    const s = indexerState.get(name);
-    if (!s) return false;
-    return s.coldUntil && s.coldUntil > Date.now();
+    return getIndexerColdInfo(name) !== null;
+}
+
+function markIndexerColdNow(name, reason) {
+    if (!name) return;
+    let s = indexerState.get(name);
+    if (!s) { s = { failures: [], coldUntil: 0, reason: 'unknown' }; indexerState.set(name, s); }
+    const now = Date.now();
+    // Set a full COLD_MS window. Any existing coldUntil gets extended, not shrunk.
+    const newColdUntil = now + COLD_MS;
+    if (newColdUntil > s.coldUntil) {
+        s.coldUntil = newColdUntil;
+        s.reason = reason;
+        console.warn(`[prowlarr] indexer ${name} IMMEDIATELY cold (reason=${reason}); skipping ${COLD_MS / 60000}min`);
+        scheduleIndexerStateSave();
+    }
 }
 
 function recordIndexerFailure(name, reason) {
     if (!name) return;
     let s = indexerState.get(name);
-    if (!s) { s = { failures: [], coldUntil: 0 }; indexerState.set(name, s); }
+    if (!s) { s = { failures: [], coldUntil: 0, reason: 'unknown' }; indexerState.set(name, s); }
     const now = Date.now();
     s.failures = s.failures.filter(ts => now - ts < COLD_FAILURE_WINDOW_MS);
     s.failures.push(now);
     if (s.failures.length >= COLD_FAILURE_THRESHOLD && !(s.coldUntil > now)) {
         s.coldUntil = now + COLD_MS;
-        console.warn(`[prowlarr] indexer ${name} went cold (${s.failures.length} failures, reason=${reason}); skipping eager enrichment for ${COLD_MS / 60000}min`);
+        s.reason = reason;
+        console.warn(`[prowlarr] indexer ${name} went cold (${s.failures.length} failures, reason=${reason}); skipping ${COLD_MS / 60000}min`);
+        scheduleIndexerStateSave();
     }
 }
 
@@ -100,8 +206,27 @@ function recordIndexerSuccess(name) {
     if (!name) return;
     const s = indexerState.get(name);
     if (!s) return;
+    const wasCold = s.coldUntil && s.coldUntil > Date.now();
     s.failures = [];
     s.coldUntil = 0;
+    s.reason = 'unknown';
+    if (wasCold) {
+        console.log(`[prowlarr] indexer ${name} warmed up (success after cold)`);
+        scheduleIndexerStateSave();
+    }
+}
+
+// Expose a snapshot of currently-cold indexers for the catalog layer, which
+// uses it to flag items in the meta so the frontend can short-circuit clicks.
+function getColdIndexers() {
+    const now = Date.now();
+    const out = {};
+    for (const [name, s] of indexerState.entries()) {
+        if (s.coldUntil && s.coldUntil > now) {
+            out[name] = { reason: s.reason || 'unknown', minutesRemaining: Math.ceil((s.coldUntil - now) / 60000) };
+        }
+    }
+    return out;
 }
 
 /**
@@ -120,6 +245,7 @@ function recordIndexerSuccess(name) {
  *
  * Returns `{ infoHash, reason }`:
  *   - reason 'cache'           — served from cache (may or may not have hash)
+ *   - reason 'cold'            — indexer is cold; skipped without network I/O
  *   - reason 'magnet_redirect' — 301/302 to magnet, hash extracted from Location
  *   - reason 'bencode'         — raw .torrent bytes parsed successfully
  *   - reason 'quota_exceeded'  — upstream tracker rate-limited us (PornoLab 5/day)
@@ -127,15 +253,55 @@ function recordIndexerSuccess(name) {
  *   - reason 'http_error'      — non-2xx/3xx response
  *   - reason 'network'         — fetch threw (DNS/TCP/timeout)
  */
+
+// Matches ANY of these body patterns → treat as quota/limit exhaustion.
+// Prowlarr wraps the upstream HTML as "Invalid torrent file contents"; the
+// HTML itself often also contains literal "daily limit" / "quota exceeded"
+// / "too many" / "reached the limit" / "download limit" strings. We match
+// permissively so a future Prowlarr wording change doesn't silently break
+// detection and burn quotas.
+const QUOTA_BODY_PATTERNS = [
+    /invalid\s+torrent\s+file/i,
+    /daily\s+(?:torrent\s+)?download\s+limit/i,
+    /download\s+limit/i,
+    /quota\s+exceeded/i,
+    /rate.?limit/i,
+    /too\s+many\s+(?:torrent\s+)?downloads?/i,
+    /reached\s+(?:the\s+)?(?:daily\s+)?limit/i,
+    /your\s+current\s+limit/i,
+];
+
+function bodyLooksLikeQuota(body) {
+    if (!body) return false;
+    return QUOTA_BODY_PATTERNS.some(re => re.test(body));
+}
+
 async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}) {
     if (!downloadUrl) return { infoHash: null, reason: 'network' };
+
+    // Short-circuit 1: infoHash cache (positive or negative).
     const cached = infoHashCache.get(downloadUrl);
     if (cached !== undefined) return { infoHash: cached, reason: 'cache' };
+
+    // Short-circuit 2: indexer is currently cold. Don't spend a network round
+    // trip (and possibly another quota slot) on something we already know will
+    // fail. Report quota_exceeded to callers so the UI can show the same
+    // error it would have shown after a real failed resolve.
+    const coldInfo = getIndexerColdInfo(indexer);
+    if (coldInfo) {
+        return { infoHash: null, reason: 'quota_exceeded', coldMinutesRemaining: coldInfo.minutesRemaining, coldReason: coldInfo.reason };
+    }
 
     try {
         // Manual redirect: node-fetch errors ("Only absolute URLs are supported")
         // when trying to follow a magnet: URI. Intercept the 3xx ourselves.
         const res = await fetch(downloadUrl, { redirect: 'manual', timeout: 7000 });
+
+        // Explicit rate-limit signals from the tracker or Prowlarr itself.
+        if (res.status === 429) {
+            markIndexerColdNow(indexer, 'http_429');
+            return { infoHash: null, reason: 'quota_exceeded' };
+        }
 
         if (res.status >= 300 && res.status < 400) {
             const loc = res.headers.get('location') || '';
@@ -147,9 +313,16 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}
                 recordIndexerSuccess(indexer);
                 return { infoHash: hash, reason: 'magnet_redirect' };
             }
-            // Other redirect targets aren't useful.
-            infoHashCache.set(downloadUrl, null);
-            scheduleInfoHashCacheSave();
+            // Non-magnet redirect is usually a login wall or a "quota exceeded"
+            // landing page. DON'T negative-cache to disk — the quota resets
+            // daily and the user can log back in. Just report bad_bytes and
+            // let the failure counter catch up if it keeps happening.
+            if (/login|signin|account|quota|limit|captcha/i.test(loc)) {
+                // This is almost certainly a quota/auth redirect. Mark the
+                // indexer cold immediately so we don't retry through the day.
+                markIndexerColdNow(indexer, 'auth_or_quota_redirect');
+                return { infoHash: null, reason: 'quota_exceeded' };
+            }
             recordIndexerFailure(indexer, 'bad_redirect');
             return { infoHash: null, reason: 'bad_bytes' };
         }
@@ -169,24 +342,36 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}
                     }
                 } catch { /* fall through to bad_bytes */ }
             }
-            // 2xx non-bencode → upstream served HTML (quota page, login wall, etc.)
+            // 2xx non-bencode → upstream served HTML. Inspect it: a quota-page
+            // HTML ("You've reached your daily torrent download limit") is the
+            // strongest signal we have of a ratio block. Everything else that
+            // lands here (login wall, generic error page) is also not worth
+            // retrying in the short term.
+            const text = buf.toString('utf8', 0, Math.min(buf.length, 4096));
+            if (bodyLooksLikeQuota(text)) {
+                markIndexerColdNow(indexer, 'quota_body_2xx');
+                return { infoHash: null, reason: 'quota_exceeded' };
+            }
             recordIndexerFailure(indexer, 'non_bencode_2xx');
-            // Don't negative-cache this — transient, might clear next day.
             return { infoHash: null, reason: 'bad_bytes' };
         }
 
-        // 5xx with "Invalid torrent file contents" is Prowlarr's fingerprint
-        // for upstream-returned-HTML (which, on PornoLab, means the 5/day cap
-        // has been hit — "Invalid torrent file" is just how Prowlarr reports
-        // "expected bencode, got HTML").
-        if (res.status === 500) {
+        // 5xx bodies: Prowlarr wraps upstream HTML as "Invalid torrent file
+        // contents" (the fingerprint for PornoLab's 5/day cap being hit).
+        // Accept any matching body pattern on 500/502/503.
+        if (res.status >= 500 && res.status < 600) {
             let body = '';
             try { body = await res.text(); } catch { /* ignore */ }
-            if (/Invalid torrent file contents/i.test(body)) {
-                recordIndexerFailure(indexer, 'quota_exceeded');
-                // Don't cache — the limit resets; a fresh request tomorrow may succeed.
+            if (bodyLooksLikeQuota(body)) {
+                markIndexerColdNow(indexer, `http_${res.status}_quota`);
                 return { infoHash: null, reason: 'quota_exceeded' };
             }
+        }
+
+        // 403 Forbidden almost always means auth/ratio block. Mark cold.
+        if (res.status === 403) {
+            markIndexerColdNow(indexer, 'http_403');
+            return { infoHash: null, reason: 'quota_exceeded' };
         }
 
         recordIndexerFailure(indexer, 'http_' + res.status);
@@ -533,4 +718,10 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
     return sliced;
 }
 
-module.exports = { searchProwlarr, resolveInfoHashFromDownloadUrl };
+module.exports = {
+    searchProwlarr,
+    resolveInfoHashFromDownloadUrl,
+    isIndexerCold,
+    getIndexerColdInfo,
+    getColdIndexers,
+};

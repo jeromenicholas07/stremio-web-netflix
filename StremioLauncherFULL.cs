@@ -32,7 +32,7 @@ class StremioLauncherFULL
     // NOTE: Prowlarr config (indexers, API keys, app profiles) lives in the
     // SHARED dir, NOT under this version. Bumping the version does NOT cost
     // the user their Prowlarr setup — see `sharedProwlarrData` below.
-    const string PAYLOAD_VERSION = "1.6.0";
+    const string PAYLOAD_VERSION = "1.6.1";
 
     // Portable Node.js — just need node.exe for the addon
     const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";

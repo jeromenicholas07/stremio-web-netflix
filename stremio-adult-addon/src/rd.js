@@ -21,7 +21,7 @@
 
 const fetch = require('node-fetch');
 const { LRUCache } = require('lru-cache');
-const { resolveInfoHashFromDownloadUrl } = require('./prowlarr');
+const { resolveInfoHashFromDownloadUrl, getIndexerColdInfo } = require('./prowlarr');
 
 const RD_BASE = 'https://api.real-debrid.com/rest/1.0';
 
@@ -269,29 +269,49 @@ async function handleResolveUrl(req, res) {
 
     const indexer = typeof payload.indexer === 'string' ? payload.indexer : '';
 
+    // Short-circuit BEFORE making a network call: if the indexer is already
+    // cold (recent quota/auth block), surface quota_exceeded immediately so
+    // the user doesn't spend another quota slot just to see the same error.
+    const coldInfo = getIndexerColdInfo(indexer);
+    if (coldInfo) {
+        sendJson(res, 429, {
+            error: 'quota_exceeded',
+            indexer: indexer || 'this indexer',
+            cold: true,
+            minutesRemaining: coldInfo.minutesRemaining,
+            message: indexer
+                ? `${indexer} daily limit reached — try another indexer (retries in ~${coldInfo.minutesRemaining}min)`
+                : `Daily download limit reached on this indexer — try another (retries in ~${coldInfo.minutesRemaining}min)`,
+        });
+        return;
+    }
+
     try {
-        const { infoHash, reason } = await resolveInfoHashFromDownloadUrl(downloadUrl, { indexer });
-        if (infoHash) {
-            sendJson(res, 200, { infoHash });
+        const resolved = await resolveInfoHashFromDownloadUrl(downloadUrl, { indexer });
+        if (resolved.infoHash) {
+            sendJson(res, 200, { infoHash: resolved.infoHash });
             return;
         }
         // Quota is special — surface it with a distinct status + code so the
         // frontend can show a tailored message ("PornoLab daily limit reached")
         // instead of a generic "could not resolve" error.
-        if (reason === 'quota_exceeded') {
+        if (resolved.reason === 'quota_exceeded') {
+            const minsRemaining = resolved.coldMinutesRemaining || 60;
             sendJson(res, 429, {
                 error: 'quota_exceeded',
                 indexer: indexer || 'this indexer',
+                cold: true,
+                minutesRemaining: minsRemaining,
                 message: indexer
-                    ? `${indexer} daily limit reached — try another indexer`
-                    : 'Daily download limit reached on this indexer — try another',
+                    ? `${indexer} daily limit reached — try another indexer (retries in ~${minsRemaining}min)`
+                    : `Daily download limit reached on this indexer — try another (retries in ~${minsRemaining}min)`,
             });
             return;
         }
         sendJson(res, 404, {
             error: 'not_resolvable',
-            reason,
-            message: 'Could not resolve infoHash for this release',
+            reason: resolved.reason,
+            message: 'Could not resolve this release — try another result',
         });
     } catch (err) {
         console.error('[rd] resolve-url failed:', err.message);

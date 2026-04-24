@@ -12,7 +12,7 @@
 // Prowlarr result is simpler and matches what the main-Search torrent row
 // already does, so the two flows share the /torrent/<payload> route.
 
-const { searchProwlarr } = require('./prowlarr');
+const { searchProwlarr, isIndexerCold, getIndexerColdInfo } = require('./prowlarr');
 const { getConfig } = require('./config');
 const { fallbackPoster } = require('./poster');
 const { LRUCache } = require('lru-cache');
@@ -127,6 +127,13 @@ function itemToMeta(item) {
     const peers = Number(item.peers) || 0;
     const indexer = typeof item.indexer === 'string' ? item.indexer : '';
 
+    // If the indexer is currently cold (ratio cap hit) AND we don't already
+    // have a resolved infoHash for this item, tell the frontend so it can
+    // show a distinct error immediately on click instead of burning another
+    // network round-trip. If we DO have a resolved hash, the item plays
+    // normally — the cold state only blocks un-enriched items.
+    const coldInfo = (!infoHash && indexer) ? getIndexerColdInfo(indexer) : null;
+
     // The torrent payload encoded in the id also powers the "Resolving via
     // Real-Debrid…" screen — carry the full at-a-glance metadata so that
     // screen doesn't need a second fetch to display seeders/size/indexer.
@@ -144,6 +151,10 @@ function itemToMeta(item) {
         peers,
         size: sizeBytes,
         quality,
+        // `cold` tells Torrent.js: don't even try to resolve, the indexer is
+        // out of quota. Including minutesRemaining so the UI can say
+        // "retries in ~42min".
+        ...(coldInfo ? { cold: true, coldMinutesRemaining: coldInfo.minutesRemaining } : {}),
     };
     const id = 'torrent:' + base64UrlEncode(JSON.stringify(payload));
     const href = `#/torrent/${encodeURIComponent(id.slice('torrent:'.length))}`;
