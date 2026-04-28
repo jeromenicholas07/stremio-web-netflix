@@ -10,6 +10,7 @@ const {
     handleFiles: handleRdFiles,
     handleResolveUrl: handleRdResolveUrl,
 } = require('./src/rd');
+const { clearAllColdState } = require('./src/prowlarr');
 const { getConfig } = require('./src/config');
 
 const GENRES = [
@@ -180,8 +181,13 @@ const server = http.createServer((req, res) => {
         }
         try {
             const cleared = clearCatalogCache();
+            // Also wipe per-indexer cold flags. A user clicking "Clear cache"
+            // is signalling "give me a fresh slate" — carrying over cold flags
+            // (which may have been wrongly set by an older buggy version)
+            // would defeat the purpose.
+            const coldCleared = clearAllColdState();
             res.setHeader('Content-Type', 'application/json');
-            res.end(JSON.stringify({ ok: true, cleared }));
+            res.end(JSON.stringify({ ok: true, cleared, coldCleared }));
         } catch (err) {
             res.statusCode = 500;
             res.setHeader('Content-Type', 'application/json');

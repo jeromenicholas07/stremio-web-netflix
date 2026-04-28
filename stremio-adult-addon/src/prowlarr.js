@@ -76,26 +76,36 @@ function scheduleInfoHashCacheSave() {
 
 loadInfoHashCacheFromDisk();
 
-// Adaptive per-indexer cold-state. When an indexer returns too many
-// non-torrent responses in a short window, we flag it cold and stop eagerly
+// Adaptive per-indexer cold-state. When an indexer returns repeated EXPLICIT
+// quota/auth signals in a short window, we flag it cold and stop eagerly
 // enriching its items for the next `COLD_MS` minutes. Lazy-resolve at click
 // time short-circuits to the cached cold-state so users don't burn more
 // quota on items we already know will fail.
 //
-// This auto-handles PornoLab's 5/day cap and any other ratio-limited
-// private tracker that silently returns HTML instead of .torrent bytes.
+// IMPORTANT: a single torrent failing to enrich (Prowlarr 500 "Invalid
+// torrent file contents", random parse errors, network blips) is NOT enough
+// to mark an indexer cold. Those failures are common on every indexer and
+// don't mean the indexer is rate-limited. Only EXPLICIT signals — HTTP 429,
+// HTTP 403, or response bodies containing literal "X torrents per day" /
+// "daily download limit" wording — count toward cold-state. This was the
+// source of bug reports where every indexer wrongly showed "daily limit
+// reached" after a single bad release.
 //
-// The cold state is persisted to disk (same dir as infohashes.json) so
-// launcher restarts don't force us to re-discover the cold-state the hard
-// way — which, on PornoLab, means re-burning the day's entire quota.
-const COLD_FAILURE_THRESHOLD = 3;        // 3 failures → cold
+// Schema is versioned via the file name. Bumping `indexer-state-v2.json`
+// to `-v3` etc. discards stale cold flags carried over from prior buggy
+// versions of this code.
+const COLD_FAILURE_THRESHOLD = 3;        // 3 explicit signals → cold
 const COLD_FAILURE_WINDOW_MS = 10 * 60 * 1000; // within 10 minutes
 const COLD_MS = 60 * 60 * 1000;          // cold for 1 hour
 const indexerState = new Map();          // name → { failures: [ts], coldUntil, reason }
 
 const INDEXER_STATE_FILE = (() => {
     const dir = getCacheDir();
-    return dir ? path.join(dir, 'indexer-state.json') : null;
+    // v3: previous versions over-eagerly marked indexers cold on generic 5xx
+    // "Invalid torrent file contents" responses, which are common harmless
+    // failures. Renaming the file forces a clean slate so users upgrading
+    // past this commit don't carry over wrong cold flags.
+    return dir ? path.join(dir, 'indexer-state-v3.json') : null;
 })();
 
 function loadIndexerStateFromDisk() {
@@ -229,6 +239,21 @@ function getColdIndexers() {
     return out;
 }
 
+// Wipe all cold-state. Wired to /cache/clear so users can recover from a
+// stale wrong-cold flag without restarting the launcher. Also clears the
+// on-disk persistence so the bad state doesn't come back next boot.
+function clearAllColdState() {
+    const cleared = indexerState.size;
+    indexerState.clear();
+    if (INDEXER_STATE_FILE) {
+        try { fs.unlinkSync(INDEXER_STATE_FILE); } catch { /* not present is fine */ }
+    }
+    if (cleared > 0) {
+        console.log(`[prowlarr] cleared ${cleared} indexer cold-state entries`);
+    }
+    return cleared;
+}
+
 /**
  * Resolve a Prowlarr downloadUrl to an infoHash.
  *
@@ -254,26 +279,47 @@ function getColdIndexers() {
  *   - reason 'network'         — fetch threw (DNS/TCP/timeout)
  */
 
-// Matches ANY of these body patterns → treat as quota/limit exhaustion.
-// Prowlarr wraps the upstream HTML as "Invalid torrent file contents"; the
-// HTML itself often also contains literal "daily limit" / "quota exceeded"
-// / "too many" / "reached the limit" / "download limit" strings. We match
-// permissively so a future Prowlarr wording change doesn't silently break
-// detection and burn quotas.
-const QUOTA_BODY_PATTERNS = [
-    /invalid\s+torrent\s+file/i,
-    /daily\s+(?:torrent\s+)?download\s+limit/i,
-    /download\s+limit/i,
-    /quota\s+exceeded/i,
-    /rate.?limit/i,
-    /too\s+many\s+(?:torrent\s+)?downloads?/i,
-    /reached\s+(?:the\s+)?(?:daily\s+)?limit/i,
-    /your\s+current\s+limit/i,
+// STRICT quota body patterns — only match unambiguous, indexer-specific
+// quota wording. Generic phrases like "Invalid torrent file" or "rate
+// limit" used to be in this list but produced false positives on harmless
+// transient failures (Prowlarr wraps every .torrent fetch error as 500
+// "Invalid torrent file contents", which made every dead release look
+// like a quota block). These patterns must be narrow enough that matching
+// them is overwhelming evidence the upstream tracker is rate-limiting us.
+const STRONG_QUOTA_BODY_PATTERNS = [
+    // PornoLab exact wording: "Your current limit is 5 per day"
+    /current\s+limit\s+is\s+\d+\s+per\s+day/i,
+    // "you've reached your daily torrent download limit"
+    /(?:reached|exceeded)\s+(?:your\s+)?daily\s+(?:torrent\s+)?download\s+limit/i,
+    // "X torrents per day"
+    /\d+\s+torrents?\s+per\s+day/i,
+    // "daily quota of N"
+    /daily\s+quota\s+of\s+\d+/i,
+    // very explicit "quota exceeded" — tracker UI strings often phrase it this way
+    /(?:download\s+)?quota\s+(?:has\s+been\s+)?exceeded/i,
 ];
 
-function bodyLooksLikeQuota(body) {
+function bodyLooksLikeStrictQuota(body) {
     if (!body) return false;
-    return QUOTA_BODY_PATTERNS.some(re => re.test(body));
+    return STRONG_QUOTA_BODY_PATTERNS.some(re => re.test(body));
+}
+
+// STRICT auth-redirect patterns. A 3xx Location header pointing at one of
+// these is overwhelming evidence the tracker is gating us behind a login
+// or quota wall. Bare /login/ in a path is too generic — matches things
+// like "/login-help" docs — so we anchor the patterns to known URL shapes.
+const STRONG_AUTH_REDIRECT_PATTERNS = [
+    /\?(?:redirect|return)=.*login/i,
+    /\/(?:login|signin|sign-in)(?:[/?#]|$)/i,
+    /\/account\/login(?:[/?#]|$)/i,
+    /\/(?:captcha|recaptcha)(?:[/?#]|$)/i,
+    /quota[_-]?exceeded/i,
+    /daily[_-]?limit/i,
+];
+
+function locationLooksLikeAuthWall(loc) {
+    if (!loc) return false;
+    return STRONG_AUTH_REDIRECT_PATTERNS.some(re => re.test(loc));
 }
 
 async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}) {
@@ -297,12 +343,14 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}
         // when trying to follow a magnet: URI. Intercept the 3xx ourselves.
         const res = await fetch(downloadUrl, { redirect: 'manual', timeout: 7000 });
 
-        // Explicit rate-limit signals from the tracker or Prowlarr itself.
+        // ----- HARD signals: definitive proof the indexer is rate-limiting us
+        // 429 with explicit Retry-After or "rate limit" semantics — RFC-defined.
         if (res.status === 429) {
             markIndexerColdNow(indexer, 'http_429');
             return { infoHash: null, reason: 'quota_exceeded' };
         }
 
+        // ----- Redirects (3xx)
         if (res.status >= 300 && res.status < 400) {
             const loc = res.headers.get('location') || '';
             const magnetMatch = loc.match(/btih:([a-fA-F0-9]{40})/i);
@@ -313,17 +361,17 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}
                 recordIndexerSuccess(indexer);
                 return { infoHash: hash, reason: 'magnet_redirect' };
             }
-            // Non-magnet redirect is usually a login wall or a "quota exceeded"
-            // landing page. DON'T negative-cache to disk — the quota resets
-            // daily and the user can log back in. Just report bad_bytes and
-            // let the failure counter catch up if it keeps happening.
-            if (/login|signin|account|quota|limit|captcha/i.test(loc)) {
-                // This is almost certainly a quota/auth redirect. Mark the
-                // indexer cold immediately so we don't retry through the day.
-                markIndexerColdNow(indexer, 'auth_or_quota_redirect');
+            // Strict auth-wall redirect → mark cold. Generic 3xx (e.g. CDN
+            // redirect that just doesn't carry a magnet) is treated as a
+            // soft failure — we shouldn't punish a whole indexer for one
+            // weird release.
+            if (locationLooksLikeAuthWall(loc)) {
+                markIndexerColdNow(indexer, 'auth_redirect');
                 return { infoHash: null, reason: 'quota_exceeded' };
             }
-            recordIndexerFailure(indexer, 'bad_redirect');
+            // Soft failure — don't count toward cold-state. Just report
+            // bad_bytes so the frontend shows "could not resolve, try
+            // another result".
             return { infoHash: null, reason: 'bad_bytes' };
         }
 
@@ -342,43 +390,56 @@ async function resolveInfoHashFromDownloadUrl(downloadUrl, { indexer = '' } = {}
                     }
                 } catch { /* fall through to bad_bytes */ }
             }
-            // 2xx non-bencode → upstream served HTML. Inspect it: a quota-page
-            // HTML ("You've reached your daily torrent download limit") is the
-            // strongest signal we have of a ratio block. Everything else that
-            // lands here (login wall, generic error page) is also not worth
-            // retrying in the short term.
+            // 2xx non-bencode → upstream served HTML. Only treat as quota
+            // when the body contains explicit "X per day" / "daily download
+            // limit" wording. A bare HTML page with no such markers might
+            // be a CDN error page, a 200-disguised "release deleted" notice,
+            // or a captcha challenge that doesn't say "limit" — none of
+            // those should poison the indexer for an hour.
             const text = buf.toString('utf8', 0, Math.min(buf.length, 4096));
-            if (bodyLooksLikeQuota(text)) {
+            if (bodyLooksLikeStrictQuota(text)) {
                 markIndexerColdNow(indexer, 'quota_body_2xx');
                 return { infoHash: null, reason: 'quota_exceeded' };
             }
-            recordIndexerFailure(indexer, 'non_bencode_2xx');
+            // Soft failure — try again next time, don't penalise the indexer.
             return { infoHash: null, reason: 'bad_bytes' };
         }
 
-        // 5xx bodies: Prowlarr wraps upstream HTML as "Invalid torrent file
-        // contents" (the fingerprint for PornoLab's 5/day cap being hit).
-        // Accept any matching body pattern on 500/502/503.
+        // 5xx — Prowlarr wraps every upstream .torrent fetch failure as
+        // "Invalid torrent file contents" (HTTP 500). That generic wrapper
+        // does NOT mean quota; it means Prowlarr couldn't parse the bytes
+        // it got back, which happens for many reasons (release deleted,
+        // tracker hiccup, transient network blip). We ONLY mark cold when
+        // the wrapped body contains explicit per-day quota wording.
         if (res.status >= 500 && res.status < 600) {
             let body = '';
             try { body = await res.text(); } catch { /* ignore */ }
-            if (bodyLooksLikeQuota(body)) {
+            if (bodyLooksLikeStrictQuota(body)) {
                 markIndexerColdNow(indexer, `http_${res.status}_quota`);
                 return { infoHash: null, reason: 'quota_exceeded' };
             }
+            // Soft failure — random 5xx is a routine occurrence; don't
+            // penalise the indexer just for serving a stale release.
+            return { infoHash: null, reason: 'bad_bytes' };
         }
 
-        // 403 Forbidden almost always means auth/ratio block. Mark cold.
+        // 403 Forbidden — could be auth/ratio block, but on public adult
+        // indexers it's also commonly returned for region-blocked or stale
+        // releases. Count it as a hard failure that contributes to the
+        // 3-in-10-min cold threshold but DOESN'T immediately mark cold on
+        // a single occurrence.
         if (res.status === 403) {
-            markIndexerColdNow(indexer, 'http_403');
-            return { infoHash: null, reason: 'quota_exceeded' };
+            recordIndexerFailure(indexer, 'http_403');
+            return { infoHash: null, reason: 'bad_bytes' };
         }
 
-        recordIndexerFailure(indexer, 'http_' + res.status);
-        return { infoHash: null, reason: 'http_error' };
+        // Other 4xx (404, 410 etc) — release is gone, indexer is fine.
+        // Soft failure.
+        return { infoHash: null, reason: 'bad_bytes' };
     } catch (err) {
-        recordIndexerFailure(indexer, 'network');
-        // Don't negative-cache network failures — try again next time.
+        // Network error — DON'T penalise the indexer; the user's connection
+        // might be flaky, or the indexer might just be slow today. The
+        // aggregate timeout in searchProwlarr already protects us.
         return { infoHash: null, reason: 'network' };
     }
 }
@@ -724,4 +785,5 @@ module.exports = {
     isIndexerCold,
     getIndexerColdInfo,
     getColdIndexers,
+    clearAllColdState,
 };

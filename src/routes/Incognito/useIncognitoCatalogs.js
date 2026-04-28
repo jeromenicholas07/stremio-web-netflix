@@ -12,7 +12,9 @@ const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 // JSON on every render.
 const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
 const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const LS_KEY = 'incognito_catalogs_cache_v1';
+// v2: see useIncognitoSearch.js — drops cached metas containing stale
+// `cold: true` flags from the over-eager addon cold-state era.
+const LS_KEY = 'incognito_catalogs_cache_v2';
 const _catalogsCache = new Map(); // addonUrl -> { ts, catalogs }
 
 function safeParse(raw) {

@@ -41,8 +41,11 @@ const TRACKERS = [
     'udp://open.stealth.si:80/announce',
 ];
 
-const VIDEO_EXT_RE = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts|vob|ogv|3gp|divx|xvid)$/i;
-const NON_VIDEO_EXT_RE = /\.(txt|nfo|jpg|jpeg|png|gif|srt|ass|idx|sub|url|html|htm|md5|sfv|par2|rar|zip|7z)$/i;
+const VIDEO_EXT_RE = /\.(mp4|mkv|avi|mov|wmv|flv|webm|m4v|mpg|mpeg|ts|m2ts|vob|ogv|3gp|divx|xvid|asf|rm|rmvb|f4v|mts|qt|dat)$/i;
+// Anything we KNOW isn't video. Critically excludes archive formats (rar/zip/
+// 7z) — adult releases sometimes ship as multi-part archives, and we
+// definitely can't stream those through RD; they'd just confuse the picker.
+const NON_VIDEO_EXT_RE = /\.(txt|nfo|jpg|jpeg|png|gif|bmp|webp|tif|tiff|srt|ass|ssa|idx|sub|vtt|url|html|htm|css|js|json|xml|md5|sfv|par2|rar|zip|7z|tar|gz|bz2|iso|cue|m3u|m3u8|exe|dll|bat|sh|log|db|sqlite|cfg|ini)$/i;
 
 function magnetFor(infoHash, title) {
     const dn = title ? `&dn=${encodeURIComponent(title)}` : '';
@@ -54,11 +57,13 @@ function isVideoFile(path, bytes) {
     const p = String(path || '').toLowerCase();
     if (NON_VIDEO_EXT_RE.test(p)) return false;
     if (VIDEO_EXT_RE.test(p)) return true;
-    // Some releases ship videos without an extension. Treat files > 50 MB
-    // without a known non-video extension as probable videos — RD's
-    // transcoder will reject them later if we're wrong, but in practice
-    // this catches many niche releases.
-    return Number(bytes) > 50 * 1024 * 1024;
+    // Unknown / no extension: fall back to size. 20 MB is the realistic
+    // floor for a streamable video clip — short adult clips routinely
+    // weigh 30-100 MB, while non-video junk (samples, screenshots) is
+    // almost always smaller. The previous 50 MB cutoff was excluding
+    // legitimate compilations and short releases, leaving the picker
+    // empty when the torrent had no recognised extension.
+    return Number(bytes) > 20 * 1024 * 1024;
 }
 
 function pickLargestVideoIdx(files) {

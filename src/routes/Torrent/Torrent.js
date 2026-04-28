@@ -308,15 +308,13 @@ const Torrent = ({ urlParams }) => {
             // .torrent bytes, breaking the server-side enrichment step).
             let hash = infoHash;
             if (!hash || hash.length < 16) {
-                // Short-circuit: the catalog already told us this indexer is
-                // ratio-capped. Don't even hit the addon — tell the user
-                // immediately and save both of us a round-trip.
-                if (payload.cold) {
-                    const indexerName = payload.indexer || 'This indexer';
-                    const mins = payload.coldMinutesRemaining || 60;
-                    setError(`${indexerName} daily limit reached — try another indexer (retries in ~${mins}min)`);
-                    return;
-                }
+                // We deliberately do NOT short-circuit on payload.cold here.
+                // The frontend caches catalog metas in localStorage for hours,
+                // which means a stale `cold: true` flag from a previous
+                // (over-eager) version of the addon would lock the user out
+                // of every release on that indexer until cache expiry — even
+                // after the addon was fixed. Always go through the resolver
+                // so the live cold state on the addon is what matters.
                 const dl = payload.downloadUrl || '';
                 const mag = payload.magnetUrl || '';
                 if (!dl && !mag) { setError('Torrent has no infoHash'); return; }

@@ -10,13 +10,25 @@ const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
 const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 50;
-const LS_KEY = 'incognito_search_cache_v1';
+// v2: previous versions baked a `cold: true` flag into cached metas based
+// on over-eager addon-side cold-state. Bumping the cache key drops those
+// stale entries on upgrade so users don't get locked into bogus "daily
+// limit reached" errors on every click.
+const LS_KEY = 'incognito_search_cache_v2';
 
 // Each search pulls down a full page at a time and can keep appending more
 // via `loadMore()`. PAGE_SIZE is the client-side request — addon clamps to
 // 200 and Prowlarr caps at whatever the indexer yields, so we ask for 100
 // and accept whatever comes back.
 const PAGE_SIZE = 100;
+// Auto-fill: keep paginating after first paint until the grid contains at
+// least this many entries (or the upstream runs out). Adult indexers
+// frequently return 40-80 raw items per query, which after dedupe leaves
+// a sparse first page; chaining loadMore() invisibly fills the grid to a
+// satisfying density without any user scroll. Hard-capped by AUTO_FILL_MAX
+// loadMore calls so a misbehaving addon doesn't trigger an infinite loop.
+const AUTO_FILL_TARGET = 100;
+const AUTO_FILL_MAX_PAGES = 5;
 
 const _searchCache = new Map();
 
@@ -146,10 +158,13 @@ const useIncognitoSearch = (query) => {
     const hasMoreRef = React.useRef(true);
     const loadingMoreRef = React.useRef(false);
     const abortRef = React.useRef(null);
+    // Per-query auto-fill page counter; resets when `cacheKey` changes.
+    const autoFillCountRef = React.useRef(0);
 
     React.useEffect(() => { resultsRef.current = results; }, [results]);
     React.useEffect(() => { hasMoreRef.current = hasMore; }, [hasMore]);
     React.useEffect(() => { loadingMoreRef.current = loadingMore; }, [loadingMore]);
+    React.useEffect(() => { autoFillCountRef.current = 0; }, [cacheKey]);
 
     // First-page load (stale-while-revalidate + cache seed).
     React.useEffect(() => {
@@ -164,13 +179,16 @@ const useIncognitoSearch = (query) => {
         const entry = readCacheEntry(cacheKey);
         const cls = classifyEntry(entry);
 
-        // Fresh cache — no network work, assume more pages may exist on
-        // further scrolling (the cache only stores page 1).
+        // Fresh cache — no network work. Assume more pages may exist
+        // (the cache only stores page 1) and let the auto-fill effect
+        // top up to AUTO_FILL_TARGET if the cache held fewer entries.
         if (cls === 'fresh') {
             setResults(entry.metas);
             setLoading(false);
             setStale(false);
-            setHasMore(entry.metas.length >= PAGE_SIZE);
+            // Be optimistic about hasMore — we only set it false when a
+            // loadMore call returns zero NEW (post-dedupe) items.
+            setHasMore(entry.metas.length > 0);
             return undefined;
         }
 
@@ -186,13 +204,13 @@ const useIncognitoSearch = (query) => {
             setResults(entry.metas);
             setLoading(false);
             setStale(true);
-            setHasMore(entry.metas.length >= PAGE_SIZE);
+            setHasMore(entry.metas.length > 0);
             doFetch()
                 .then((metas) => {
                     writeCacheEntry(cacheKey, metas);
                     setResults(metas);
                     setStale(false);
-                    setHasMore(metas.length >= PAGE_SIZE);
+                    setHasMore(metas.length > 0);
                 })
                 .catch((err) => {
                     if (err.name !== 'AbortError') {
@@ -212,7 +230,8 @@ const useIncognitoSearch = (query) => {
                 setResults(metas);
                 setLoading(false);
                 setStale(false);
-                setHasMore(metas.length >= PAGE_SIZE);
+                // hasMore stays true unless we KNOW the upstream is empty.
+                setHasMore(metas.length > 0);
             })
             .catch((err) => {
                 if (err.name === 'AbortError') return;
@@ -226,7 +245,10 @@ const useIncognitoSearch = (query) => {
     }, [trimmed, addonUrl, cacheKey]);
 
     // Append the next page of results. Safe to call repeatedly: guards on
-    // `loadingMore` + `hasMore` via refs.
+    // `loadingMore` + `hasMore` via refs. Detects exhaustion based on NEW
+    // (post-dedupe) item count, not raw page length — Prowlarr's offset
+    // semantics mean later pages often contain duplicates of earlier
+    // pages after the addon's cross-indexer dedupe.
     const loadMore = React.useCallback(async () => {
         if (!trimmed || !addonUrl) return;
         if (loadingMoreRef.current || !hasMoreRef.current) return;
@@ -243,9 +265,15 @@ const useIncognitoSearch = (query) => {
                 setHasMore(false);
             } else {
                 const merged = dedupeById([...resultsRef.current, ...next]);
-                setResults(merged);
-                // Prowlarr exhausted if the page came back short of PAGE_SIZE.
-                setHasMore(next.length >= PAGE_SIZE);
+                const newItemsCount = merged.length - currentLen;
+                if (newItemsCount === 0) {
+                    // Every item was already in our results — Prowlarr
+                    // genuinely has nothing new to give us. Stop paginating.
+                    setHasMore(false);
+                } else {
+                    setResults(merged);
+                    setHasMore(true);
+                }
             }
         } catch (err) {
             console.warn('[incognito-search] loadMore failed:', err);
@@ -256,6 +284,26 @@ const useIncognitoSearch = (query) => {
             setLoadingMore(false);
         }
     }, [trimmed, addonUrl]);
+
+    // Auto-fill: chain loadMore() until results.length >= AUTO_FILL_TARGET
+    // or the upstream is exhausted (or we hit the safety cap). This makes
+    // the first paint of a fresh query feel "full" — adult indexers
+    // routinely return 50-80 items per query before dedupe, leaving a
+    // sparse grid that the user would otherwise have to scroll to top up.
+    React.useEffect(() => {
+        if (loading) return undefined;
+        if (loadingMore) return undefined;
+        if (!hasMore) return undefined;
+        if (results.length === 0) return undefined;
+        if (results.length >= AUTO_FILL_TARGET) return undefined;
+        if (autoFillCountRef.current >= AUTO_FILL_MAX_PAGES) return undefined;
+
+        autoFillCountRef.current += 1;
+        // Defer to next tick so React commits this render first; loadMore
+        // toggles loadingMore which we read on the next pass.
+        const t = setTimeout(() => loadMore(), 0);
+        return () => clearTimeout(t);
+    }, [results.length, loading, loadingMore, hasMore, loadMore]);
 
     return { results, loading, loadingMore, stale, hasMore, loadMore, query: query || '' };
 };

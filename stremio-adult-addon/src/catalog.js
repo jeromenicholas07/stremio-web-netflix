@@ -233,12 +233,20 @@ async function handleCatalog(catalogId, extra = {}) {
         query = genre;
     }
 
+    // Ask Prowlarr for MORE than `limit` so dedupe + filtering don't shrink
+    // the result set below what the user asked for. Cross-indexer duplicates
+    // (same release on multiple trackers) and items without any playable id
+    // get dropped after this fetch — without overshoot we'd routinely return
+    // 60 cards when the user requested 100. Capped at 250 so Prowlarr's
+    // own aggregate-budget doesn't push back.
+    const fetchLimit = Math.min(Math.max(limit * 2, 200), 250);
+
     let items;
     try {
         items = await searchProwlarr({
             query,
             offset: skip,
-            limit,
+            limit: fetchLimit,
             sortBy,
         });
     } catch (err) {

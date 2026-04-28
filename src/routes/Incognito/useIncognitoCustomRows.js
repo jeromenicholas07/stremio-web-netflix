@@ -7,7 +7,9 @@ const React = require('react');
 // Prowlarr every time (cold searches can take 15–30 s).
 
 const ROWS_KEY = 'incognito_custom_rows';
-const CACHE_PREFIX = 'incognito_custom_row_cache:';
+// v2 prefix bump: drops cached metas carrying stale `cold: true` flags
+// from the over-eager addon cold-state era.
+const CACHE_PREFIX = 'incognito_custom_row_cache_v2:';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const ROWS_CHANGED_EVENT = 'incognito:custom-rows-changed';
 
