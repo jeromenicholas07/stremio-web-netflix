@@ -143,16 +143,30 @@ async function getOrCreateListing({ infoHash, title, token }) {
     }
     const torrentId = addRes.body.id;
 
+    // Wait up to 15s for RD to populate the file list. Cached magnets
+    // populate instantly; uncached ones can take 5-15s while RD finds
+    // peers and fetches the metadata. The previous 4.8s budget caused
+    // the multi-file picker to silently miss legit multi-video torrents
+    // whenever RD hadn't seen the magnet before.
     let info = null;
-    for (let i = 0; i < 6; i++) {
+    let lastStatus = '';
+    for (let i = 0; i < 15; i++) {
         const r = await rdFetch(token, 'GET', `/torrents/info/${torrentId}`);
-        if (r.ok && r.body && Array.isArray(r.body.files) && r.body.files.length > 0) {
-            info = r.body;
-            break;
+        if (r.ok && r.body) {
+            lastStatus = r.body.status || '';
+            if (Array.isArray(r.body.files) && r.body.files.length > 0) {
+                info = r.body;
+                break;
+            }
+            // Bail early on definitive failure states — no point waiting.
+            if (lastStatus === 'magnet_error' || lastStatus === 'error' ||
+                lastStatus === 'virus' || lastStatus === 'dead') {
+                throw new Error(`RD magnet failed: status=${lastStatus}`);
+            }
         }
-        await new Promise(r => setTimeout(r, 800));
+        await new Promise(r => setTimeout(r, 1000));
     }
-    if (!info) throw new Error('RD never returned a file list for this magnet');
+    if (!info) throw new Error(`RD never returned a file list (last status: ${lastStatus || 'unknown'})`);
 
     const entry = { torrentId, files: info.files, infoHash: normalized };
     listingCache.set(cacheKey, entry);

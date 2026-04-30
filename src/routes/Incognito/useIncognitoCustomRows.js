@@ -2,15 +2,25 @@ const React = require('react');
 
 // User-defined catalog rows inside the Incognito tab. Each row is just a
 // saved search query — we hit the addon's adult-search endpoint and treat
-// the results as a MetaRow catalog. Cached for 24 h per row in
-// localStorage so switching tabs / reopening the app doesn't re-hit
-// Prowlarr every time (cold searches can take 15–30 s).
+// the results as a MetaRow catalog.
+//
+// Caching strategy: stale-while-revalidate with aggregation.
+//   FRESH (3 h)  → paint cache, do nothing.
+//   STALE (30 d) → paint cache immediately, refresh in the background,
+//                  MERGE the fresh metas into the cached list (caching is
+//                  aggregative — items from past refreshes are kept even
+//                  when Prowlarr cycles them out).
+// This is what makes custom rows feel instant on every visit instead of
+// triggering a 15-30 s Prowlarr cold search every time the user opens
+// the tab. Hard-capped per-row at MAX_PER_ROW to bound localStorage use.
 
 const ROWS_KEY = 'incognito_custom_rows';
 // v2 prefix bump: drops cached metas carrying stale `cold: true` flags
 // from the over-eager addon cold-state era.
 const CACHE_PREFIX = 'incognito_custom_row_cache_v2:';
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
+const STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MAX_PER_ROW = 300;
 const ROWS_CHANGED_EVENT = 'incognito:custom-rows-changed';
 
 const ADDON_URL_KEY = 'incognito_addon_url';
@@ -50,8 +60,9 @@ function readCache(id) {
         if (!raw) return null;
         const parsed = JSON.parse(raw);
         if (!parsed || typeof parsed.ts !== 'number' || !Array.isArray(parsed.metas)) return null;
-        if (Date.now() - parsed.ts > CACHE_TTL_MS) return null;
-        return parsed.metas;
+        const age = Date.now() - parsed.ts;
+        if (age > STALE_TTL_MS) return null;
+        return { metas: parsed.metas, fresh: age < FRESH_TTL_MS };
     } catch (_e) {
         return null;
     }
@@ -61,6 +72,26 @@ function writeCache(id, metas) {
     try {
         localStorage.setItem(CACHE_PREFIX + id, JSON.stringify({ ts: Date.now(), metas }));
     } catch (_e) { /* ignore quota */ }
+}
+
+// Merge fresh fetch into cached metas (fresh wins on collision, cached-
+// only items appended). Capped at MAX_PER_ROW.
+function mergeMetas(cachedMetas, freshMetas) {
+    if (!Array.isArray(cachedMetas) || cachedMetas.length === 0) {
+        return Array.isArray(freshMetas) ? freshMetas.slice(0, MAX_PER_ROW) : [];
+    }
+    if (!Array.isArray(freshMetas) || freshMetas.length === 0) {
+        return cachedMetas.slice(0, MAX_PER_ROW);
+    }
+    const seen = new Set();
+    const out = [];
+    for (const m of freshMetas) {
+        if (m && m.id && !seen.has(m.id)) { seen.add(m.id); out.push(m); }
+    }
+    for (const m of cachedMetas) {
+        if (m && m.id && !seen.has(m.id)) { seen.add(m.id); out.push(m); }
+    }
+    return out.slice(0, MAX_PER_ROW);
 }
 
 function clearCache(id) {
@@ -92,7 +123,9 @@ function useIncognitoCustomRows() {
         const m = {};
         for (const r of readRows()) {
             const cached = readCache(r.id);
-            m[r.id] = { status: cached ? 'ready' : 'loading', metas: cached || [] };
+            m[r.id] = cached
+                ? { status: cached.fresh ? 'ready' : 'stale', metas: cached.metas }
+                : { status: 'loading', metas: [] };
         }
         return m;
     });
@@ -109,6 +142,7 @@ function useIncognitoCustomRows() {
     }, []);
 
     // Fetch any rows that don't have fresh cache. Re-runs when rows change.
+    // Stale rows: paint cached immediately, refresh in background, merge.
     React.useEffect(() => {
         const controller = new AbortController();
         let cancelled = false;
@@ -119,7 +153,9 @@ function useIncognitoCustomRows() {
             for (const r of rows) {
                 if (!next[r.id]) {
                     const cached = readCache(r.id);
-                    next[r.id] = { status: cached ? 'ready' : 'loading', metas: cached || [] };
+                    next[r.id] = cached
+                        ? { status: cached.fresh ? 'ready' : 'stale', metas: cached.metas }
+                        : { status: 'loading', metas: [] };
                 }
             }
             // Drop state for removed rows so the map doesn't grow forever.
@@ -131,20 +167,28 @@ function useIncognitoCustomRows() {
         (async () => {
             for (const row of rows) {
                 if (cancelled) return;
-                if (readCache(row.id)) continue; // already fresh
+                const cached = readCache(row.id);
+                // Fresh cache → no fetch needed.
+                if (cached && cached.fresh) continue;
+                // Stale or missing — fetch in background and merge.
                 try {
                     const metas = await fetchQuery(row.query, controller.signal);
                     if (cancelled) return;
-                    writeCache(row.id, metas);
+                    const merged = mergeMetas(cached ? cached.metas : [], metas);
+                    writeCache(row.id, merged);
                     setDataById(prev => ({
                         ...prev,
-                        [row.id]: { status: 'ready', metas },
+                        [row.id]: { status: 'ready', metas: merged },
                     }));
                 } catch (err) {
                     if (err.name === 'AbortError' || cancelled) return;
+                    // On error, keep showing stale data if we have it;
+                    // only flip to 'error' on a true cold miss.
                     setDataById(prev => ({
                         ...prev,
-                        [row.id]: { status: 'error', metas: [] },
+                        [row.id]: cached
+                            ? { status: 'ready', metas: cached.metas }
+                            : { status: 'error', metas: [] },
                     }));
                 }
             }

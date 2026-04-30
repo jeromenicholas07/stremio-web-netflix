@@ -172,7 +172,7 @@ const SearchBar = React.memo(({ className, query, active, context }) => {
                                 </button>
                             </div>
                             {
-                                incognitoSuggestions.map(({ query: q }, index) => (
+                                incognitoSuggestions.map(({ query: q, kind }, index) => (
                                     <div
                                         key={index}
                                         className={classnames(styles['item'], styles['incognito-item'])}
@@ -188,18 +188,20 @@ const SearchBar = React.memo(({ className, query, active, context }) => {
                                         >
                                             {q}
                                         </a>
-                                        <button
-                                            className={styles['incognito-item-remove']}
-                                            title="Remove from history"
-                                            type="button"
-                                            onClick={(e) => {
-                                                e.preventDefault();
-                                                e.stopPropagation();
-                                                incognitoSearchHistory.removeEntry(q);
-                                            }}
-                                        >
-                                            <Icon className={styles['icon']} name={'close'} />
-                                        </button>
+                                        {kind === 'history' ? (
+                                            <button
+                                                className={styles['incognito-item-remove']}
+                                                title="Remove from history"
+                                                type="button"
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    incognitoSearchHistory.removeEntry(q);
+                                                }}
+                                            >
+                                                <Icon className={styles['icon']} name={'close'} />
+                                            </button>
+                                        ) : null}
                                     </div>
                                 ))
                             }

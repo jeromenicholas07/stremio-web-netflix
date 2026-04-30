@@ -5,13 +5,20 @@ const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 
 // Catalogs cache has two TTLs:
 //   FRESH (3 h) — serve, do nothing else.
-//   STALE (7 d) — serve immediately, kick off a background refresh, then
-//                 swap in the new data once it arrives.
+//   STALE (30 d) — serve immediately, kick off a background refresh, then
+//                  MERGE the fresh data into the cached list. The cache is
+//                  aggregative: previously-discovered metas are kept even
+//                  when Prowlarr cycles them out of its top-N, so the user
+//                  builds up a growing local library of releases.
 // The store lives in localStorage so a cold browser start still paints
 // instantly, and in an in-memory Map as a hot path so we don't re-parse
 // JSON on every render.
 const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
-const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// Hard cap per catalog row to avoid unbounded localStorage growth. 300 is
+// comfortably more than any infinite-scroll session and keeps JSON
+// serialisation under ~500 KB per addonUrl entry.
+const MAX_PER_CATALOG = 300;
 // v2: see useIncognitoSearch.js — drops cached metas containing stale
 // `cold: true` flags from the over-eager addon cold-state era.
 const LS_KEY = 'incognito_catalogs_cache_v2';
@@ -84,6 +91,38 @@ function getAddonUrl() {
     if (stored && stored.trim()) return stored.trim().replace(/\/+$/, '');
     // Fall back to the bundled addon shipped with StremioLauncherFULL
     return DEFAULT_ADDON_URL;
+}
+
+// Merge a freshly-fetched catalog list into the cached catalogs. Same
+// catalog IDs are merged at the meta level: fresh metas come first
+// (newer data wins), cached-only metas are appended so the user keeps
+// access to releases that aged out of Prowlarr's current top-N.
+function mergeCatalogs(cached, fresh, maxPerCatalog = MAX_PER_CATALOG) {
+    if (!Array.isArray(cached) || cached.length === 0) return Array.isArray(fresh) ? fresh : [];
+    if (!Array.isArray(fresh) || fresh.length === 0) return cached;
+
+    // Build a quick lookup of cached metas by catalog ID.
+    const cachedById = new Map();
+    for (const cat of cached) {
+        if (cat && cat.id) cachedById.set(cat.id, cat);
+    }
+
+    return fresh.map((cat) => {
+        if (!cat || !cat.id) return cat;
+        const old = cachedById.get(cat.id);
+        if (!old || old.content?.type !== 'Ready' || cat.content?.type !== 'Ready') return cat;
+        const oldMetas = Array.isArray(old.content.content) ? old.content.content : [];
+        const newMetas = Array.isArray(cat.content.content) ? cat.content.content : [];
+        const seen = new Set();
+        const merged = [];
+        for (const m of newMetas) {
+            if (m && m.id && !seen.has(m.id)) { seen.add(m.id); merged.push(m); }
+        }
+        for (const m of oldMetas) {
+            if (m && m.id && !seen.has(m.id)) { seen.add(m.id); merged.push(m); }
+        }
+        return { ...cat, content: { type: 'Ready', content: merged.slice(0, maxPerCatalog) } };
+    });
 }
 
 /**
@@ -161,17 +200,18 @@ const useIncognitoCatalogs = () => {
             }
             if (cls === 'stale') {
                 // Stale-while-revalidate: paint the stale data right now,
-                // then silently refresh in the background. We fall through
-                // to the network fetch below but WITHOUT flipping loading
-                // to true — the UI keeps rendering stale cards the whole
-                // time.
+                // then silently refresh in the background. The refresh
+                // MERGES new metas into the cached list rather than
+                // replacing — releases that have aged out of Prowlarr's
+                // current top-N stay accessible via cache.
                 setCatalogs(entry.catalogs);
                 setLoading(false);
                 setStale(true);
                 try {
                     const catalogsOut = await fetchFromNetwork();
-                    writeCacheEntry(addonUrl, catalogsOut);
-                    setCatalogs(catalogsOut);
+                    const merged = mergeCatalogs(entry.catalogs, catalogsOut);
+                    writeCacheEntry(addonUrl, merged);
+                    setCatalogs(merged);
                     setStale(false);
                 } catch (err) {
                     console.warn('[incognito] stale refresh failed, keeping cached data:', err);
@@ -184,8 +224,16 @@ const useIncognitoCatalogs = () => {
         setLoading(true);
         try {
             const catalogsOut = await fetchFromNetwork();
-            writeCacheEntry(addonUrl, catalogsOut);
-            setCatalogs(catalogsOut);
+            // Even on cold path: if the in-memory Map happens to hold a
+            // stale entry from this session (e.g. user just clicked Clear
+            // cache), merge it back in so we don't lose accumulated
+            // history.
+            const memEntry = _catalogsCache.get(addonUrl);
+            const merged = memEntry && Array.isArray(memEntry.catalogs)
+                ? mergeCatalogs(memEntry.catalogs, catalogsOut)
+                : catalogsOut;
+            writeCacheEntry(addonUrl, merged);
+            setCatalogs(merged);
             setStale(false);
         } catch (err) {
             console.error('Failed to fetch incognito catalogs:', err);

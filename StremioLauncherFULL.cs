@@ -34,6 +34,16 @@ class StremioLauncherFULL
     // the user their Prowlarr setup — see `sharedProwlarrData` below.
     const string PAYLOAD_VERSION = "1.6.1";
 
+    // Bump ADDON_VERSION on every addon code change. The launcher checks
+    // <rootDir>\stremio-adult-addon\.addon-version against this on every
+    // start; on mismatch it re-downloads/extracts JUST the addon zip
+    // (~5MB, a few seconds) instead of forcing a full re-download via
+    // PAYLOAD_VERSION bump (~200MB). This is what makes "deploy a new
+    // addon" actually take effect on existing installs — the prior
+    // launcher only extracted the addon on first run, so users who'd
+    // already initialised stayed on stale buggy code forever.
+    const string ADDON_VERSION = "2026-04-30-strict-quota";
+
     // Portable Node.js — just need node.exe for the addon
     const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";
     // Prowlarr (portable, .NET-included build)
@@ -111,6 +121,10 @@ class StremioLauncherFULL
                 DownloadAndExtract("Incognito Addon", ADDON_URL, rootDir, "stremio-adult-addon");
                 DownloadFile("StremioLauncher.exe", BASE_LAUNCHER_URL, Path.Combine(rootDir, "StremioLauncher.exe"));
 
+                // Mark the addon as current-version so we don't re-extract
+                // it on the very next start.
+                WriteAddonVersionMarker(rootDir);
+
                 File.WriteAllText(marker, DateTime.UtcNow.ToString("o"));
                 Console.WriteLine();
                 Console.WriteLine("[OK] All components downloaded and extracted");
@@ -147,6 +161,19 @@ class StremioLauncherFULL
         KillByPort(PROWLARR_PORT);
         KillByPort(ADDON_PORT);
         KillByPort(FLARESOLVERR_PORT);
+
+        // Auto-update just the addon if the deployed version differs from
+        // what's on disk. Runs AFTER KillByPort so the addon process can't
+        // hold a file lock on its own files mid-replace. This is what makes
+        // "deploy a new addon" actually take effect on existing installs;
+        // without it, a pre-existing .ready marker means the addon is only
+        // ever extracted once.
+        EnsureAddonUpToDate(rootDir);
+
+        // Re-resolve the addon entry path now in case we just re-extracted
+        // (extraction may produce a slightly different layout depending on
+        // how the zip is structured).
+        addonEntry = FindFile(rootDir, "stremio-adult-addon", "index.js");
 
         // Prowlarr data: ALWAYS the shared dir, regardless of PAYLOAD_VERSION.
         // If this is a first install on a machine that previously ran an
@@ -266,6 +293,76 @@ class StremioLauncherFULL
 
         // Clean up the zip
         try { File.Delete(zipPath); } catch { }
+    }
+
+    /// <summary>
+    /// Re-download and extract just the addon zip if the on-disk version
+    /// marker doesn't match ADDON_VERSION. Idempotent — does nothing on
+    /// matching version. Failures are logged but non-fatal: the user keeps
+    /// running with whatever they had.
+    /// </summary>
+    static void EnsureAddonUpToDate(string rootDir)
+    {
+        string addonDir = Path.Combine(rootDir, "stremio-adult-addon");
+        string versionFile = Path.Combine(addonDir, ".addon-version");
+        string current = "";
+        try
+        {
+            if (File.Exists(versionFile))
+            {
+                current = File.ReadAllText(versionFile).Trim();
+            }
+        }
+        catch { /* unreadable → treat as outdated */ }
+
+        if (current == ADDON_VERSION)
+        {
+            return;
+        }
+
+        Console.WriteLine("[update] addon version mismatch — disk='" + (current.Length > 0 ? current : "(none)") +
+            "', wanted='" + ADDON_VERSION + "'");
+        Console.WriteLine("[update] re-downloading addon...");
+
+        // Wipe the old extract before unpacking the new one so stray files
+        // from the previous version don't linger (e.g. a removed dependency
+        // sitting in node_modules).
+        try
+        {
+            if (Directory.Exists(addonDir))
+            {
+                Directory.Delete(addonDir, true);
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[update] WARN: failed to wipe old addon dir (" + ex.Message + "); continuing anyway");
+        }
+
+        try
+        {
+            DownloadAndExtract("Incognito Addon (update)", ADDON_URL, rootDir, "stremio-adult-addon");
+            WriteAddonVersionMarker(rootDir);
+            Console.WriteLine("[update] addon updated to " + ADDON_VERSION);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[update] WARN: addon update failed (" + ex.Message + "); continuing with whatever's on disk");
+        }
+    }
+
+    static void WriteAddonVersionMarker(string rootDir)
+    {
+        try
+        {
+            string addonDir = Path.Combine(rootDir, "stremio-adult-addon");
+            Directory.CreateDirectory(addonDir);
+            File.WriteAllText(Path.Combine(addonDir, ".addon-version"), ADDON_VERSION);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[update] WARN: failed to write addon version marker: " + ex.Message);
+        }
     }
 
     /// <summary>

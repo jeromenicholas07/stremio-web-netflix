@@ -3,13 +3,24 @@ const React = require('react');
 const ADDON_URL_KEY = 'incognito_addon_url';
 const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 
-// Two-tier cache: fresh (<3h) render-and-done; stale (3h–7d) render
-// immediately then refresh in the background. Persist to localStorage so
-// a full browser restart still paints cached searches instantly. LRU-cap
-// to 50 most-recent queries to stay well under the 5 MB origin quota.
+// Two-tier cache: fresh (<3h) render-and-done; stale (3h–30d) render
+// immediately then refresh in the background, merging new items into the
+// existing set rather than replacing. Persist to localStorage so a full
+// browser restart still paints cached searches instantly. LRU-cap to 50
+// most-recent queries to stay well under the 5 MB origin quota.
+//
+// Cache is AGGREGATIVE: every refresh adds previously-unseen items to the
+// stored list (capped at MAX_PER_QUERY) so users build up a growing
+// library of releases over time. Items dropped by Prowlarr (deleted
+// releases) stay accessible from the cache; new releases prepend on top.
 const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
-const STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 50;
+// Hard cap on items stored per query, to keep a single search row from
+// dominating the 5 MB localStorage budget. 500 is comfortably large
+// (~25 cards per scroll, 20 scrolls deep) while keeping JSON
+// serialisation cheap.
+const MAX_PER_QUERY = 500;
 // v2: previous versions baked a `cold: true` flag into cached metas based
 // on over-eager addon-side cold-state. Bumping the cache key drops those
 // stale entries on upgrade so users don't get locked into bogus "daily
@@ -122,6 +133,28 @@ function dedupeById(list) {
     return out;
 }
 
+// Merge a freshly-fetched page into the existing cached metas. Fresh items
+// take precedence (they may carry updated seeders/leechers/quality), and
+// any cached items that aren't in the fresh batch are kept appended so the
+// user still sees previously-discovered releases that have aged out of
+// Prowlarr's current top-N. Cap at MAX_PER_QUERY so a year of refreshes
+// doesn't blow the localStorage quota.
+function mergeWithCache(existing, fresh, maxSize = MAX_PER_QUERY) {
+    if (!Array.isArray(existing) || existing.length === 0) {
+        return Array.isArray(fresh) ? fresh.slice(0, maxSize) : [];
+    }
+    if (!Array.isArray(fresh) || fresh.length === 0) {
+        return existing.slice(0, maxSize);
+    }
+    const freshIds = new Set();
+    for (const m of fresh) if (m && m.id) freshIds.add(m.id);
+    const merged = [...fresh];
+    for (const m of existing) {
+        if (m && m.id && !freshIds.has(m.id)) merged.push(m);
+    }
+    return merged.slice(0, maxSize);
+}
+
 /**
  * URL-driven search hook. The `query` argument is the source of truth —
  * it comes from the route (#/incognito/search/<urlencoded>).
@@ -200,15 +233,19 @@ const useIncognitoSearch = (query) => {
         });
 
         if (cls === 'stale') {
-            // Paint stale immediately, refresh in background.
+            // Paint stale immediately, refresh in background. The refresh
+            // MERGES new items into the existing cached set rather than
+            // replacing — over time the user accumulates releases that
+            // Prowlarr has since cycled out of its top-N for this query.
             setResults(entry.metas);
             setLoading(false);
             setStale(true);
             setHasMore(entry.metas.length > 0);
             doFetch()
                 .then((metas) => {
-                    writeCacheEntry(cacheKey, metas);
-                    setResults(metas);
+                    const merged = mergeWithCache(entry.metas, metas);
+                    writeCacheEntry(cacheKey, merged);
+                    setResults(merged);
                     setStale(false);
                     setHasMore(metas.length > 0);
                 })
@@ -272,6 +309,9 @@ const useIncognitoSearch = (query) => {
                     setHasMore(false);
                 } else {
                     setResults(merged);
+                    // Persist the grown grid back into the cache so the
+                    // user's accumulated results survive a tab close.
+                    writeCacheEntry(cacheKey, merged.slice(0, MAX_PER_QUERY));
                     setHasMore(true);
                 }
             }
@@ -283,7 +323,7 @@ const useIncognitoSearch = (query) => {
             loadingMoreRef.current = false;
             setLoadingMore(false);
         }
-    }, [trimmed, addonUrl]);
+    }, [trimmed, addonUrl, cacheKey]);
 
     // Auto-fill: chain loadMore() until results.length >= AUTO_FILL_TARGET
     // or the upstream is exhausted (or we hit the safety cap). This makes
