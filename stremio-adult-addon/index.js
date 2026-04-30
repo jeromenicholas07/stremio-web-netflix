@@ -1,5 +1,12 @@
 const http = require('http');
 const { addonBuilder, getRouter } = require('stremio-addon-sdk');
+
+// Bump this when shipping any addon change. Logged on startup so the
+// launcher console makes it obvious which addon is actually running —
+// invaluable when diagnosing "it's still the old version" reports
+// (zombie node processes, stale extracts, AV-blocked overwrites).
+const ADDON_INTERNAL_VERSION = '2026-04-30-strict-quota';
+
 const { handleCatalog, clearCatalogCache } = require('./src/catalog');
 const { handleSearch } = require('./src/search');
 const { handleMeta } = require('./src/meta');
@@ -152,6 +159,19 @@ const server = http.createServer((req, res) => {
         return;
     }
 
+    // /version — quick way to confirm which addon code is actually
+    // listening on this port. Useful when diagnosing "still on the old
+    // version" reports.
+    if (pathname === '/version') {
+        setCors(res);
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({
+            version: ADDON_INTERNAL_VERSION,
+            endpoints: ['/rd/resolve', '/rd/files', '/rd/resolve-url', '/cache/clear', '/version', '/status'],
+        }));
+        return;
+    }
+
     if (pathname === '/rd/resolve') {
         setCors(res);
         if (req.method === 'OPTIONS') { res.statusCode = 204; res.end(); return; }
@@ -204,9 +224,11 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(config.addonPort, () => {
-    console.log(`Incognito Catalogs addon running on port ${config.addonPort}`);
+    console.log(`=== Incognito Catalogs addon ${ADDON_INTERNAL_VERSION} ===`);
+    console.log(`Listening on port ${config.addonPort}`);
     console.log(`Manifest: http://127.0.0.1:${config.addonPort}/manifest.json`);
     console.log(`Config:   http://127.0.0.1:${config.addonPort}/config`);
+    console.log(`Endpoints: /rd/resolve, /rd/files, /rd/resolve-url, /cache/clear, /catalog/...`);
     console.log(`Prowlarr URL: ${config.prowlarrUrl}`);
     console.log(`Prowlarr API Key: ${config.prowlarrApiKey ? '(configured)' : '(NOT SET)'}`);
 

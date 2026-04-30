@@ -300,6 +300,13 @@ class StremioLauncherFULL
     /// marker doesn't match ADDON_VERSION. Idempotent — does nothing on
     /// matching version. Failures are logged but non-fatal: the user keeps
     /// running with whatever they had.
+    ///
+    /// Uses entry-by-entry overwrite extraction so that an antivirus or a
+    /// stuck Node child holding a single file doesn't poison the whole
+    /// update — files we CAN replace get replaced; ones we can't are
+    /// logged but don't abort the rest. The previous wipe-then-extract
+    /// approach failed entirely on locked files (extract throws on first
+    /// pre-existing entry), leaving the user on a half-updated addon.
     /// </summary>
     static void EnsureAddonUpToDate(string rootDir)
     {
@@ -317,37 +324,90 @@ class StremioLauncherFULL
 
         if (current == ADDON_VERSION)
         {
+            Console.WriteLine("[update] addon up to date (" + ADDON_VERSION + ")");
             return;
         }
 
         Console.WriteLine("[update] addon version mismatch — disk='" + (current.Length > 0 ? current : "(none)") +
             "', wanted='" + ADDON_VERSION + "'");
-        Console.WriteLine("[update] re-downloading addon...");
+        Console.WriteLine("[update] downloading fresh addon zip...");
 
-        // Wipe the old extract before unpacking the new one so stray files
-        // from the previous version don't linger (e.g. a removed dependency
-        // sitting in node_modules).
+        string zipPath = Path.Combine(rootDir, "stremio-adult-addon.update.zip");
         try
         {
-            if (Directory.Exists(addonDir))
+            using (var wc = new WebClient())
             {
-                Directory.Delete(addonDir, true);
+                // Bypass any stale CDN cache.
+                wc.Headers["Cache-Control"] = "no-cache";
+                wc.Headers["Pragma"] = "no-cache";
+                wc.DownloadFile(ADDON_URL + "?v=" + Uri.EscapeDataString(ADDON_VERSION), zipPath);
             }
+            long size = new FileInfo(zipPath).Length;
+            Console.WriteLine("[update] downloaded (" + (size / 1024) + " KB)");
         }
         catch (Exception ex)
         {
-            Console.WriteLine("[update] WARN: failed to wipe old addon dir (" + ex.Message + "); continuing anyway");
+            Console.WriteLine("[update] WARN: addon download failed (" + ex.Message + "); keeping existing addon");
+            try { File.Delete(zipPath); } catch { }
+            return;
         }
 
+        Console.Write("[update] extracting (overwrite mode)... ");
+        int extracted = 0, skipped = 0;
         try
         {
-            DownloadAndExtract("Incognito Addon (update)", ADDON_URL, rootDir, "stremio-adult-addon");
+            Directory.CreateDirectory(addonDir);
+            using (var archive = ZipFile.OpenRead(zipPath))
+            {
+                foreach (var entry in archive.Entries)
+                {
+                    string destPath = Path.Combine(rootDir, entry.FullName);
+
+                    // Directory entry
+                    if (string.IsNullOrEmpty(entry.Name))
+                    {
+                        Directory.CreateDirectory(destPath);
+                        continue;
+                    }
+
+                    string destParent = Path.GetDirectoryName(destPath);
+                    if (!string.IsNullOrEmpty(destParent))
+                    {
+                        Directory.CreateDirectory(destParent);
+                    }
+
+                    try
+                    {
+                        entry.ExtractToFile(destPath, true);
+                        extracted++;
+                    }
+                    catch (Exception ex)
+                    {
+                        // File locked by AV / running process / read-only.
+                        // Skip it and keep going — partial update beats no
+                        // update, and most affected files are non-essential
+                        // (e.g. a stray .bin shim).
+                        skipped++;
+                        if (skipped <= 3)
+                        {
+                            Console.WriteLine();
+                            Console.WriteLine("[update]   skip " + entry.FullName + ": " + ex.Message);
+                        }
+                    }
+                }
+            }
+            Console.WriteLine("done (" + extracted + " files" + (skipped > 0 ? ", " + skipped + " skipped" : "") + ")");
             WriteAddonVersionMarker(rootDir);
             Console.WriteLine("[update] addon updated to " + ADDON_VERSION);
         }
         catch (Exception ex)
         {
-            Console.WriteLine("[update] WARN: addon update failed (" + ex.Message + "); continuing with whatever's on disk");
+            Console.WriteLine();
+            Console.WriteLine("[update] WARN: extract failed (" + ex.Message + "); keeping existing addon");
+        }
+        finally
+        {
+            try { File.Delete(zipPath); } catch { }
         }
     }
 

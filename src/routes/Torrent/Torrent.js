@@ -72,8 +72,17 @@ async function rdFiles(infoHash, title, token) {
 //   { infoHash: '<40-hex>' }                         — resolved
 //   { error: 'quota_exceeded', indexer, message }    — daily cap reached
 //   { error: 'not_resolvable', message }             — hash truly unavailable
+//   { error: 'addon_outdated', message }             — addon predates this endpoint
 //   { error: 'network', message }                    — addon unreachable
 async function resolveHashFromUrl({ downloadUrl, magnetUrl, indexer }) {
+    // Client-side magnet shortcut. If the catalog already gave us a magnet
+    // URI, the hash is right there in the `btih:` segment — no network
+    // round-trip needed. This also makes click-to-play work on stale
+    // launcher installs whose addon predates the /rd/resolve-url endpoint.
+    if (typeof magnetUrl === 'string' && magnetUrl) {
+        const m = magnetUrl.match(/btih:([a-fA-F0-9]{40})/i);
+        if (m) return { infoHash: m[1].toLowerCase() };
+    }
     try {
         const res = await fetch(`${ADDON_URL}/rd/resolve-url`, {
             method: 'POST',
@@ -91,6 +100,16 @@ async function resolveHashFromUrl({ downloadUrl, magnetUrl, indexer }) {
                 indexer: data.indexer || indexer || '',
                 minutesRemaining: mins,
                 message: data.message || `${indexer || 'This indexer'} daily limit reached — try another indexer (retries in ~${mins}min)`,
+            };
+        }
+        // 404 from this endpoint almost always means the user is running
+        // a stale launcher install whose addon predates /rd/resolve-url.
+        // Surface a clear, actionable message instead of the generic
+        // "could not resolve" so the user knows what to do.
+        if (res.status === 404) {
+            return {
+                error: 'addon_outdated',
+                message: 'Incognito addon is out of date — quit the launcher (right-click tray icon → Exit), restart it, and the addon will auto-update. If this keeps happening, download the latest StremioLauncherFULL.exe from the project page.',
             };
         }
         return {
