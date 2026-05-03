@@ -43,39 +43,74 @@ async function extractChunkDirect(mediaUrl, startSec, durationSec, headers) {
     if (headers) {
         params.set('headers', headers);
     }
-    const resp = await fetchWithTimeout(
-        `${EXTRACT_SERVER_URL}/audio-extract?${params}`,
-        {},
-        30000,
-    );
-    if (!resp.ok) {
-        const body = await resp.text().catch(function () { return ''; });
-        throw new Error('Extract failed (' + resp.status + '): ' + body.substring(0, 100));
+    const url = `${EXTRACT_SERVER_URL}/audio-extract?${params}`;
+
+    // One retry with backoff for transient FFmpeg failures (network blip,
+    // streaming server cache miss, etc.). Two attempts is enough — a third
+    // would just delay the overall sync without much added success rate.
+    let lastErr = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+            const resp = await fetchWithTimeout(url, {}, 60000);
+            if (!resp.ok) {
+                const body = await resp.text().catch(function () { return ''; });
+                throw new Error('Extract failed (' + resp.status + '): ' + body.substring(0, 200));
+            }
+            const arrayBuf = await resp.arrayBuffer();
+            if (arrayBuf.byteLength < TARGET_SAMPLE_RATE * 4 * 0.5) {
+                // <0.5s of audio — almost certainly an empty or corrupt extraction
+                throw new Error('Extract returned ' + arrayBuf.byteLength + ' bytes (too short)');
+            }
+            return {
+                audio: new Float32Array(arrayBuf),
+                sampleRate: TARGET_SAMPLE_RATE,
+                startTime: startSec,
+                duration: durationSec,
+            };
+        } catch (err) {
+            lastErr = err;
+            if (attempt === 0) {
+                await new Promise(function (r) { setTimeout(r, 500); });
+            }
+        }
     }
-
-    const arrayBuf = await resp.arrayBuffer();
-    // Server outputs raw f32le — wrap directly as Float32Array
-    const pcm = new Float32Array(arrayBuf);
-
-    return {
-        audio: pcm,
-        sampleRate: TARGET_SAMPLE_RATE,
-        startTime: startSec,
-        duration: durationSec,
-    };
+    throw lastErr || new Error('Extract failed');
 }
 
 /**
- * Extract multiple chunks in parallel.
+ * Extract multiple chunks in parallel. Per-chunk failures are tolerated:
+ * the returned array contains successful results only (in original order),
+ * and the batch as a whole succeeds as long as at least one chunk did.
+ *
  * Each entry: { start: seconds, duration: seconds }
- * Returns an array of audio results in the same order.
  */
 async function extractBatch(mediaUrl, chunks, headers) {
-    return Promise.all(
+    const settled = await Promise.allSettled(
         chunks.map(function (c) {
             return extractChunkDirect(mediaUrl, c.start, c.duration, headers);
         }),
     );
+    const successes = [];
+    const failures = [];
+    for (let i = 0; i < settled.length; i++) {
+        const r = settled[i];
+        if (r.status === 'fulfilled') {
+            successes.push(r.value);
+        } else {
+            failures.push({ chunk: chunks[i], reason: r.reason });
+        }
+    }
+    if (successes.length === 0) {
+        const firstReason = failures.length > 0 ? failures[0].reason : new Error('No chunks extracted');
+        const msg = firstReason && firstReason.message ? firstReason.message : String(firstReason);
+        throw new Error('All chunk extractions failed: ' + msg);
+    }
+    if (failures.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn('[WhisperSync] extractBatch: ' + failures.length + '/' + chunks.length + ' chunks failed —',
+            failures.map(function (f) { return '@' + f.chunk.start + 's: ' + (f.reason && f.reason.message || f.reason); }).join('; '));
+    }
+    return successes;
 }
 
 /**
@@ -90,10 +125,16 @@ async function extractBatch(mediaUrl, chunks, headers) {
  * All URLs are plain HTTP to localhost — no TLS, no CORS issues for FFmpeg.
  */
 async function resolveMediaUrl(streamingServerUrl, streamContent) {
-    // FFmpeg runs locally and doesn't need CORS — always target the real
-    // streaming server on port 11470, never the CORS proxy on 12470.
-    // Also force 127.0.0.1 to avoid Mixed Content blocks (browsers allow
-    // http://127.0.0.1 from HTTPS pages, but NOT http://192.168.x.x).
+    // Two separate URL contexts:
+    //   ssUrl       — what FFmpeg fetches from. Always the real streaming
+    //                 server on :11470 (loopback). FFmpeg ignores CORS, so we
+    //                 never want to send it through the CORS proxy on :12470.
+    //   browserBase — where the browser sends auxiliary requests (e.g. the
+    //                 /create POST to resolve fileIdx for torrents). On a
+    //                 remote origin (GitHub Pages) the streaming server has no
+    //                 CORS headers, so the browser MUST go through the CORS
+    //                 proxy on :12470. Same-origin / dev-server origins can
+    //                 talk to :11470 directly.
     var ssUrl = forceLoopback(streamingServerUrl.replace(/\/$/, ''));
     var ssUrlObj;
     try { ssUrlObj = new URL(ssUrl); } catch (_) { /* */ }
@@ -101,14 +142,10 @@ async function resolveMediaUrl(streamingServerUrl, streamContent) {
         ssUrlObj.port = '11470';
         ssUrl = ssUrlObj.origin;
     }
-    var fetchBase = getFetchBase(ssUrl);
-    // fetchBase may also point to the CORS proxy — force it to streaming server too
-    if (fetchBase.indexOf(':12470') !== -1) {
-        fetchBase = fetchBase.replace(':12470', ':11470');
-    }
+    var browserBase = getFetchBase(ssUrl);
 
     var isTorrent = streamContent && typeof streamContent.infoHash === 'string';
-    var url = await buildMediaUrl(ssUrl, streamContent, fetchBase);
+    var url = await buildMediaUrl(ssUrl, streamContent, browserBase);
 
     // For ALL streams (torrent + debrid/HTTP): FFmpeg reads directly from
     // the streaming server via /proxy/ or /<hash>/<idx>. Both support HTTP

@@ -67,12 +67,27 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
 
     const transcribeAudio = React.useCallback((worker, audioData) => {
         return new Promise((resolve, reject) => {
+            // Watchdog: bail if the worker goes silent for too long. Reset on
+            // every message so a slow first-run model download (which streams
+            // download_progress messages) doesn't trip it. 60s of pure silence
+            // is well past anything legitimate — model init or transcription.
+            const SILENCE_MS = 60000;
+            let watchdog = null;
+            const armWatchdog = () => {
+                if (watchdog) clearTimeout(watchdog);
+                watchdog = setTimeout(() => {
+                    reject(new Error('Transcription stalled (no worker progress for 60s)'));
+                }, SILENCE_MS);
+            };
+            const settle = (fn, value) => { if (watchdog) clearTimeout(watchdog); fn(value); };
+            armWatchdog();
+
             worker.onmessage = (event) => {
+                armWatchdog(); // any message = worker is alive
                 const { type } = event.data;
 
                 if (cancelledRef.current) {
-                    worker.terminate();
-                    reject(new Error('Cancelled'));
+                    settle(reject, new Error('Cancelled'));
                     return;
                 }
 
@@ -85,13 +100,13 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 } else if (type === 'download_progress') {
                     setSyncProgress(event.data.progress);
                 } else if (type === 'result') {
-                    resolve(event.data);
+                    settle(resolve, event.data);
                 } else if (type === 'error') {
-                    reject(new Error(event.data.error));
+                    settle(reject, new Error(event.data.error));
                 }
             };
 
-            worker.onerror = (error) => reject(error);
+            worker.onerror = (error) => settle(reject, error);
 
             worker.postMessage({
                 type: 'transcribe',
@@ -198,7 +213,20 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 '— extracting', batchChunks.length, 'chunks at offsets:',
                 batch.map(function (o) { return o + 's'; }).join(', '),
             );
-            const audioResults = await extractBatch(extractUrl, batchChunks, mediaHeaders);
+            let audioResults;
+            try {
+                audioResults = await extractBatch(extractUrl, batchChunks, mediaHeaders);
+            } catch (err) {
+                if (cancelledRef.current) return;
+                // Whole batch failed. If we already collected matches from
+                // earlier batches, prefer applying those over throwing — losing
+                // work just because a later batch dies is worse than a partial
+                // sync. If nothing has worked yet, propagate so HLS fallback runs.
+                // eslint-disable-next-line no-console
+                console.warn('[WhisperSync] Batch', batchIdx + 1, 'failed:', err && err.message);
+                if (allOffsets.length === 0) throw err;
+                break;
+            }
             if (cancelledRef.current) return;
 
             // ── Sequential transcribe + align per chunk ──
@@ -388,19 +416,30 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         setSyncError(null);
     }, []);
 
-    // Auto-sync when an external subtitle track is selected
+    // Auto-sync when an external subtitle track is selected.
+    // Mark the track as "synced" only AFTER we actually fire the sync — otherwise
+    // a track selected before streamContent/streamingServerUrl arrives would update
+    // prevTrackIdRef without syncing, and the next effect run (with deps ready)
+    // would be blocked by the equality gate.
     React.useEffect(() => {
-        if (selectedExtraSubtitlesTrackId && selectedExtraSubtitlesTrackId !== prevTrackIdRef.current) {
-            prevTrackIdRef.current = selectedExtraSubtitlesTrackId;
-            const track = (Array.isArray(extraSubtitlesTracks) ? extraSubtitlesTracks : [])
-                .find((t) => t.id === selectedExtraSubtitlesTrackId);
-            if (track && !track.embedded && streamContent && streamingServerUrl) {
-                const timer = setTimeout(() => runSync(), 500);
-                return () => clearTimeout(timer);
-            }
-        } else if (!selectedExtraSubtitlesTrackId) {
+        if (!selectedExtraSubtitlesTrackId) {
             prevTrackIdRef.current = null;
+            return;
         }
+        if (selectedExtraSubtitlesTrackId === prevTrackIdRef.current) return;
+        const track = (Array.isArray(extraSubtitlesTracks) ? extraSubtitlesTracks : [])
+            .find((t) => t.id === selectedExtraSubtitlesTrackId);
+        if (!track || track.embedded) {
+            prevTrackIdRef.current = selectedExtraSubtitlesTrackId; // embedded tracks don't sync
+            return;
+        }
+        if (!streamContent || !streamingServerUrl) {
+            // Wait for player state to settle — don't mark as synced yet
+            return;
+        }
+        prevTrackIdRef.current = selectedExtraSubtitlesTrackId;
+        const timer = setTimeout(() => runSync(), 500);
+        return () => clearTimeout(timer);
     }, [selectedExtraSubtitlesTrackId, extraSubtitlesTracks, streamContent, streamingServerUrl, runSync]);
 
     React.useEffect(() => {

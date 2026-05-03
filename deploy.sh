@@ -72,10 +72,18 @@ echo "Saved build to /tmp/stremio-deploy"
 echo "=== Step 6: Switch to gh-pages and deploy ==="
 git checkout gh-pages
 
-# Remove old build hash directories (keep non-hash dirs like images/, fonts/)
+# Keep the most recent previous hash dir so users on cached pages from the
+# previous deploy can still load their worker scripts (old service workers
+# reference the hash baked into the page bundle). Anything older goes.
+PREV_HASH=$(ls -dt */ 2>/dev/null | grep -E '^[0-9a-f]{10,}/$' | head -1 | sed 's:/$::')
 for dir in $(ls -d */ 2>/dev/null | grep -E '^[0-9a-f]{10,}/$'); do
-    echo "Removing old hash dir: $dir"
-    rm -rf "$dir"
+    name="${dir%/}"
+    if [ "$name" = "$PREV_HASH" ] || [ "$name" = "$HASH" ]; then
+        echo "Keeping hash dir: $dir"
+    else
+        echo "Removing old hash dir: $dir"
+        rm -rf "$dir"
+    fi
 done
 # Also clean stale root files from previous deploys
 rm -f index.html service-worker.js service-worker.js.map manifest.json
