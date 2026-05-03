@@ -12,6 +12,7 @@ const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 async function enrichItem(item) {
     let poster = '';
     let background = '';
+    let posterFallback = '';
     try {
         const mediaType = item.type === 'series' ? 'tv' : 'movie';
         let tmdbId = item.tmdbId;
@@ -24,10 +25,11 @@ async function enrichItem(item) {
         if (tmdbId) {
             const details = await tmdbService.getDetails(tmdbId, mediaType);
             if (details?.backdrop_path) {
-                background = `${TMDB_IMAGE_BASE}/w780${details.backdrop_path}`;
+                background = `${TMDB_IMAGE_BASE}/original${details.backdrop_path}`;
+                poster = `${TMDB_IMAGE_BASE}/w1280${details.backdrop_path}`;
             }
             if (details?.poster_path) {
-                poster = `${TMDB_IMAGE_BASE}/w342${details.poster_path}`;
+                posterFallback = `${TMDB_IMAGE_BASE}/w500${details.poster_path}`;
             }
         }
     } catch { /* silent */ }
@@ -37,7 +39,7 @@ async function enrichItem(item) {
         id: item.id,
         name: item.name,
         type: stremioType,
-        poster: background || poster,
+        poster: poster || posterFallback,
         background: background,
         posterShape: 'landscape',
         releaseInfo: item.year ? String(item.year) : '',

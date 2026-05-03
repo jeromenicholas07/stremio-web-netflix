@@ -214,6 +214,25 @@ const HeroBanner = React.memo(({ items }) => {
         setCurrentIndex((prev) => (prev === 0 ? featuredItems.length - 1 : prev - 1));
     }, [featuredItems.length]);
 
+    // Preload the next carousel item's background + logo so the swap is instant.
+    // Uses an Image() ghost — once loaded, the bytes sit in the browser's HTTP cache.
+    React.useEffect(() => {
+        if (featuredItems.length <= 1) return;
+        const nextIdx = (currentIndex + 1) % featuredItems.length;
+        const nextItem = featuredItems[nextIdx];
+        if (!nextItem) return;
+        const urls = [
+            nextItem.background || nextItem.poster,
+            nextItem.logo || logoCache[nextItem.id],
+        ].filter((u) => typeof u === 'string' && u.length > 0);
+        const ghosts = urls.map((url) => {
+            const img = new window.Image();
+            img.src = url;
+            return img;
+        });
+        return () => { ghosts.forEach((g) => { g.src = ''; }); };
+    }, [currentIndex, featuredItems, logoCache]);
+
     // When current index changes, reset to IMAGE phase and start timer
     React.useEffect(() => {
         setPhase('IMAGE');

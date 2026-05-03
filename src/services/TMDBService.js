@@ -2,7 +2,13 @@
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
-const CACHE_TTL = 60 * 60 * 1000; // 1 hour
+const CACHE_TTL = 60 * 60 * 1000; // 1 hour (in-memory API responses)
+
+// Persistent (localStorage) cache for stable lookups: imdb→tmdb resolution and logo URLs.
+// These results don't change for a given title, so we keep them across page reloads.
+const PERSIST_KEY = 'tmdb_persist_cache_v1';
+const PERSIST_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
+const PERSIST_MAX_ENTRIES = 2000;
 
 // Patterns that indicate a bad trailer (sign language, behind-the-scenes, etc.)
 const BAD_TRAILER_PATTERNS = /sign\s*language|behind\s*the\s*scenes|bloopers|featurette|making\s*of|sneak\s*peek|clip\s*\d|opening\s*credits|recap|interview/i;
@@ -20,7 +26,58 @@ const GENRE_MAP = {
 class TMDBService {
     constructor() {
         this._cache = new Map();
-        this._imdbCache = new Map(); // tmdbId → imdbId
+        this._imdbCache = new Map(); // tmdbId → imdbId (mirrors persistent cache)
+        this._persist = this._loadPersist();
+    }
+
+    // --- Persistent cache (localStorage) for stable lookups ---
+
+    _loadPersist() {
+        try {
+            const raw = localStorage.getItem(PERSIST_KEY);
+            if (!raw) return {};
+            const parsed = JSON.parse(raw);
+            return (parsed && typeof parsed === 'object') ? parsed : {};
+        } catch {
+            return {};
+        }
+    }
+
+    _savePersist() {
+        try {
+            // LRU eviction: if over cap, drop oldest entries by `time`
+            const keys = Object.keys(this._persist);
+            if (keys.length > PERSIST_MAX_ENTRIES) {
+                const sorted = keys
+                    .map((k) => ({ k, t: this._persist[k].time || 0 }))
+                    .sort((a, b) => a.t - b.t);
+                const toRemove = sorted.slice(0, keys.length - PERSIST_MAX_ENTRIES);
+                for (const { k } of toRemove) delete this._persist[k];
+            }
+            localStorage.setItem(PERSIST_KEY, JSON.stringify(this._persist));
+        } catch {
+            // Quota exceeded or unavailable — drop everything and try once more
+            try {
+                this._persist = {};
+                localStorage.removeItem(PERSIST_KEY);
+            } catch { /* silent */ }
+        }
+    }
+
+    _persistGet(key) {
+        const entry = this._persist[key];
+        if (!entry) return undefined;
+        if (Date.now() - (entry.time || 0) > PERSIST_TTL) {
+            delete this._persist[key];
+            return undefined;
+        }
+        return entry.value;
+    }
+
+    _persistSet(key, value) {
+        this._persist[key] = { value, time: Date.now() };
+        // Debounce-ish: write immediately. Volume is low (a few writes per page load).
+        this._savePersist();
     }
 
     // --- Settings stored in localStorage ---
@@ -132,16 +189,23 @@ class TMDBService {
     }
 
     async findByImdbId(imdbId) {
+        // Persistent cache: imdbId → { type, id } (stable, safe to cache long-term)
+        const persistKey = `find:${imdbId}`;
+        const cached = this._persistGet(persistKey);
+        if (cached !== undefined) return cached;
+
         const data = await this._fetch(`/find/${imdbId}`, { external_source: 'imdb_id' });
         if (!data) return null;
 
+        let result = null;
         if (data.movie_results?.length > 0) {
-            return { type: 'movie', ...data.movie_results[0] };
+            result = { type: 'movie', ...data.movie_results[0] };
+        } else if (data.tv_results?.length > 0) {
+            result = { type: 'tv', ...data.tv_results[0] };
         }
-        if (data.tv_results?.length > 0) {
-            return { type: 'tv', ...data.tv_results[0] };
-        }
-        return null;
+        // Cache positive results only — negatives may be transient (rate limit, etc.)
+        if (result) this._persistSet(persistKey, { type: result.type, id: result.id });
+        return result;
     }
 
     async getDetails(tmdbId, mediaType = 'movie') {
@@ -196,14 +260,21 @@ class TMDBService {
         return data.results;
     }
 
-    // Resolve TMDB ID → IMDB ID via external_ids endpoint (cached)
+    // Resolve TMDB ID → IMDB ID via external_ids endpoint (cached, persisted)
     async getImdbId(tmdbId, mediaType = 'movie') {
         const cacheKey = `${mediaType}:${tmdbId}`;
         if (this._imdbCache.has(cacheKey)) return this._imdbCache.get(cacheKey);
+        const persistKey = `imdb:${cacheKey}`;
+        const persisted = this._persistGet(persistKey);
+        if (persisted !== undefined) {
+            this._imdbCache.set(cacheKey, persisted);
+            return persisted;
+        }
         try {
             const data = await this._fetch(`/${mediaType}/${tmdbId}/external_ids`);
             const imdbId = data?.imdb_id || null;
             this._imdbCache.set(cacheKey, imdbId);
+            if (imdbId) this._persistSet(persistKey, imdbId);
             return imdbId;
         } catch {
             return null;
@@ -246,9 +317,9 @@ class TMDBService {
             id: `tmdb:${tmdbId}`,
             type: stremioType,
             name: title || '',
-            poster: tmdbItem.backdrop_path ? `${TMDB_IMAGE_BASE}/w780${tmdbItem.backdrop_path}` : null,
+            poster: tmdbItem.backdrop_path ? `${TMDB_IMAGE_BASE}/w1280${tmdbItem.backdrop_path}` : null,
             posterShape: 'landscape',
-            background: tmdbItem.backdrop_path ? `${TMDB_IMAGE_BASE}/w1280${tmdbItem.backdrop_path}` : null,
+            background: tmdbItem.backdrop_path ? `${TMDB_IMAGE_BASE}/original${tmdbItem.backdrop_path}` : null,
             releaseInfo: year,
             description: tmdbItem.overview || '',
             links: (tmdbItem.genre_ids || []).map((id) => ({ category: 'Genres', name: GENRE_MAP[id] || '' })).filter((l) => l.name),
@@ -343,6 +414,9 @@ class TMDBService {
      * Returns null if no logo is found.
      */
     async getLogoUrl(tmdbId, mediaType = 'movie') {
+        const persistKey = `logo:${mediaType}:${tmdbId}`;
+        const persisted = this._persistGet(persistKey);
+        if (persisted !== undefined) return persisted;
         try {
             const data = await this._fetch(`/${mediaType}/${tmdbId}/images`, {
                 include_image_language: 'en,null',
@@ -354,7 +428,9 @@ class TMDBService {
                 .filter((l) => l.file_path)
                 .sort((a, b) => (b.vote_average || 0) - (a.vote_average || 0));
             if (sorted.length === 0) return null;
-            return `${TMDB_IMAGE_BASE}/w500${sorted[0].file_path}`;
+            const url = `${TMDB_IMAGE_BASE}/w780${sorted[0].file_path}`;
+            this._persistSet(persistKey, url);
+            return url;
         } catch {
             return null;
         }

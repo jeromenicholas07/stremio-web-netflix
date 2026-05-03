@@ -104,10 +104,10 @@ async function enrichItem(item) {
         if (tmdbId) {
             const details = await tmdbService.getDetails(tmdbId, tmdbType);
             if (details?.backdrop_path) {
-                item.background = `${TMDB_IMAGE_BASE}/w1280${details.backdrop_path}`;
-                item.poster = `${TMDB_IMAGE_BASE}/w780${details.backdrop_path}`;
+                item.background = `${TMDB_IMAGE_BASE}/original${details.backdrop_path}`;
+                item.poster = `${TMDB_IMAGE_BASE}/w1280${details.backdrop_path}`;
             } else if (details?.poster_path) {
-                item.poster = `${TMDB_IMAGE_BASE}/w342${details.poster_path}`;
+                item.poster = `${TMDB_IMAGE_BASE}/w500${details.poster_path}`;
             }
         }
     } catch { /* silent */ }

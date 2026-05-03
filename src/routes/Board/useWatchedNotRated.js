@@ -32,6 +32,7 @@ function useWatchedNotRated() {
             const enriched = await Promise.all(batch.map(async (item) => {
                 let poster = '';
                 let background = '';
+                let posterFallback = '';
                 try {
                     const mediaType = item.type === 'series' ? 'tv' : 'movie';
                     let tmdbId = item.tmdbId;
@@ -45,10 +46,11 @@ function useWatchedNotRated() {
                     if (tmdbId) {
                         const details = await tmdbService.getDetails(tmdbId, mediaType);
                         if (details?.backdrop_path) {
-                            background = `${TMDB_IMAGE_BASE}/w780${details.backdrop_path}`;
+                            background = `${TMDB_IMAGE_BASE}/original${details.backdrop_path}`;
+                            poster = `${TMDB_IMAGE_BASE}/w1280${details.backdrop_path}`;
                         }
                         if (details?.poster_path) {
-                            poster = `${TMDB_IMAGE_BASE}/w342${details.poster_path}`;
+                            posterFallback = `${TMDB_IMAGE_BASE}/w500${details.poster_path}`;
                         }
                     }
                 } catch { /* silent */ }
@@ -59,7 +61,7 @@ function useWatchedNotRated() {
                     id: item.id,
                     name: item.name,
                     type: stremioType,
-                    poster: background || poster, // Use backdrop for landscape cards
+                    poster: poster || posterFallback, // landscape backdrop preferred
                     background: background,
                     posterShape: 'landscape',
                     releaseInfo: item.year ? String(item.year) : '',
