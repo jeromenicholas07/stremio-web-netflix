@@ -89,6 +89,13 @@ done
 rm -f index.html service-worker.js service-worker.js.map manifest.json
 rm -f workbox-*.js workbox-*.js.map e34a*.mjs
 rm -rf build .well-known
+# Source-branch artifacts that git checkout leaves behind in the working
+# tree (they're untracked on gh-pages, so `git add -A` would commit them).
+rm -rf node_modules src tests assets screenshots/board_*.webp
+rm -f package.json pnpm-lock.yaml tsconfig.json eslint.config.mjs webpack.config.js manifest.json
+rm -f start-dev.js cors-proxy.js audio-extract-server.js trakt-bridge.js test-autosync.js http_server.js
+rm -f Dockerfile build-launchers.ps1 launch-stremio.bat launch-stremio.command
+rm -f StremioLauncher.cs StremioLauncherFULL.cs README.md BUILD.md CODE_OF_CONDUCT.md LICENSE.md
 
 # Copy from saved build (NOT from build/ which git checkout may have clobbered)
 cp -r /tmp/stremio-deploy/* .
@@ -97,10 +104,19 @@ cp -r /tmp/stremio-deploy/* .
 touch .nojekyll
 
 echo "=== Step 7: Commit and push gh-pages ==="
+# Add only the files we actually want on gh-pages: build artifacts, launcher
+# binaries/zip, hash dirs, and the standard root files. Refuse to add the
+# source-branch tree if any of it is still hanging around.
 git add -A
+# Safety net: refuse to commit if node_modules or src somehow got staged.
+if git diff --cached --name-only | grep -qE '^(node_modules/|src/|tests/)'; then
+    echo "ERROR: source-branch files staged for gh-pages commit. Aborting."
+    git diff --cached --name-only | grep -E '^(node_modules/|src/|tests/)' | head -20
+    exit 1
+fi
 git commit -m "$MSG
 
-Co-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"
+Co-Authored-By: Claude Opus 4.7 <noreply@anthropic.com>"
 git push "$REMOTE" gh-pages
 
 echo "=== Step 8: Switch back to $SOURCE_BRANCH ==="
