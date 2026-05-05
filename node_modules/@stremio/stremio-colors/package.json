@@ -1,0 +1,23 @@
+{
+    "name": "@stremio/stremio-colors",
+    "version": "5.2.0",
+    "description": "Color pallet for all stremio clients",
+    "main": "colors.js",
+    "author": {
+        "name": "Smart Code Ltd.",
+        "email": "office@stremio.com",
+        "url": "https://stremio.com"
+    },
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/stremio/stremio-colors.git"
+    },
+    "scripts": {
+        "build": "node build.js"
+    },
+    "devDependencies": {
+        "color-convert": "2.0.1",
+        "colord": "2.9.3"
+    }
+}
