@@ -172,6 +172,7 @@ rm -rf build .well-known
 # Source-branch artifacts that git checkout leaves behind in the working
 # tree (they're untracked on gh-pages, so `git add -A` would commit them).
 rm -rf node_modules src tests assets screenshots/board_*.webp
+rm -rf stremio-adult-addon stremio-adult-addon-source
 rm -f package.json pnpm-lock.yaml tsconfig.json eslint.config.mjs webpack.config.js manifest.json
 rm -f start-dev.js cors-proxy.js audio-extract-server.js trakt-bridge.js test-autosync.js http_server.js
 rm -f Dockerfile build-launchers.ps1 launch-stremio.bat launch-stremio.command
@@ -188,10 +189,12 @@ echo "=== Step 7: Commit and push gh-pages ==="
 # binaries/zip, hash dirs, and the standard root files. Refuse to add the
 # source-branch tree if any of it is still hanging around.
 git add -A
-# Safety net: refuse to commit if node_modules or src somehow got staged.
-if git diff --cached --name-only | grep -qE '^(node_modules/|src/|tests/)'; then
+# Safety net: refuse to commit if any source-branch artifacts got staged.
+# Match `node_modules/` ANYWHERE in the path (not just root) so nested ones
+# like stremio-adult-addon/node_modules/... can't sneak through.
+if git diff --cached --name-only | grep -qE '(^|/)(node_modules|src|tests)/|^stremio-adult-addon/'; then
     echo "ERROR: source-branch files staged for gh-pages commit. Aborting."
-    git diff --cached --name-only | grep -E '^(node_modules/|src/|tests/)' | head -20
+    git diff --cached --name-only | grep -E '(^|/)(node_modules|src|tests)/|^stremio-adult-addon/' | head -20
     exit 1
 fi
 git commit -m "$MSG
