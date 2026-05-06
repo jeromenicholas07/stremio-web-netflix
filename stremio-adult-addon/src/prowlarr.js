@@ -554,7 +554,11 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
     }
 
     limit = limit || config.pageSize;
-    const categoryList = Array.isArray(categoriesOpt) && categoriesOpt.length > 0
+    // Three states for category filtering:
+    //   undefined / null     → fall back to config.adultCategories (default)
+    //   non-empty array       → use exactly this list
+    //   empty array (`[]`)    → no category filter at all (let indexers decide)
+    const categoryList = Array.isArray(categoriesOpt)
         ? categoriesOpt
         : config.adultCategories;
 
@@ -683,7 +687,12 @@ async function searchProwlarr({ query = '', offset = 0, limit, sortBy = 'date', 
  */
 async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = 'date', categories: categoriesOpt } = {}) {
     const config = getConfig();
-    const categoryList = Array.isArray(categoriesOpt) && categoriesOpt.length > 0
+    // Match the three-state semantics from searchProwlarr:
+    //   undefined → adultCategories (default)
+    //   non-empty → use exactly this list
+    //   `[]`      → no category filter (let indexers decide)
+    const unrestricted = Array.isArray(categoriesOpt) && categoriesOpt.length === 0;
+    const categoryList = Array.isArray(categoriesOpt)
         ? categoriesOpt
         : config.adultCategories;
 
@@ -710,11 +719,14 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
 
     const indexers = await indexersRes.json();
 
-    // Filter to indexers that support the requested categories
-    const matchingIndexers = indexers.filter(idx => {
-        const caps = idx.capabilities?.categories || [];
-        return caps.some(cat => categoryList.includes(cat.id));
-    });
+    // Unrestricted search hits every enabled indexer; otherwise filter to
+    // indexers that advertise at least one of the requested categories.
+    const matchingIndexers = unrestricted
+        ? indexers
+        : indexers.filter(idx => {
+            const caps = idx.capabilities?.categories || [];
+            return caps.some(cat => categoryList.includes(cat.id));
+        });
 
     if (matchingIndexers.length === 0) {
         return [];
@@ -724,7 +736,8 @@ async function searchViaTorznab({ query = '', offset = 0, limit = 50, sortBy = '
     const allItems = [];
     const fetchPromises = matchingIndexers.map(async (indexer) => {
         try {
-            const torznabUrl = `${config.prowlarrUrl}/${indexer.id}/api?apikey=${config.prowlarrApiKey}&t=search&cat=${categoryList.join(',')}&q=${encodeURIComponent(query)}&offset=${offset}&limit=${limit}`;
+            const catParam = unrestricted ? '' : `&cat=${categoryList.join(',')}`;
+            const torznabUrl = `${config.prowlarrUrl}/${indexer.id}/api?apikey=${config.prowlarrApiKey}&t=search${catParam}&q=${encodeURIComponent(query)}&offset=${offset}&limit=${limit}`;
 
             // 15s per-indexer. One slow indexer never blocks the others
             // because fetchPromises runs under Promise.allSettled below.

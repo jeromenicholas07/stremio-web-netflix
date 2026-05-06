@@ -246,6 +246,15 @@ async function handleCatalog(catalogId, extra = {}) {
     // own aggregate-budget doesn't push back.
     const fetchLimit = Math.min(Math.max(limit * 2, 200), 250);
 
+    // Search by name should NOT restrict to adult Newznab categories — many
+    // performers (Sunny Leone, Mia Khalifa, …) have plenty of mainstream
+    // content, and adult indexers frequently mis-categorise. We pass an
+    // empty `categories` array which `searchProwlarr` interprets as "no
+    // category filter" so any indexer-side categorisation is honoured.
+    // Browse catalogs (adult-popular / adult-latest / no-search) keep the
+    // adult-only filter — those are pure browse and should stay focused.
+    const isSearch = catalogId === 'adult-search' && search;
+
     let items;
     try {
         items = await searchProwlarr({
@@ -253,6 +262,7 @@ async function handleCatalog(catalogId, extra = {}) {
             offset: skip,
             limit: fetchLimit,
             sortBy,
+            ...(isSearch ? { categories: [] } : {}),
         });
     } catch (err) {
         console.error('[catalog]', catalogId, err.message);

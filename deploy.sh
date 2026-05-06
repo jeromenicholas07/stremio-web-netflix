@@ -109,6 +109,14 @@ else
     echo "WARN: csc.exe not found at $CSC — keeping existing launcher binaries on gh-pages"
 fi
 
+# Seed an empty pornstars.json on gh-pages if one doesn't exist already.
+# The Incognito search dictionary fetches this once a day and merges any
+# names into its bundled list — so growing the list later is just an
+# edit-and-push on this file, no rebuild needed.
+if [ ! -f /tmp/stremio-deploy/pornstars.json ]; then
+    echo '[]' > /tmp/stremio-deploy/pornstars.json
+fi
+
 echo "=== Step 5c: Rebuild addon zip ==="
 # stremio-adult-addon.zip is what the launcher fetches when ADDON_VERSION
 # moves. If we don't repackage it on every deploy, addon source changes never

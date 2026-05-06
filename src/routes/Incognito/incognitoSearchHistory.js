@@ -22,29 +22,96 @@
 
 const ADULT_DICTIONARY = require('./adultDictionary');
 const PORNSTARS = require('./pornstars');
+const PORNSTARS_EXTENDED = require('./pornstars-extended');
 
 const HISTORY_KEY = 'incognito_search_history';
 const CHANGED_EVENT = 'incognito:search-history-changed';
 const MAX_ENTRIES = 50;
 
+// Optional remote pornstar list — fetched on first use and refreshed once
+// per day. Lets me grow the suggestion dictionary without shipping a new
+// build / forcing every user to redownload the launcher exe. Format is the
+// same as pornstars.js: a JSON array of strings. Hosted alongside the web
+// UI on gh-pages.
+const REMOTE_PORNSTARS_URL = 'https://jeromenicholas07.github.io/stremio-web-netflix/pornstars.json';
+const REMOTE_PORNSTARS_LS_KEY = 'incognito_remote_pornstars_v1';
+const REMOTE_PORNSTARS_TS_KEY = 'incognito_remote_pornstars_ts_v1';
+const REMOTE_PORNSTARS_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
 // ── Dictionary preprocessing ──
 // Each entry can be a canonical term or `'canonical|alias1|alias2'`.
 // We expand into a flat list of { canonical, match } where `match` is the
 // lowercased string we test against, and `canonical` is what we display.
-const TERMS = (() => {
-    const out = [];
-    for (const raw of ADULT_DICTIONARY) {
-        const parts = String(raw).split('|');
-        const canonical = parts[0];
-        for (const variant of parts) {
-            out.push({ canonical, match: variant.toLowerCase(), kind: 'term' });
+//
+// `_terms` is mutable so the remote-fetch path can append new pornstar
+// entries without rebuilding anything. Each fresh fetch dedupes on the
+// lowercased canonical so no entry appears twice.
+let _terms = [];
+const _seenCanonical = new Set();
+
+function addTerm(canonical, match, kind) {
+    const lc = canonical.toLowerCase();
+    if (_seenCanonical.has(lc)) return;
+    _seenCanonical.add(lc);
+    _terms.push({ canonical, match: match.toLowerCase(), kind });
+}
+
+function addTermWithAliases(canonicalAndAliases, kind) {
+    const parts = String(canonicalAndAliases).split('|');
+    const canonical = parts[0];
+    const lc = canonical.toLowerCase();
+    if (_seenCanonical.has(lc)) return;
+    _seenCanonical.add(lc);
+    for (const variant of parts) {
+        _terms.push({ canonical, match: variant.toLowerCase(), kind });
+    }
+}
+
+// Bootstrap from bundled lists.
+for (const raw of ADULT_DICTIONARY) addTermWithAliases(raw, 'term');
+for (const name of PORNSTARS) addTerm(name, name, 'star');
+for (const name of PORNSTARS_EXTENDED) addTerm(name, name, 'star');
+
+// Hydrate any remote names already cached (sync) before we kick off a
+// background refresh.
+try {
+    if (typeof localStorage !== 'undefined') {
+        const cachedRaw = localStorage.getItem(REMOTE_PORNSTARS_LS_KEY);
+        if (cachedRaw) {
+            const cached = JSON.parse(cachedRaw);
+            if (Array.isArray(cached)) {
+                for (const name of cached) {
+                    if (typeof name === 'string' && name.trim()) addTerm(name.trim(), name.trim(), 'star');
+                }
+            }
         }
     }
-    for (const name of PORNSTARS) {
-        out.push({ canonical: name, match: name.toLowerCase(), kind: 'star' });
-    }
-    return out;
-})();
+} catch { /* localStorage unavailable / corrupt — ignore */ }
+
+// Background refresh (fire-and-forget). Runs once per day; failures are
+// silent (we just keep using the bundled + cached list).
+function maybeRefreshRemote() {
+    if (typeof fetch === 'undefined' || typeof localStorage === 'undefined') return;
+    let lastTs = 0;
+    try { lastTs = parseInt(localStorage.getItem(REMOTE_PORNSTARS_TS_KEY) || '0', 10) || 0; } catch { /* */ }
+    if (Date.now() - lastTs < REMOTE_PORNSTARS_TTL_MS) return;
+    fetch(REMOTE_PORNSTARS_URL, { cache: 'no-cache' })
+        .then(r => r.ok ? r.json() : null)
+        .then(data => {
+            if (!Array.isArray(data)) return;
+            const valid = data.filter(s => typeof s === 'string' && s.trim()).map(s => s.trim());
+            try {
+                localStorage.setItem(REMOTE_PORNSTARS_LS_KEY, JSON.stringify(valid));
+                localStorage.setItem(REMOTE_PORNSTARS_TS_KEY, String(Date.now()));
+            } catch { /* quota — non-fatal */ }
+            for (const name of valid) addTerm(name, name, 'star');
+        })
+        .catch(() => { /* offline / 404 / CORS — silent */ });
+}
+// Defer the refresh slightly so we don't compete with the page's first
+// paint. setTimeout 0 is enough — pushes it past the current microtask
+// queue so React's first commit goes first.
+if (typeof setTimeout !== 'undefined') setTimeout(maybeRefreshRemote, 0);
 
 function readHistory() {
     try {
@@ -121,7 +188,7 @@ function suggest(q, limit = 8) {
     const dictPrefix = [];
     const dictSubstring = [];
     const usedCanonical = new Set();
-    for (const t of TERMS) {
+    for (const t of _terms) {
         const canonicalLc = t.canonical.toLowerCase();
         if (seen.has(canonicalLc) || usedCanonical.has(canonicalLc)) continue;
         if (t.match.startsWith(trimmed)) {
