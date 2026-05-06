@@ -102,11 +102,17 @@ async function resolveHashFromUrl({ downloadUrl, magnetUrl, indexer }) {
                 message: data.message || `${indexer || 'This indexer'} daily limit reached — try another indexer (retries in ~${mins}min)`,
             };
         }
-        // 404 from this endpoint almost always means the user is running
-        // a stale launcher install whose addon predates /rd/resolve-url.
-        // Surface a clear, actionable message instead of the generic
-        // "could not resolve" so the user knows what to do.
+        // 404 with `not_resolvable` is the addon telling us this specific URL
+        // can't be turned into a .torrent — show a try-another-result message.
+        // 404 with NO JSON body (or an unrecognised error) means the user is
+        // running a stale launcher whose addon predates this endpoint.
         if (res.status === 404) {
+            if (data && data.error === 'not_resolvable') {
+                return {
+                    error: 'not_resolvable',
+                    message: data.message || `Couldn't resolve this ${indexer || 'result'} — try another release below`,
+                };
+            }
             return {
                 error: 'addon_outdated',
                 message: 'Incognito addon is out of date — quit the launcher (right-click tray icon → Exit), restart it, and the addon will auto-update. If this keeps happening, download the latest StremioLauncherFULL.exe from the project page.',
@@ -407,6 +413,8 @@ const Torrent = ({ urlParams }) => {
                 <div className={styles['resolving-shimmer']} />
                 <div className={styles['resolving-gradient-bottom']} />
                 <div className={styles['resolving-gradient-left']} />
+                {/* SVG noise overlay masks gradient banding on 4K displays */}
+                <div className={styles['resolving-noise']} />
 
                 <div className={styles['resolving-content']}>
                     <div className={styles['resolving-title']} title={title}>{title}</div>
@@ -414,6 +422,21 @@ const Torrent = ({ urlParams }) => {
                         {error || picking ? null : <span className={styles['resolving-spinner']} aria-hidden="true" />}
                         <span>{error ? `Error: ${error}` : status}</span>
                     </div>
+
+                    {error ? (
+                        <div className={styles['resolving-actions']}>
+                            <button
+                                type="button"
+                                className={styles['action-button']}
+                                onClick={() => {
+                                    if (window.history.length > 1) window.history.back();
+                                    else window.location.hash = fromIncognito ? '#/incognito' : '#/search';
+                                }}
+                            >
+                                ← Back to results
+                            </button>
+                        </div>
+                    ) : null}
 
                     <div className={styles['resolving-badges']}>
                         {seeders !== null ? (

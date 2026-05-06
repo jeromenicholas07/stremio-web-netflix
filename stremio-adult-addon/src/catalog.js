@@ -53,6 +53,11 @@ function qualityFromTitle(title) {
 function cleanTitle(raw) {
     if (!raw) return '';
     return String(raw)
+        // Some indexers stuff the source URL or extra-info paragraphs into
+        // the title field, separated from the actual name by literal `\n`,
+        // newlines or "https://...". Cut at the first such break and use the
+        // first chunk as the display title.
+        .split(/\\n|[\r\n]+|\s*https?:\/\//)[0]
         .replace(/\[[^\]]*\]|\([^)]*\)|\{[^}]*\}/g, ' ')
         .replace(/\b(2160p|1080p|720p|480p|360p|4k|uhd|hdr|x264|x265|h\.?264|h\.?265|hevc|avc|web-?dl|webrip|bdrip|brrip|bluray|hdrip|remux|10bit|aac|ac3|dts|mp4|mkv|avi)\b/gi, ' ')
         .replace(/[._]+/g, ' ')

@@ -34,7 +34,9 @@ const useProwlarrSearch = (query) => {
         const ctrl = new AbortController();
         setState({ loading: true, metas: [], error: null });
 
-        const url = `${addonUrl}/catalog/other/torrent-search/search=${encodeURIComponent(query)}.json`;
+        // Ask the addon for the addon's hard ceiling (200) so we get as many
+        // hits as Prowlarr will give us — sorted by seeders inside the addon.
+        const url = `${addonUrl}/catalog/other/torrent-search/search=${encodeURIComponent(query)}&limit=150.json`;
         fetch(url, { signal: ctrl.signal })
             .then((res) => (res.ok ? res.json() : Promise.reject(new Error(`HTTP ${res.status}`))))
             .then((data) => {

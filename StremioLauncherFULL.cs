@@ -40,7 +40,7 @@ class StremioLauncherFULL
     // with the freshly-downloaded exe and relaunches. Bump this whenever you
     // ship a new StremioLauncherFULL.exe — and update the same value in the
     // version file deployed to gh-pages (the deploy script handles this).
-    const string LAUNCHER_VERSION = "2026-05-06-self-update";
+    const string LAUNCHER_VERSION = "2026-05-07-cleaner-titles";
 
     // Bump BASE_LAUNCHER_VERSION whenever StremioLauncher.exe changes. We
     // write this string into <rootDir>\StremioLauncher.version on a fresh
@@ -58,7 +58,7 @@ class StremioLauncherFULL
     // addon" actually take effect on existing installs — the prior
     // launcher only extracted the addon on first run, so users who'd
     // already initialised stayed on stale buggy code forever.
-    const string ADDON_VERSION = "2026-04-30-strict-quota";
+    const string ADDON_VERSION = "2026-05-07-clean-titles";
 
     // Portable Node.js — just need node.exe for the addon
     const string NODE_URL = "https://nodejs.org/dist/v20.18.1/node-v20.18.1-win-x64.zip";

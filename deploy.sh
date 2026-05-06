@@ -108,6 +108,45 @@ if [ -x "$CSC" ]; then
 else
     echo "WARN: csc.exe not found at $CSC — keeping existing launcher binaries on gh-pages"
 fi
+
+echo "=== Step 5c: Rebuild addon zip ==="
+# stremio-adult-addon.zip is what the launcher fetches when ADDON_VERSION
+# moves. If we don't repackage it on every deploy, addon source changes never
+# reach users — they get a stale zip on update.
+ADDON_DIR="stremio-adult-addon"
+ADDON_VER=$(sed -n 's/.*const string ADDON_VERSION = "\([^"]*\)".*/\1/p' StremioLauncherFULL.cs | head -1)
+if [ -z "$ADDON_VER" ]; then
+    echo "ERROR: failed to extract ADDON_VERSION from StremioLauncherFULL.cs"
+    exit 1
+fi
+echo "ADDON_VERSION=$ADDON_VER"
+# Production deps in the addon are bundled into the zip (no `npm install` on
+# the user's machine). Install them if they're missing.
+if [ ! -d "$ADDON_DIR/node_modules" ]; then
+    echo "Installing addon production dependencies..."
+    (cd "$ADDON_DIR" && npm install --omit=dev --silent) || { echo "ERROR: npm install failed for addon"; exit 1; }
+fi
+# Stage and zip via PowerShell's Compress-Archive (no `zip` binary on MSYS).
+STAGING_WIN="$(pwd -W 2>/dev/null || pwd)/build/_addon_staging"
+ADDON_ZIP_WIN="$(pwd -W 2>/dev/null || pwd)/build/stremio-adult-addon.zip"
+rm -rf build/_addon_staging build/stremio-adult-addon.zip
+mkdir -p build/_addon_staging/stremio-adult-addon
+cp     "$ADDON_DIR/index.js"     build/_addon_staging/stremio-adult-addon/
+cp     "$ADDON_DIR/package.json" build/_addon_staging/stremio-adult-addon/
+cp -r  "$ADDON_DIR/src"          build/_addon_staging/stremio-adult-addon/
+cp -r  "$ADDON_DIR/node_modules" build/_addon_staging/stremio-adult-addon/
+# Drop the version marker into the staging dir so the launcher's
+# .addon-version check has something to compare against immediately on
+# extraction (otherwise EnsureAddonUpToDate sees a missing marker on
+# first run and treats it as needing a refresh).
+printf '%s' "$ADDON_VER" > build/_addon_staging/stremio-adult-addon/.addon-version
+MSYS_NO_PATHCONV=1 powershell.exe -NoProfile -Command \
+    "Compress-Archive -Path '$STAGING_WIN\\*' -DestinationPath '$ADDON_ZIP_WIN' -CompressionLevel Optimal -Force" \
+    || { echo "ERROR: failed to compress addon zip"; exit 1; }
+rm -rf build/_addon_staging
+cp build/stremio-adult-addon.zip /tmp/stremio-deploy/stremio-adult-addon.zip
+ZIP_SIZE=$(du -k build/stremio-adult-addon.zip | cut -f1)
+echo "OK: addon zipped (${ZIP_SIZE} KB)"
 echo "Saved build to /tmp/stremio-deploy"
 
 echo "=== Step 6: Switch to gh-pages and deploy ==="
