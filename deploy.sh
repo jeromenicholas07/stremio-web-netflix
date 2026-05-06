@@ -67,6 +67,35 @@ echo "publicPath verified OK"
 echo "=== Step 5: Save build to /tmp (git checkout wipes build/) ==="
 rm -rf /tmp/stremio-deploy
 cp -r build /tmp/stremio-deploy
+
+echo "=== Step 5b: Compile launchers + extract version strings ==="
+# Build StremioLauncher.exe + StremioLauncherFULL.exe and read the version
+# constants out of the .cs sources so we can write matching .version files
+# on gh-pages. The launchers self-update by polling these .version URLs.
+CSC="/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
+DLL_DIR='C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
+mkdir -p /tmp/stremio-deploy
+if [ -x "$CSC" ]; then
+    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo \
+        /out:/tmp/stremio-deploy/StremioLauncher.exe StremioLauncher.cs \
+        || { echo "ERROR: StremioLauncher.cs failed to compile"; exit 1; }
+    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo \
+        "/r:$DLL_DIR\\System.IO.Compression.dll" \
+        "/r:$DLL_DIR\\System.IO.Compression.FileSystem.dll" \
+        /out:/tmp/stremio-deploy/StremioLauncherFULL.exe StremioLauncherFULL.cs \
+        || { echo "ERROR: StremioLauncherFULL.cs failed to compile"; exit 1; }
+    # Extract version constants — the launcher uses these strings to decide
+    # whether to self-update. Must match exactly.
+    LAUNCHER_VER=$(grep -oP 'LAUNCHER_VERSION = "\K[^"]+' StremioLauncherFULL.cs | head -1)
+    BASE_VER=$(grep -oP 'BASE_LAUNCHER_VERSION = "\K[^"]+' StremioLauncherFULL.cs | head -1)
+    echo "LAUNCHER_VERSION=$LAUNCHER_VER"
+    echo "BASE_LAUNCHER_VERSION=$BASE_VER"
+    printf '%s' "$LAUNCHER_VER" > /tmp/stremio-deploy/StremioLauncherFULL.version
+    printf '%s' "$BASE_VER"     > /tmp/stremio-deploy/StremioLauncher.version
+    echo "OK: launchers compiled + .version files written"
+else
+    echo "WARN: csc.exe not found at $CSC — keeping existing launcher binaries on gh-pages"
+fi
 echo "Saved build to /tmp/stremio-deploy"
 
 echo "=== Step 6: Switch to gh-pages and deploy ==="

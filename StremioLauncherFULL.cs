@@ -23,6 +23,7 @@ using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 
 class StremioLauncherFULL
@@ -33,6 +34,21 @@ class StremioLauncherFULL
     // SHARED dir, NOT under this version. Bumping the version does NOT cost
     // the user their Prowlarr setup — see `sharedProwlarrData` below.
     const string PAYLOAD_VERSION = "1.6.1";
+
+    // The launcher checks https://.../StremioLauncherFULL.version on every
+    // start. If the remote string differs from this constant, it self-replaces
+    // with the freshly-downloaded exe and relaunches. Bump this whenever you
+    // ship a new StremioLauncherFULL.exe — and update the same value in the
+    // version file deployed to gh-pages (the deploy script handles this).
+    const string LAUNCHER_VERSION = "2026-05-06-self-update";
+
+    // Bump BASE_LAUNCHER_VERSION whenever StremioLauncher.exe changes. We
+    // write this string into <rootDir>\StremioLauncher.version on a fresh
+    // install AND on every successful update; on every start, if the value
+    // on disk differs we re-download just the base launcher. This is the
+    // same pattern as ADDON_VERSION below — small targeted update, no
+    // full re-install.
+    const string BASE_LAUNCHER_VERSION = "2026-05-06-quiet-logs";
 
     // Bump ADDON_VERSION on every addon code change. The launcher checks
     // <rootDir>\stremio-adult-addon\.addon-version against this on every
@@ -57,6 +73,9 @@ class StremioLauncherFULL
     const string ADDON_URL = "https://jeromenicholas07.github.io/stremio-web-netflix/stremio-adult-addon.zip";
     // Base launcher (also on Pages)
     const string BASE_LAUNCHER_URL = "https://jeromenicholas07.github.io/stremio-web-netflix/StremioLauncher.exe";
+    // Self-update endpoints
+    const string LAUNCHER_VERSION_URL = "https://jeromenicholas07.github.io/stremio-web-netflix/StremioLauncherFULL.version";
+    const string LAUNCHER_EXE_URL = "https://jeromenicholas07.github.io/stremio-web-netflix/StremioLauncherFULL.exe";
 
     const int PROWLARR_PORT = 9696;
     const int ADDON_PORT = 7000;
@@ -83,6 +102,17 @@ class StremioLauncherFULL
         // TLS 1.2 required for GitHub / nodejs.org downloads
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
 
+        // Check for self-update FIRST. If a new build is available we
+        // download it, swap in over our own exe, and relaunch — by the time
+        // we get past this call we're either on the current version or
+        // running with the latest one. Failures are non-fatal and silent.
+        if (CheckSelfUpdate())
+        {
+            // Self-update spawned a swap-and-relaunch script and we should exit
+            // immediately so the script can replace our exe.
+            return 0;
+        }
+
         string appRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "StremioLauncherFULL");
@@ -94,7 +124,7 @@ class StremioLauncherFULL
         string sharedProwlarrData = Path.Combine(sharedDir, "prowlarr-data");
         string marker = Path.Combine(rootDir, ".ready");
 
-        Console.WriteLine("=== StremioLauncherFULL " + PAYLOAD_VERSION + " ===");
+        Console.WriteLine("=== StremioLauncherFULL " + LAUNCHER_VERSION + " (payload " + PAYLOAD_VERSION + ") ===");
         Console.WriteLine("Install root: " + rootDir);
         Console.WriteLine("Shared data:  " + sharedDir);
         Console.WriteLine();
@@ -161,6 +191,11 @@ class StremioLauncherFULL
         KillByPort(PROWLARR_PORT);
         KillByPort(ADDON_PORT);
         KillByPort(FLARESOLVERR_PORT);
+
+        // Auto-update the base launcher if its version constant has moved.
+        // KillByPort already freed the audio/CORS ports above so any running
+        // copy from a previous start has released its file lock.
+        EnsureBaseLauncherUpToDate(rootDir);
 
         // Auto-update just the addon if the deployed version differs from
         // what's on disk. Runs AFTER KillByPort so the addon process can't
@@ -406,6 +441,208 @@ class StremioLauncherFULL
         finally
         {
             try { File.Delete(zipPath); } catch { }
+        }
+    }
+
+    // ── Self-update (replace our own exe) ────────────────────
+    //
+    // Strategy: read the remote version string, compare to our compiled-in
+    // LAUNCHER_VERSION, and if they differ, download the new exe to a
+    // sibling temp file, write a tiny .cmd script that waits for our PID
+    // to exit then replaces our exe and relaunches, then exit. The script
+    // self-deletes when done.
+    //
+    // Failures are non-fatal: we just keep running on the current version.
+    // Returns true if a self-update is in progress and the caller should
+    // exit immediately. Returns false in every other case (no update,
+    // already current, or error during update — keep running).
+    static bool CheckSelfUpdate()
+    {
+        try
+        {
+            string currentExe = null;
+            try { currentExe = Process.GetCurrentProcess().MainModule.FileName; } catch { /* */ }
+            if (string.IsNullOrEmpty(currentExe) || !File.Exists(currentExe)) return false;
+            // Don't try to self-update if we're running from a non-writable
+            // location (e.g. mounted ISO) — fall through to normal start.
+            try
+            {
+                using (var fs = File.OpenWrite(currentExe + ".update.test"))
+                    fs.WriteByte(0);
+                File.Delete(currentExe + ".update.test");
+            }
+            catch
+            {
+                Console.WriteLine("[update] self-update skipped — install location is not writable");
+                return false;
+            }
+
+            string remote = HttpGetText(LAUNCHER_VERSION_URL, 5000);
+            if (string.IsNullOrWhiteSpace(remote)) return false;
+            remote = remote.Trim();
+            if (remote == LAUNCHER_VERSION)
+            {
+                // Up to date — silent.
+                return false;
+            }
+
+            Console.WriteLine("[update] StremioLauncherFULL update available: "
+                + LAUNCHER_VERSION + " → " + remote);
+
+            string tempExe = currentExe + ".update";
+            string script = currentExe + ".update.cmd";
+            try { File.Delete(tempExe); } catch { }
+            try { File.Delete(script); } catch { }
+
+            Console.Write("[update] downloading new exe... ");
+            using (var wc = new WebClient())
+            {
+                wc.Headers["Cache-Control"] = "no-cache";
+                wc.Headers["Pragma"] = "no-cache";
+                wc.DownloadFile(LAUNCHER_EXE_URL + "?v=" + Uri.EscapeDataString(remote), tempExe);
+            }
+            long size = new FileInfo(tempExe).Length;
+            // Sanity check — a real launcher exe is ~25KB. Anything under 5KB is
+            // almost certainly an HTML 404 page that downloaded successfully.
+            if (size < 5000)
+            {
+                Console.WriteLine("FAILED (only " + size + " bytes — keeping current version)");
+                try { File.Delete(tempExe); } catch { }
+                return false;
+            }
+            Console.WriteLine("done (" + (size / 1024) + " KB)");
+
+            // Build the swap script. Uses cmd's built-in tools only — no
+            // PowerShell dependency. The /b flag on the start command means
+            // "no new console window for the swap script itself", and we
+            // use start "" (with empty title) when relaunching so the new
+            // exe gets its own console.
+            int pid = Process.GetCurrentProcess().Id;
+            string scriptText =
+                "@echo off\r\n"
+                + "rem Wait for parent (PID " + pid + ") to exit, then swap and relaunch.\r\n"
+                + ":wait\r\n"
+                + "tasklist /FI \"PID eq " + pid + "\" 2>nul | find \"" + pid + "\" >nul\r\n"
+                + "if not errorlevel 1 (\r\n"
+                + "  ping -n 2 127.0.0.1 >nul\r\n"
+                + "  goto wait\r\n"
+                + ")\r\n"
+                + "rem Replace exe; retry a few times in case AV is scanning.\r\n"
+                + "set TRIES=0\r\n"
+                + ":swap\r\n"
+                + "move /Y \"" + tempExe + "\" \"" + currentExe + "\" >nul 2>&1\r\n"
+                + "if errorlevel 1 (\r\n"
+                + "  set /A TRIES=%TRIES%+1\r\n"
+                + "  if %TRIES% LSS 10 (\r\n"
+                + "    ping -n 2 127.0.0.1 >nul\r\n"
+                + "    goto swap\r\n"
+                + "  )\r\n"
+                + "  echo [update] FAILED to replace " + currentExe + "\r\n"
+                + "  pause\r\n"
+                + "  goto cleanup\r\n"
+                + ")\r\n"
+                + "start \"\" \"" + currentExe + "\"\r\n"
+                + ":cleanup\r\n"
+                + "del \"%~f0\"\r\n";
+            File.WriteAllText(script, scriptText, Encoding.ASCII);
+
+            var psi = new ProcessStartInfo("cmd.exe", "/c \"" + script + "\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WorkingDirectory = Path.GetDirectoryName(currentExe),
+            };
+            Process.Start(psi);
+            Console.WriteLine("[update] relaunching with new version...");
+            // Give the helper a moment to actually start its wait loop.
+            Thread.Sleep(300);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[update] self-update check failed: " + ex.Message);
+            return false;
+        }
+    }
+
+    static string HttpGetText(string url, int timeoutMs)
+    {
+        try
+        {
+            var wr = (HttpWebRequest)WebRequest.Create(url);
+            wr.Timeout = timeoutMs;
+            wr.ReadWriteTimeout = timeoutMs;
+            wr.Headers["Cache-Control"] = "no-cache";
+            wr.Headers["Pragma"] = "no-cache";
+            using (var resp = (HttpWebResponse)wr.GetResponse())
+            using (var s = resp.GetResponseStream())
+            using (var sr = new StreamReader(s, Encoding.UTF8))
+            {
+                return sr.ReadToEnd();
+            }
+        }
+        catch { return null; }
+    }
+
+    /// <summary>
+    /// Re-download just StremioLauncher.exe if the version constant has
+    /// moved past whatever's noted on disk. The marker is written next to
+    /// the exe so it survives PAYLOAD_VERSION roll-forwards — but on a
+    /// fresh PAYLOAD_VERSION, we won't find a marker AND the exe will
+    /// have just been downloaded by first-run init, so we just write
+    /// the marker without redownloading.
+    /// </summary>
+    static void EnsureBaseLauncherUpToDate(string rootDir)
+    {
+        string baseExe = Path.Combine(rootDir, "StremioLauncher.exe");
+        string versionFile = Path.Combine(rootDir, "StremioLauncher.version");
+        string current = "";
+        try { if (File.Exists(versionFile)) current = File.ReadAllText(versionFile).Trim(); }
+        catch { /* unreadable → treat as outdated */ }
+
+        if (current == BASE_LAUNCHER_VERSION)
+        {
+            return; // up to date — silent
+        }
+
+        // Fresh install: exe was just downloaded by first-run init. We just
+        // need to record the version. (No exe → nothing to update against.)
+        if (!File.Exists(baseExe))
+        {
+            try { File.WriteAllText(versionFile, BASE_LAUNCHER_VERSION); } catch { }
+            return;
+        }
+
+        Console.WriteLine("[update] base launcher version mismatch — disk='"
+            + (current.Length > 0 ? current : "(none)") + "', wanted='" + BASE_LAUNCHER_VERSION + "'");
+        Console.Write("[update] downloading new StremioLauncher.exe... ");
+        try
+        {
+            string tempExe = baseExe + ".new";
+            using (var wc = new WebClient())
+            {
+                wc.Headers["Cache-Control"] = "no-cache";
+                wc.Headers["Pragma"] = "no-cache";
+                wc.DownloadFile(BASE_LAUNCHER_URL + "?v=" + Uri.EscapeDataString(BASE_LAUNCHER_VERSION), tempExe);
+            }
+            long size = new FileInfo(tempExe).Length;
+            if (size < 5000)
+            {
+                Console.WriteLine("FAILED (only " + size + " bytes — keeping existing exe)");
+                try { File.Delete(tempExe); } catch { }
+                return;
+            }
+            // Replace the exe. KillByPort already freed any audio/CORS
+            // listeners, so the previous base launcher (if still running
+            // for some reason) shouldn't have a lock.
+            File.Copy(tempExe, baseExe, true);
+            try { File.Delete(tempExe); } catch { }
+            File.WriteAllText(versionFile, BASE_LAUNCHER_VERSION);
+            Console.WriteLine("done (" + (size / 1024) + " KB)");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("FAILED (" + ex.Message + " — keeping existing exe)");
         }
     }
 
