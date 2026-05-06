@@ -99,6 +99,59 @@ class StremioLauncher
         return 0;
     }
 
+    // ── Filtered server logging ──────────────────────────────
+    //
+    // Stremio's streaming server probes ffmpeg's available formats, codecs,
+    // encoders and decoders at startup, dumping hundreds of lines that look
+    // like `Stream #0:0`, `[mov,mp4,m4a @ 0x...]`, `D.V... vp9 ...`. None of
+    // it's actionable; we drop those and let everything else through.
+    // Genuine errors / warnings ALWAYS pass.
+    static void WriteServerLine(string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+        string t = line.TrimStart();
+
+        // Always show errors, warnings, and "cannot/failed" diagnostics.
+        if (HasAny(line, new[] { "error", "exception", "failed", "fatal", "warn", "cannot", "unable", "denied", "refused" }))
+        {
+            ConsoleColor prev = Console.ForegroundColor;
+            try
+            {
+                Console.ForegroundColor = HasAny(line, new[] { "error", "exception", "fatal", "failed" })
+                    ? ConsoleColor.Red : ConsoleColor.Yellow;
+                Console.WriteLine("[server] " + line);
+            }
+            finally { Console.ForegroundColor = prev; }
+            return;
+        }
+
+        // Drop ffmpeg probe banners + per-format / per-codec diagnostic lines.
+        if (t.StartsWith("ffmpeg version") || t.StartsWith("built with") ||
+            t.StartsWith("configuration:") || t.StartsWith("lib") ||
+            t.StartsWith("Input #") || t.StartsWith("Output #") ||
+            t.StartsWith("Stream #") || t.StartsWith("Stream mapping") ||
+            t.StartsWith("Press [q]") || t.StartsWith("size=") ||
+            t.StartsWith("frame=") || t.StartsWith("video:") || t.StartsWith("audio:")) return;
+        // Per-format diagnostic prefix: `[mov,mp4,m4a @ 0x...]` / `[aac @ 0x...]`
+        if (t.Length > 1 && t[0] == '[' && t.IndexOf("@ 0x") > 0) return;
+        // Codec capability rows: ` D.V... vp9   On2 VP9 ...`
+        if (t.Length > 7 && (t.StartsWith("D.") || t.StartsWith(".V")
+            || t.StartsWith(".A") || t.StartsWith("..S") || t.StartsWith("D.V")
+            || t.StartsWith(".EV") || t.StartsWith(".EA"))) return;
+
+        Console.WriteLine("[server] " + line);
+    }
+
+    static bool HasAny(string s, string[] keywords)
+    {
+        if (string.IsNullOrEmpty(s)) return false;
+        for (int i = 0; i < keywords.Length; i++)
+        {
+            if (s.IndexOf(keywords[i], StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+        return false;
+    }
+
     static int _shutdown = 0;
     static void Shutdown()
     {
@@ -147,14 +200,15 @@ class StremioLauncher
             };
             _serverProc = Process.Start(psi);
 
-            // Log server output in background
+            // Log server output in background — filtered to drop FFmpeg
+            // codec/encoder probe spam. Genuine errors / warnings still pass.
             new Thread(() =>
             {
                 try
                 {
                     string line;
                     while ((line = _serverProc.StandardOutput.ReadLine()) != null)
-                        Console.WriteLine("[server] " + line);
+                        WriteServerLine(line);
                 }
                 catch { }
             }) { IsBackground = true }.Start();
@@ -165,7 +219,7 @@ class StremioLauncher
                 {
                     string line;
                     while ((line = _serverProc.StandardError.ReadLine()) != null)
-                        Console.WriteLine("[server] " + line);
+                        WriteServerLine(line);
                 }
                 catch { }
             }) { IsBackground = true }.Start();
@@ -615,8 +669,9 @@ class StremioLauncher
                 if (!string.IsNullOrEmpty(customHeaders))
                     ffArgs = string.Format("-headers \"{0}\r\n\" {1}", customHeaders, ffArgs);
 
-                Console.WriteLine("[Extract] start={0}s dur={1}s url={2}...",
-                    start, duration, mediaURL.Length > 80 ? mediaURL.Substring(0, 80) : mediaURL);
+                // Per-request start/done lines are noisy on a 4K terminal. We
+                // log failures only — successes pass silently and the audio
+                // bytes themselves are the success signal.
 
                 var psi = new ProcessStartInfo(_ffmpeg, ffArgs)
                 {
@@ -645,8 +700,7 @@ class StremioLauncher
                 {
                     string stderr = stderrBuf.ToString();
                     string tail = stderr.Length > 300 ? stderr.Substring(stderr.Length - 300) : stderr;
-                    Console.WriteLine("[Extract] FAILED (exit code {0}) url={1}", proc.ExitCode, mediaURL);
-                    Console.WriteLine("[Extract] stderr: {0}", tail);
+                    LogError("[Extract] FAILED (exit code " + proc.ExitCode + ") @ " + start + "s — " + tail);
                     WriteResponse(stream, 500, "text/plain",
                         Encoding.UTF8.GetBytes("FFmpeg error (code " + proc.ExitCode + "): " + tail), true);
                     return;
@@ -657,21 +711,27 @@ class StremioLauncher
                 {
                     string stderr = stderrBuf.ToString();
                     string tail = stderr.Length > 400 ? stderr.Substring(stderr.Length - 400) : stderr;
-                    Console.WriteLine("[Extract] FAILED (0 bytes) url={0}", mediaURL);
-                    Console.WriteLine("[Extract] stderr: {0}", tail);
+                    LogError("[Extract] FAILED (0 bytes) @ " + start + "s — " + tail);
                     WriteResponse(stream, 500, "text/plain",
                         Encoding.UTF8.GetBytes("FFmpeg returned 0 bytes. stderr: " + tail), true);
                     return;
                 }
-                Console.WriteLine("[Extract] Done - {0} bytes ({1:F1}s of audio)",
-                    pcm.Length, (double)pcm.Length / 4.0 / 16000.0);
                 WriteResponse(stream, 200, "application/octet-stream", pcm, true);
             }
         }
         catch (Exception ex)
         {
-            Console.WriteLine("[Extract] Error: " + ex.Message);
+            LogError("[Extract] Error: " + ex.Message);
         }
+    }
+
+    // Red-coloured error line. Shared by extract + (could-be-shared by other
+    // callers if we want to swap their plain Console.WriteLine for this).
+    static void LogError(string line)
+    {
+        ConsoleColor prev = Console.ForegroundColor;
+        try { Console.ForegroundColor = ConsoleColor.Red; Console.WriteLine(line); }
+        finally { Console.ForegroundColor = prev; }
     }
 
     // ── CORS Proxy ───────────────────────────────────────────

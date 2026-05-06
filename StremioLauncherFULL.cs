@@ -186,38 +186,36 @@ class StremioLauncherFULL
         Console.CancelKeyPress += delegate { Shutdown(); };
         AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
 
-        // Start FlareSolverr BEFORE Prowlarr so the proxy is ready when
-        // Prowlarr's indexer health checks run on startup — otherwise the
-        // first round of checks fails with "proxy unavailable" and Prowlarr
-        // marks CF-protected indexers as broken until the user opens the UI.
+        // Background-start every sidecar and launch Stremio immediately. The
+        // per-service WaitForPort runs in its own thread purely for logging
+        // (so the user sees "Prowlarr ready" when it actually comes up). The
+        // addon registers itself with Stremio asynchronously, and Prowlarr's
+        // initial indexer health checks only matter once the user actually
+        // searches — both can happen comfortably after Stremio is on screen.
         if (flaresolverrExe != null)
         {
             StartFlareSolverr(flaresolverrExe);
-            // Chromium cold-start + undetected-chromedriver init takes a while.
-            WaitForPort(FLARESOLVERR_PORT, "FlareSolverr", 40);
+            WaitForPortAsync(FLARESOLVERR_PORT, "FlareSolverr", 40);
         }
         else
         {
             Console.WriteLine("[WARN] flaresolverr.exe not found in " + Path.Combine(rootDir, "flaresolverr"));
         }
 
-        // Start Prowlarr
         if (prowlarrExe != null)
         {
             StartProwlarr(prowlarrExe, prowlarrDataDir);
-            // First boot is slow (migrations + cert generation)
-            WaitForPort(PROWLARR_PORT, "Prowlarr", 60);
+            WaitForPortAsync(PROWLARR_PORT, "Prowlarr", 60);
         }
         else
         {
             Console.WriteLine("[WARN] Prowlarr.exe not found in " + Path.Combine(rootDir, "prowlarr"));
         }
 
-        // Start addon
         if (addonEntry != null && nodeExe != null)
         {
             StartAddon(nodeExe, addonEntry, prowlarrDataDir);
-            WaitForPort(ADDON_PORT, "Incognito addon", 20);
+            WaitForPortAsync(ADDON_PORT, "Incognito addon", 20);
         }
         else
         {
@@ -535,14 +533,37 @@ class StremioLauncherFULL
     {
         new Thread(() =>
         {
-            try { string l; while ((l = proc.StandardOutput.ReadLine()) != null) Console.WriteLine("[" + tag + "] " + l); }
+            try { string l; while ((l = proc.StandardOutput.ReadLine()) != null) WriteFiltered(tag, l, false); }
             catch { }
         }) { IsBackground = true }.Start();
         new Thread(() =>
         {
-            try { string l; while ((l = proc.StandardError.ReadLine()) != null) Console.WriteLine("[" + tag + "] " + l); }
+            try { string l; while ((l = proc.StandardError.ReadLine()) != null) WriteFiltered(tag, l, true); }
             catch { }
         }) { IsBackground = true }.Start();
+    }
+
+    /// <summary>
+    /// Write a child-process log line with our tag, skipping noise. The goal
+    /// isn't to be invisible — errors and warnings always pass through — but
+    /// to drop the per-request chatter and codec/encoder probe spam that
+    /// makes the terminal unreadable. Errors are colorised so they pop.
+    /// </summary>
+    static void WriteFiltered(string tag, string line, bool isStderr)
+    {
+        if (line == null || line.Length == 0) return;
+        if (LogNoise.IsNoise(tag, line)) return;
+        ConsoleColor? color = LogNoise.ColorFor(line, isStderr);
+        if (color.HasValue)
+        {
+            ConsoleColor prev = Console.ForegroundColor;
+            try { Console.ForegroundColor = color.Value; Console.WriteLine("[" + tag + "] " + line); }
+            finally { Console.ForegroundColor = prev; }
+        }
+        else
+        {
+            Console.WriteLine("[" + tag + "] " + line);
+        }
     }
 
     static void WaitForPort(int port, string name, int maxTries)
@@ -559,6 +580,13 @@ class StremioLauncherFULL
             Thread.Sleep(500);
         }
         Console.WriteLine("[WARN] " + name + " not responding on :" + port + " (timeout)");
+    }
+
+    // Same as WaitForPort, but on a background thread so the main flow can
+    // launch Stremio without waiting for sidecars to finish booting.
+    static void WaitForPortAsync(int port, string name, int maxTries)
+    {
+        new Thread(() => WaitForPort(port, name, maxTries)) { IsBackground = true }.Start();
     }
 
     // ── Shutdown ─────────────────────────────────────────────
@@ -784,5 +812,126 @@ class StremioLauncherFULL
             }
         }
         catch { }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════
+//  Log filter — drops codec/encoder probe spam and per-request chatter
+//  while always letting genuine errors / warnings through. Keeps the
+//  terminal usable without hiding anything that matters when something
+//  actually breaks.
+// ════════════════════════════════════════════════════════════════════
+static class LogNoise
+{
+    // Always show lines containing any of these (case-insensitive) — even if
+    // a downstream rule would otherwise filter them. This is the safety net.
+    static readonly string[] AlwaysShowKeywords = {
+        "error", "exception", "failed", "fatal", "warn", "cannot",
+        "unable", "denied", "refused", "timeout", "crash",
+    };
+
+    public static bool IsNoise(string tag, string line)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return true;
+        string trimmed = line.TrimStart();
+
+        // Genuine errors / warnings are NEVER noise.
+        if (HasAnyKeyword(line, AlwaysShowKeywords)) return false;
+
+        // ── Streaming server (`server.js`): drop the codec/encoder probe ──
+        // The Stremio streaming server probes ffmpeg's available formats,
+        // codecs, encoders and decoders at startup, which floods stderr with
+        // hundreds of `[mov,mp4,m4a,...]`, `Stream #0:0`, and `D....` lines
+        // that don't tell anybody anything useful. We keep the high-level
+        // status (listening on port, version banner) and drop the rest.
+        if (tag == "server")
+        {
+            // ffmpeg test/probe banners
+            if (trimmed.StartsWith("ffmpeg version")) return true;
+            if (trimmed.StartsWith("built with")) return true;
+            if (trimmed.StartsWith("configuration:")) return true;
+            if (trimmed.StartsWith("lib")) return true;          // libavutil/libavcodec/...
+            if (trimmed.StartsWith("Input #")) return true;
+            if (trimmed.StartsWith("Output #")) return true;
+            if (trimmed.StartsWith("Stream #")) return true;
+            if (trimmed.StartsWith("Stream mapping")) return true;
+            if (trimmed.StartsWith("Press [q]")) return true;
+            if (trimmed.StartsWith("size=") || trimmed.StartsWith("frame=")) return true;
+            if (trimmed.StartsWith("video:") || trimmed.StartsWith("audio:")) return true;
+            // FFmpeg's per-format diagnostic prefix [mov,mp4,...] / [matroska,...]
+            // and per-encoder probes [aac @ 0x...] / [libx264 @ ...]
+            if (trimmed.Length > 1 && trimmed[0] == '[' && trimmed.IndexOf("@ 0x") > 0) return true;
+            // Probe table rows like " D.V... vp9   On2 VP9 ..."
+            if (trimmed.Length > 7 && (trimmed.StartsWith("D.") || trimmed.StartsWith(".V")
+                || trimmed.StartsWith(".A") || trimmed.StartsWith("..S") || trimmed.StartsWith("D.V")
+                || trimmed.StartsWith(".EV") || trimmed.StartsWith(".EA"))) return true;
+            // Standalone progress / tabular noise
+            if (trimmed.StartsWith("File '") && trimmed.IndexOf("already exists") < 0) return true;
+        }
+
+        // ── FlareSolverr: mute per-request access logs, keep startup/errors ──
+        if (tag == "flaresolverr")
+        {
+            // Successful access log lines start with the timestamp + "GET" / "POST"
+            if (trimmed.IndexOf("\"GET ") > 0 && trimmed.IndexOf(" 200 ") > 0) return true;
+            if (trimmed.IndexOf("\"POST ") > 0 && trimmed.IndexOf(" 200 ") > 0) return true;
+            // The "Incoming request" / "Response in NNNms" pairs that print on
+            // every solved challenge — useful when debugging, noise otherwise.
+            if (trimmed.IndexOf("Incoming request") >= 0) return true;
+            if (trimmed.IndexOf("Response in ") >= 0 && trimmed.IndexOf("ms") > 0) return true;
+            // Selenium / Chromium driver chatter
+            if (trimmed.StartsWith("DevTools listening")) return true;
+            if (trimmed.IndexOf("WebDriverException") >= 0 && trimmed.IndexOf("retry") >= 0) return true;
+        }
+
+        // ── Prowlarr: drop info-level periodic health checks ──
+        if (tag == "prowlarr")
+        {
+            // Default Prowlarr log lines look like:
+            //   2024-05-05 12:34:56.7|Info|HealthCheck|Health check completed
+            // Drop the per-minute Info|HealthCheck and HTTP request log lines,
+            // keep Warn / Error / Fatal.
+            if (trimmed.IndexOf("|Info|") > 0 && (trimmed.IndexOf("HealthCheck") > 0
+                || trimmed.IndexOf("|Http|") > 0 || trimmed.IndexOf("|Bootstrap|") > 0)) return true;
+            if (trimmed.IndexOf("|Debug|") > 0) return true;
+            if (trimmed.IndexOf("|Trace|") > 0) return true;
+        }
+
+        // ── Addon: drop per-request access logs that the express logger emits ──
+        if (tag == "addon")
+        {
+            // Express morgan-style log: GET /path 200 12ms
+            if (trimmed.Length > 4 && (trimmed.StartsWith("GET ") || trimmed.StartsWith("POST "))
+                && (trimmed.IndexOf(" 200 ") > 0 || trimmed.IndexOf(" 304 ") > 0)) return true;
+            // Quota / probe heartbeats — only show on threshold change, drop the rest.
+            if (trimmed.IndexOf("[probe]") >= 0 && trimmed.IndexOf("ok") > 0) return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Returns a console color to highlight the line, or null for plain.
+    /// Errors → red, warnings → yellow, OK banners → green.
+    /// </summary>
+    public static ConsoleColor? ColorFor(string line, bool isStderr)
+    {
+        if (HasAnyKeyword(line, new[] { "error", "exception", "fatal", "failed", "crash" }))
+            return ConsoleColor.Red;
+        if (HasAnyKeyword(line, new[] { "warn", "warning", "denied", "refused", "timeout" }))
+            return ConsoleColor.Yellow;
+        // Don't colorise plain stderr — many tools (Prowlarr, FlareSolverr) write
+        // benign info lines to stderr, and dyeing them red is misleading.
+        return null;
+    }
+
+    static bool HasAnyKeyword(string line, string[] keywords)
+    {
+        if (string.IsNullOrEmpty(line)) return false;
+        for (int i = 0; i < keywords.Length; i++)
+        {
+            if (line.IndexOf(keywords[i], StringComparison.OrdinalIgnoreCase) >= 0) return true;
+        }
+        return false;
     }
 }

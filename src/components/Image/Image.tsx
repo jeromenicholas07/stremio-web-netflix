@@ -1,6 +1,8 @@
 // Copyright (C) 2017-2023 Smart code 203358507
 
 import React, { useCallback, useLayoutEffect, useState } from 'react';
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const upgradeImageUrl = require('stremio/common/upgradeImageUrl');
 
 type Props = {
     className: string,
@@ -25,13 +27,18 @@ const Image = ({ className, src, alt, fallbackSrc, renderFallback, ...props }: P
         setBroken(false);
     }, [src]);
 
-    return (broken || typeof src !== 'string' || src.length === 0) && (typeof renderFallback === 'function' || typeof fallbackSrc === 'string') ?
+    // Auto-upgrade well-known low-res image URLs (Cinemeta / TMDB) so cards
+    // and fullscreen backgrounds stay sharp on high-DPI / 4K displays.
+    const upgradedSrc = upgradeImageUrl(src);
+    const upgradedFallback = upgradeImageUrl(fallbackSrc);
+
+    return (broken || typeof upgradedSrc !== 'string' || upgradedSrc.length === 0) && (typeof renderFallback === 'function' || typeof upgradedFallback === 'string') ?
         typeof renderFallback === 'function' ?
             renderFallback()
             :
-            <img {...props} className={className} src={fallbackSrc} alt={alt} loading='lazy'/>
+            <img {...props} className={className} src={upgradedFallback} alt={alt} loading='lazy'/>
         :
-        <img {...props} className={className} src={src} alt={alt} loading='lazy' onError={onError} />;
+        <img {...props} className={className} src={upgradedSrc} alt={alt} loading='lazy' onError={onError} />;
 };
 
 export default Image;
