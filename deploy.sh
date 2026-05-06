@@ -74,16 +74,22 @@ echo "=== Step 5b: Compile launchers + extract version strings ==="
 # on gh-pages. The launchers self-update by polling these .version URLs.
 CSC="/c/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe"
 DLL_DIR='C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
-mkdir -p /tmp/stremio-deploy
+# Compile into a local build/ first then move — csc spawns a Win32 resource
+# writer that fails if it can't write a sibling .TMP file in the output dir,
+# and the system /tmp on Windows MSYS sometimes resolves to a path that
+# trips it up. Local build/ is always reliable.
+mkdir -p build /tmp/stremio-deploy
 if [ -x "$CSC" ]; then
     MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo \
-        /out:/tmp/stremio-deploy/StremioLauncher.exe StremioLauncher.cs \
+        /out:build/StremioLauncher.exe StremioLauncher.cs \
         || { echo "ERROR: StremioLauncher.cs failed to compile"; exit 1; }
     MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo \
         "/r:$DLL_DIR\\System.IO.Compression.dll" \
         "/r:$DLL_DIR\\System.IO.Compression.FileSystem.dll" \
-        /out:/tmp/stremio-deploy/StremioLauncherFULL.exe StremioLauncherFULL.cs \
+        /out:build/StremioLauncherFULL.exe StremioLauncherFULL.cs \
         || { echo "ERROR: StremioLauncherFULL.cs failed to compile"; exit 1; }
+    cp build/StremioLauncher.exe     /tmp/stremio-deploy/StremioLauncher.exe
+    cp build/StremioLauncherFULL.exe /tmp/stremio-deploy/StremioLauncherFULL.exe
     # Extract version constants — the launcher uses these strings to decide
     # whether to self-update. Must match exactly.
     LAUNCHER_VER=$(grep -oP 'LAUNCHER_VERSION = "\K[^"]+' StremioLauncherFULL.cs | head -1)
