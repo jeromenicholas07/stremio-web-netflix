@@ -91,9 +91,15 @@ if [ -x "$CSC" ]; then
     cp build/StremioLauncher.exe     /tmp/stremio-deploy/StremioLauncher.exe
     cp build/StremioLauncherFULL.exe /tmp/stremio-deploy/StremioLauncherFULL.exe
     # Extract version constants — the launcher uses these strings to decide
-    # whether to self-update. Must match exactly.
-    LAUNCHER_VER=$(grep -oP 'LAUNCHER_VERSION = "\K[^"]+' StremioLauncherFULL.cs | head -1)
-    BASE_VER=$(grep -oP 'BASE_LAUNCHER_VERSION = "\K[^"]+' StremioLauncherFULL.cs | head -1)
+    # whether to self-update. Must match exactly. Using sed (portable) instead
+    # of grep -P which requires a UTF-8 locale that MSYS doesn't always have.
+    # Pick the FIRST match for LAUNCHER_VERSION and the BASE_ one separately.
+    LAUNCHER_VER=$(sed -n 's/.*const string LAUNCHER_VERSION = "\([^"]*\)".*/\1/p' StremioLauncherFULL.cs | head -1)
+    BASE_VER=$(sed -n 's/.*const string BASE_LAUNCHER_VERSION = "\([^"]*\)".*/\1/p' StremioLauncherFULL.cs | head -1)
+    if [ -z "$LAUNCHER_VER" ] || [ -z "$BASE_VER" ]; then
+        echo "ERROR: failed to extract version constants from StremioLauncherFULL.cs"
+        exit 1
+    fi
     echo "LAUNCHER_VERSION=$LAUNCHER_VER"
     echo "BASE_LAUNCHER_VERSION=$BASE_VER"
     printf '%s' "$LAUNCHER_VER" > /tmp/stremio-deploy/StremioLauncherFULL.version
