@@ -6,8 +6,9 @@ const {
     createAudioSession,
 } = require('stremio/services/subtitleSync/audioExtractor');
 const {
-    computeOffset,
     findBestMatch: findBestMatchExport,
+    consensusOffset,
+    indexCues,
     fetchAndParseSubtitles,
     findBestChunkOffsets,
     findChunkOffsetsNearTime,
@@ -131,21 +132,28 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
     }, []);
 
     // ── Compute and apply the final offset from accumulated matches ──
+    // Uses consensus clustering rather than raw median: if some matches locked
+    // onto the wrong instance of a recurring phrase (causing -600s outliers),
+    // they fall outside the cluster of agreeing matches and get dropped.
     const applyOffset = React.useCallback((allOffsets, totalChunksProcessed) => {
-        const sorted = [...allOffsets].sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        const medianOffset = sorted.length % 2 !== 0
-            ? sorted[mid]
-            : (sorted[mid - 1] + sorted[mid]) / 2;
-        const delayMs = Math.round(medianOffset);
+        const { offset, cluster, outliers, confidence } = consensusOffset(allOffsets);
+        const delayMs = Math.round(offset);
         setSubtitlesDelay(delayMs);
         setSyncResult({
-            offset: medianOffset,
-            confidence: allOffsets.length / Math.max(allOffsets.length + 1, 1),
-            matchCount: allOffsets.length,
+            offset: offset,
+            confidence: confidence,
+            matchCount: cluster.length,
+            rejectedCount: outliers.length,
             totalChunks: totalChunksProcessed,
         });
         setSyncStatus(SYNC_STATUS.DONE);
+        // eslint-disable-next-line no-console
+        console.log(
+            '[WhisperSync] Consensus offset:', delayMs + 'ms',
+            '| cluster:', cluster.length, '/', allOffsets.length,
+            '| rejected outliers:', outliers.length,
+            outliers.length > 0 ? '(' + outliers.map(function (o) { return Math.round(o) + 'ms'; }).join(', ') + ')' : '',
+        );
     }, [setSubtitlesDelay]);
 
     // ══════════════════════════════════════════════════════════════
@@ -249,10 +257,15 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 );
             }
 
-            // ── Early stop: enough confidence? ──
-            if (allOffsets.length >= MIN_MATCHES_FOR_CONFIDENCE) {
+            // ── Early stop: enough *agreeing* matches? ──
+            // Don't stop on raw count alone — a few outlier matches with no
+            // consensus would produce a wrong sync. Require MIN_MATCHES_FOR_CONFIDENCE
+            // offsets that agree within the consensus bandwidth.
+            const { cluster: earlyCluster } = consensusOffset(allOffsets);
+            if (earlyCluster.length >= MIN_MATCHES_FOR_CONFIDENCE) {
                 // eslint-disable-next-line no-console
-                console.log('[WhisperSync] Confidence reached after', totalChunksProcessed, 'chunks');
+                console.log('[WhisperSync] Consensus reached after', totalChunksProcessed, 'chunks (',
+                    earlyCluster.length, 'agreeing /', allOffsets.length, 'total)');
                 applyOffset(allOffsets, totalChunksProcessed);
                 return;
             }
@@ -312,7 +325,8 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                     const matchOffsets = collectMatches(transcription, audioData, cues);
                     allOffsets.push.apply(allOffsets, matchOffsets);
 
-                    if (allOffsets.length >= MIN_MATCHES_FOR_CONFIDENCE) {
+                    const { cluster: hlsCluster } = consensusOffset(allOffsets);
+                    if (hlsCluster.length >= MIN_MATCHES_FOR_CONFIDENCE) {
                         applyOffset(allOffsets, attempt + 1);
                         session.close();
                         return;
@@ -368,6 +382,8 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
             const cues = await fetchAndParseSubtitles(track);
             if (cancelledRef.current) return;
             if (!cues.length) throw new Error('No subtitle cues found');
+            // Tokenize once up-front so every chunk's match step is O(N) cheap.
+            indexCues(cues);
 
             // Prefer direct FFmpeg extraction (fast, seekable, parallel batches)
             const directAvailable = await checkExtractServer();

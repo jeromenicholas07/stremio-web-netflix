@@ -1,5 +1,9 @@
-const MATCH_THRESHOLD = 0.4;
-const MIN_MATCHES_FOR_CONFIDENCE = 3;
+const MIN_TOKEN_SIMILARITY = 0.55;       // dice score floor for a single match
+const MIN_WHISPER_TOKENS = 3;            // skip very short whisper segments ("yes", "what?")
+const MIN_LENGTH_RATIO = 0.4;            // skip wildly mismatched lengths
+const MAX_SPAN_CUES = 3;                 // merge up to N consecutive cues into one match candidate
+const MIN_MATCHES_FOR_CONFIDENCE = 3;    // minimum *clustered* matches to call sync confident
+const CONSENSUS_BANDWIDTH_MS = 4000;     // offsets within ±2s of each other count as agreeing
 
 function parseTimestamp(timestamp) {
     const parts = timestamp.replace(',', '.').split(':');
@@ -72,75 +76,184 @@ function parseSubtitles(text) {
     return parseSRT(trimmed);
 }
 
-function normalizeText(text) {
+function tokenize(text) {
+    if (!text) return [];
     return text.toLowerCase()
-        .replace(/[^\w\s]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
+        .replace(/[^\p{L}\p{N}\s']/gu, ' ')
+        .split(/\s+/)
+        .filter((w) => w.length > 0);
 }
 
-function levenshteinDistance(a, b) {
-    if (a.length === 0) return b.length;
-    if (b.length === 0) return a.length;
-
-    const matrix = [];
-
-    for (let i = 0; i <= b.length; i++) {
-        matrix[i] = [i];
+function bigrams(tokens) {
+    if (tokens.length < 2) return [];
+    const out = new Array(tokens.length - 1);
+    for (let i = 0; i < tokens.length - 1; i++) {
+        out[i] = tokens[i] + ' ' + tokens[i + 1];
     }
-    for (let j = 0; j <= a.length; j++) {
-        matrix[0][j] = j;
-    }
+    return out;
+}
 
-    for (let i = 1; i <= b.length; i++) {
-        for (let j = 1; j <= a.length; j++) {
-            const cost = b[i - 1] === a[j - 1] ? 0 : 1;
-            matrix[i][j] = Math.min(
-                matrix[i - 1][j] + 1,
-                matrix[i][j - 1] + 1,
-                matrix[i - 1][j - 1] + cost,
-            );
+// Dice coefficient on multisets: 2 * |A ∩ B| / (|A| + |B|).
+// Faster than Levenshtein and rewards multi-word phrase agreement
+// (matching three bigrams in a row is much stronger evidence than three
+// random matching characters).
+function diceSimilarity(a, b) {
+    if (a.length === 0 || b.length === 0) return 0;
+
+    const counts = new Map();
+    for (const g of a) counts.set(g, (counts.get(g) || 0) + 1);
+
+    let intersection = 0;
+    for (const g of b) {
+        const left = counts.get(g) || 0;
+        if (left > 0) {
+            intersection++;
+            counts.set(g, left - 1);
         }
     }
 
-    return matrix[b.length][a.length];
+    return (2 * intersection) / (a.length + b.length);
 }
 
-function normalizedDistance(a, b) {
-    const maxLen = Math.max(a.length, b.length);
-    if (maxLen === 0) return 0;
-    return levenshteinDistance(a, b) / maxLen;
-}
-
-function findBestMatch(whisperText, cues, searchWindowMs) {
-    const normalized = normalizeText(whisperText);
-    if (normalized.length < 3) return null;
-
-    let bestMatch = null;
-    let bestDistance = MATCH_THRESHOLD;
-
+// Tokenize cues once per sync. Stash on the cue object so repeated calls
+// during a single sync (multiple whisper chunks) don't re-tokenize.
+function indexCues(cues) {
     for (const cue of cues) {
-        const cueNormalized = normalizeText(cue.text);
-        if (cueNormalized.length < 3) continue;
-
-        const shorter = normalized.length < cueNormalized.length ? normalized : cueNormalized;
-        const longer = normalized.length < cueNormalized.length ? cueNormalized : normalized;
-
-        if (Math.abs(shorter.length - longer.length) / Math.max(shorter.length, longer.length) > 0.6) {
-            continue;
+        if (cue._tokens === undefined) {
+            cue._tokens = tokenize(cue.text);
+            cue._bigrams = bigrams(cue._tokens);
         }
+    }
+    return cues;
+}
 
-        const distance = normalizedDistance(normalized, cueNormalized);
-        if (distance < bestDistance) {
-            bestDistance = distance;
-            bestMatch = cue;
+/**
+ * Find the best subtitle span matching a Whisper transcription segment.
+ *
+ * Tries spans of 1..MAX_SPAN_CUES consecutive cues so a Whisper segment that
+ * straddles a cue boundary can still match. Scoring uses word-bigram Dice
+ * similarity (falls back to unigram for very short text), which captures
+ * multi-word phrase agreement better than single-cue character distance.
+ *
+ * Returns {start, end, score, text, spanLength} or null. The `start` is the
+ * first cue's start so offset = whisperStartMs - match.start makes sense.
+ */
+function findBestMatch(whisperText, cues) {
+    const wTokens = tokenize(whisperText);
+    if (wTokens.length < MIN_WHISPER_TOKENS) return null;
+
+    indexCues(cues);
+    const wBigrams = bigrams(wTokens);
+    const useBigrams = wBigrams.length >= 2;
+
+    let best = null;
+
+    for (let i = 0; i < cues.length; i++) {
+        let mergedTokens = null;
+        let mergedBigrams = null;
+
+        for (let span = 1; span <= MAX_SPAN_CUES && i + span <= cues.length; span++) {
+            const cue = cues[i + span - 1];
+
+            if (span === 1) {
+                mergedTokens = cue._tokens;
+                mergedBigrams = cue._bigrams;
+            } else {
+                // Lazily promote to a working copy on the second span step.
+                if (span === 2) {
+                    mergedTokens = mergedTokens.slice();
+                    mergedBigrams = mergedBigrams.slice();
+                }
+                const prevLast = mergedTokens[mergedTokens.length - 1];
+                const cueTokens = cue._tokens;
+                if (prevLast !== undefined && cueTokens.length > 0) {
+                    mergedBigrams.push(prevLast + ' ' + cueTokens[0]);
+                }
+                for (let k = 0; k < cueTokens.length; k++) mergedTokens.push(cueTokens[k]);
+                for (let k = 0; k < cue._bigrams.length; k++) mergedBigrams.push(cue._bigrams[k]);
+            }
+
+            if (mergedTokens.length === 0) continue;
+
+            const lenRatio = Math.min(wTokens.length, mergedTokens.length) /
+                             Math.max(wTokens.length, mergedTokens.length);
+            if (lenRatio < MIN_LENGTH_RATIO) continue;
+
+            let score;
+            if (useBigrams && mergedBigrams.length >= 1) {
+                score = diceSimilarity(wBigrams, mergedBigrams);
+            } else {
+                score = diceSimilarity(wTokens, mergedTokens);
+            }
+
+            if (!best || score > best.score) {
+                best = {
+                    start: cues[i].start,
+                    end: cue.end,
+                    score: score,
+                    text: cue.text,
+                    spanLength: span,
+                };
+            }
         }
     }
 
-    return bestMatch;
+    return (best && best.score >= MIN_TOKEN_SIMILARITY) ? best : null;
+}
+
+function median(values) {
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 !== 0
+        ? sorted[mid]
+        : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+/**
+ * Find the consensus offset by picking the densest cluster of values.
+ *
+ * The matcher will sometimes lock onto the wrong instance of a recurring
+ * phrase ("yes", "I don't know"), producing wildly wrong offsets like
+ * -600s. Median is robust to a *symmetric* sprinkle of outliers but breaks
+ * when the wrong matches all skew the same direction. So we instead find
+ * the largest set of offsets that agree within `bandwidthMs` and take the
+ * median of *that* — outliers are simply dropped.
+ *
+ * Returns { offset, cluster, outliers, confidence }.
+ */
+function consensusOffset(offsets, options) {
+    const bandwidth = (options && options.bandwidthMs) || CONSENSUS_BANDWIDTH_MS;
+    if (!offsets || offsets.length === 0) {
+        return { offset: 0, cluster: [], outliers: [], confidence: 0 };
+    }
+    if (offsets.length === 1) {
+        return { offset: offsets[0], cluster: offsets.slice(), outliers: [], confidence: 1 };
+    }
+
+    const sorted = [...offsets].sort((a, b) => a - b);
+
+    // Sliding window: largest contiguous sub-range whose spread ≤ bandwidth.
+    let bestStart = 0;
+    let bestEnd = 0;
+    let lo = 0;
+    for (let hi = 0; hi < sorted.length; hi++) {
+        while (sorted[hi] - sorted[lo] > bandwidth) lo++;
+        if (hi - lo > bestEnd - bestStart) {
+            bestStart = lo;
+            bestEnd = hi;
+        }
+    }
+
+    const cluster = sorted.slice(bestStart, bestEnd + 1);
+    const outliers = sorted.slice(0, bestStart).concat(sorted.slice(bestEnd + 1));
+    const offset = median(cluster);
+    const confidence = cluster.length / sorted.length;
+
+    return { offset, cluster, outliers, confidence };
 }
 
 function computeOffset(whisperChunks, cues, audioStartTimeMs) {
+    indexCues(cues);
     const offsets = [];
 
     for (const chunk of whisperChunks) {
@@ -150,34 +263,18 @@ function computeOffset(whisperChunks, cues, audioStartTimeMs) {
         const match = findBestMatch(chunk.text, cues);
 
         if (match) {
-            const offset = whisperStartMs - match.start;
-            offsets.push(offset);
+            offsets.push(whisperStartMs - match.start);
         }
     }
 
-    if (offsets.length < MIN_MATCHES_FOR_CONFIDENCE) {
-        return {
-            offset: offsets.length > 0 ? median(offsets) : 0,
-            confidence: offsets.length / Math.max(whisperChunks.length, 1),
-            matchCount: offsets.length,
-            totalChunks: whisperChunks.length,
-        };
-    }
-
+    const { offset, cluster, outliers, confidence } = consensusOffset(offsets);
     return {
-        offset: median(offsets),
-        confidence: offsets.length / Math.max(whisperChunks.length, 1),
-        matchCount: offsets.length,
+        offset,
+        confidence,
+        matchCount: cluster.length,
+        rejectedCount: outliers.length,
         totalChunks: whisperChunks.length,
     };
-}
-
-function median(values) {
-    const sorted = [...values].sort((a, b) => a - b);
-    const mid = Math.floor(sorted.length / 2);
-    return sorted.length % 2 !== 0
-        ? sorted[mid]
-        : (sorted[mid - 1] + sorted[mid]) / 2;
 }
 
 async function fetchAndParseSubtitles(track) {
@@ -352,9 +449,12 @@ function findChunkOffsetsNearTime(cues, chunkDurationSec, maxChunks, focusSec) {
 module.exports = {
     parseSubtitles,
     computeOffset,
+    consensusOffset,
     findBestMatch,
+    indexCues,
     fetchAndParseSubtitles,
     findBestChunkOffsets,
     findChunkOffsetsNearTime,
     MIN_MATCHES_FOR_CONFIDENCE,
+    CONSENSUS_BANDWIDTH_MS,
 };
