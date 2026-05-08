@@ -437,6 +437,32 @@ class TMDBService {
     }
 
     /**
+     * Synchronous logo URL lookup — returns a cached URL if available, else null.
+     * Used by MetaItem to render the title logo on the FIRST paint instead of
+     * after a useEffect → async chain. Walks the same persisted maps as the
+     * async path, but never issues a network request.
+     */
+    getCachedLogoUrl(itemId, itemType) {
+        if (!itemId) return null;
+        let tmdbId = null;
+        let mediaType = null;
+        const tmdbMatch = itemId.match(/^tmdb:(\d+)$/);
+        if (tmdbMatch) {
+            tmdbId = parseInt(tmdbMatch[1], 10);
+            mediaType = itemType === 'series' ? 'tv' : 'movie';
+        } else if (/^tt/.test(itemId)) {
+            const found = this._persistGet(`find:${itemId}`);
+            if (!found) return null;
+            tmdbId = found.id;
+            mediaType = found.type;
+        } else {
+            return null;
+        }
+        const url = this._persistGet(`logo:${mediaType}:${tmdbId}`);
+        return url || null;
+    }
+
+    /**
      * Resolve the TMDB ID for a given item (handles both tmdb: and tt prefixes).
      * Returns { tmdbId, mediaType } or null.
      */

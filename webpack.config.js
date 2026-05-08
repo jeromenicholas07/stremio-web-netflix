@@ -256,10 +256,13 @@ module.exports = (env, argv) => ({
             Buffer: ['buffer', 'Buffer']
         }),
         argv.mode === 'production' &&
-            new WorkboxPlugin.GenerateSW({
+            // InjectManifest lets us ship a custom service worker (src/service-worker.js)
+            // with a per-URL random-expiry plugin for image caches — something the
+            // declarative GenerateSW config can't express.
+            new WorkboxPlugin.InjectManifest({
+                swSrc: './src/service-worker.js',
+                swDest: 'service-worker.js',
                 maximumFileSizeToCacheInBytes: 20000000,
-                clientsClaim: true,
-                skipWaiting: true
             }),
         new CopyWebpackPlugin({
             patterns: [

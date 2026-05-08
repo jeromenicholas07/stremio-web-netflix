@@ -153,6 +153,22 @@ async function detectLetterboxing(ytId) {
 
 const CARD_AR = 16 / 9;
 
+// Extract item ID (IMDB tt... or tmdb:...) from a deepLinks object.
+// Plain helper so it can be reused for synchronous state initialization
+// without depending on hooks.
+function extractItemId(deepLinks) {
+    if (!deepLinks) return null;
+    const links = [deepLinks.metaDetailsStreams, deepLinks.metaDetailsVideos];
+    for (const link of links) {
+        if (typeof link !== 'string') continue;
+        const imdb = link.match(/\/(tt\d+)/);
+        if (imdb) return imdb[1];
+        const tmdb = link.match(/\/(tmdb:\d+)/);
+        if (tmdb) return tmdb[1];
+    }
+    return null;
+}
+
 // Fallback: pick best trailer from stremio's trailerStreams
 function pickBestTrailerFallback(trailerStreams) {
     if (!Array.isArray(trailerStreams) || trailerStreams.length === 0) return null;
@@ -196,8 +212,13 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     const [letterbox, setLetterbox] = React.useState({ top: 0, bottom: 0 });
 
     // TMDB logo — shows a title logo on the card instead of plain text.
+    // Hydrate synchronously from the persisted (localStorage) cache so the
+    // logo renders on the FIRST paint when we've seen this title before.
+    // Cache miss → useState starts null and the useEffect below fetches it.
     const isCWItem = typeof onCWAction === 'function';
-    const [logoUrl, setLogoUrl] = React.useState(null);
+    const [logoUrl, setLogoUrl] = React.useState(() =>
+        tmdbService.getCachedLogoUrl(extractItemId(deepLinks), type)
+    );
 
     // Default click navigates to streams (for poster click → play)
     const href = React.useMemo(() => {
@@ -239,19 +260,7 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     }, [links]);
 
     // Extract item ID from deepLinks — supports IMDB (tt1234567) and TMDB (tmdb:1234) formats
-    const itemId = React.useMemo(() => {
-        const links = [deepLinks?.metaDetailsStreams, deepLinks?.metaDetailsVideos];
-        for (const link of links) {
-            if (typeof link !== 'string') continue;
-            // IMDB ID
-            const imdb = link.match(/\/(tt\d+)/);
-            if (imdb) return imdb[1];
-            // TMDB ID (tmdb:1234)
-            const tmdb = link.match(/\/(tmdb:\d+)/);
-            if (tmdb) return tmdb[1];
-        }
-        return null;
-    }, [deepLinks]);
+    const itemId = React.useMemo(() => extractItemId(deepLinks), [deepLinks]);
 
     // Sync optimistic state when prop changes (e.g. after core round-trip)
     React.useEffect(() => {
@@ -557,6 +566,12 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     // Falls back to plain text title if no logo is available.
     React.useEffect(() => {
         if (!itemId) { setLogoUrl(null); return; }
+        // Synchronously hydrate from persisted cache when itemId changes
+        // (e.g. card slot reused for a different title). Avoids a frame of
+        // stale-logo flicker before the async path completes.
+        const cached = tmdbService.getCachedLogoUrl(itemId, type);
+        setLogoUrl(cached || null);
+        if (cached) return;
         let cancelled = false;
         (async () => {
             try {
