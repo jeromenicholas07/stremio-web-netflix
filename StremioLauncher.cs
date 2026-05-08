@@ -299,6 +299,19 @@ class StremioLauncher
     static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
     [DllImport("shell32.dll", CharSet = CharSet.Auto)]
     static extern uint ExtractIconEx(string lpszFile, int nIconIndex, IntPtr[] phiconLarge, IntPtr[] phiconSmall, uint nIcons);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    static extern IntPtr LoadLibraryEx(string lpFileName, IntPtr hFile, uint dwFlags);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    static extern IntPtr LoadImage(IntPtr hInst, IntPtr lpszName, uint uType, int cxDesired, int cyDesired, uint fuLoad);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    static extern bool EnumResourceNames(IntPtr hModule, IntPtr lpszType, EnumResNameProc lpEnumFunc, IntPtr lParam);
+    delegate bool EnumResNameProc(IntPtr hModule, IntPtr lpszType, IntPtr lpszName, IntPtr lParam);
+
+    const uint LOAD_LIBRARY_AS_DATAFILE = 0x00000002;
+    const uint IMAGE_ICON = 1;
+    const uint LR_DEFAULTCOLOR = 0x00000000;
+    const uint LR_SHARED = 0x00008000;
+    const int RT_GROUP_ICON = 14;
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
@@ -310,6 +323,33 @@ class StremioLauncher
     const int ICON_SMALL = 0;
     const int ICON_BIG = 1;
     const int ICON_SMALL2 = 2;
+
+    // Load an icon resource from the running .exe at a specific size.
+    // The exe's icon was embedded by csc.exe via /win32icon and contains
+    // every size from 16x16 up to 256x256 — we want LoadImage to pick the
+    // best frame, not get stuck at ExtractIconEx's hard-coded 32x32.
+    static IntPtr LoadHighResIcon(string exePath, int size)
+    {
+        try
+        {
+            IntPtr hMod = LoadLibraryEx(exePath, IntPtr.Zero, LOAD_LIBRARY_AS_DATAFILE);
+            if (hMod == IntPtr.Zero) return IntPtr.Zero;
+
+            // The /win32icon group resource has no fixed name across compilers,
+            // so just take whichever icon group is present. (Our exe has one.)
+            IntPtr foundName = IntPtr.Zero;
+            EnumResNameProc cb = (h, t, name, p) => { foundName = name; return false; };
+            EnumResourceNames(hMod, (IntPtr)RT_GROUP_ICON, cb, IntPtr.Zero);
+            GC.KeepAlive(cb);
+
+            if (foundName == IntPtr.Zero) return IntPtr.Zero;
+            return LoadImage(hMod, foundName, IMAGE_ICON, size, size, LR_DEFAULTCOLOR | LR_SHARED);
+        }
+        catch
+        {
+            return IntPtr.Zero;
+        }
+    }
 
     static void ApplyWindowStyling(Process proc)
     {
@@ -340,22 +380,32 @@ class StremioLauncher
             // own embedded icon — title bar, taskbar, and Alt-Tab all pick
             // up WM_SETICON, so the user sees our diamond instead of the
             // default Stremio purple icon.
+            //
+            // Uses LoadImage at 256/32 px instead of ExtractIconEx (which
+            // hard-codes 32/16 — the source of the pixelated taskbar icon
+            // on high-DPI Windows 11). LoadImage picks the closest frame
+            // from our multi-size .ico, so 256 → 48 downsamples cleanly.
             try
             {
                 string exePath = Process.GetCurrentProcess().MainModule.FileName;
-                IntPtr[] large = new IntPtr[1];
-                IntPtr[] small = new IntPtr[1];
-                if (ExtractIconEx(exePath, 0, large, small, 1) > 0)
+                IntPtr large = LoadHighResIcon(exePath, 256);
+                IntPtr small = LoadHighResIcon(exePath, 32);
+                if (large == IntPtr.Zero || small == IntPtr.Zero)
                 {
-                    if (large[0] != IntPtr.Zero)
+                    // ExtractIconEx fallback if resource enumeration fails
+                    IntPtr[] lg = new IntPtr[1];
+                    IntPtr[] sm = new IntPtr[1];
+                    if (ExtractIconEx(exePath, 0, lg, sm, 1) > 0)
                     {
-                        SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_BIG, large[0]);
+                        if (large == IntPtr.Zero) large = lg[0];
+                        if (small == IntPtr.Zero) small = sm[0];
                     }
-                    if (small[0] != IntPtr.Zero)
-                    {
-                        SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_SMALL, small[0]);
-                        SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_SMALL2, small[0]);
-                    }
+                }
+                if (large != IntPtr.Zero) SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_BIG, large);
+                if (small != IntPtr.Zero)
+                {
+                    SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_SMALL, small);
+                    SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_SMALL2, small);
                 }
             }
             catch (Exception ex)
