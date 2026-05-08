@@ -295,6 +295,10 @@ class StremioLauncher
     static extern bool SetForegroundWindow(IntPtr hWnd);
     [DllImport("user32.dll")]
     static extern bool IsWindowVisible(IntPtr hWnd);
+    [DllImport("user32.dll", CharSet = CharSet.Auto)]
+    static extern IntPtr SendMessage(IntPtr hWnd, uint Msg, IntPtr wParam, IntPtr lParam);
+    [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+    static extern uint ExtractIconEx(string lpszFile, int nIconIndex, IntPtr[] phiconLarge, IntPtr[] phiconSmall, uint nIcons);
     [DllImport("dwmapi.dll")]
     static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
@@ -302,6 +306,10 @@ class StremioLauncher
     // DWMWA_USE_IMMERSIVE_DARK_MODE: 20 on Win10 20H1+/Win11, 19 on older builds
     const int DWMWA_USE_IMMERSIVE_DARK_MODE = 20;
     const int DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY = 19;
+    const uint WM_SETICON = 0x0080;
+    const int ICON_SMALL = 0;
+    const int ICON_BIG = 1;
+    const int ICON_SMALL2 = 2;
 
     static void ApplyWindowStyling(Process proc)
     {
@@ -328,10 +336,37 @@ class StremioLauncher
             if (hr != 0)
                 DwmSetWindowAttribute(hWnd, DWMWA_USE_IMMERSIVE_DARK_MODE_LEGACY, ref useDark, sizeof(int));
 
+            // Override the Stremio shell window's icon with the launcher's
+            // own embedded icon — title bar, taskbar, and Alt-Tab all pick
+            // up WM_SETICON, so the user sees our diamond instead of the
+            // default Stremio purple icon.
+            try
+            {
+                string exePath = Process.GetCurrentProcess().MainModule.FileName;
+                IntPtr[] large = new IntPtr[1];
+                IntPtr[] small = new IntPtr[1];
+                if (ExtractIconEx(exePath, 0, large, small, 1) > 0)
+                {
+                    if (large[0] != IntPtr.Zero)
+                    {
+                        SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_BIG, large[0]);
+                    }
+                    if (small[0] != IntPtr.Zero)
+                    {
+                        SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_SMALL, small[0]);
+                        SendMessage(hWnd, WM_SETICON, (IntPtr)ICON_SMALL2, small[0]);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine("[WindowStyle] Icon override failed: " + ex.Message);
+            }
+
             // Maximize (full-screen window)
             ShowWindow(hWnd, SW_MAXIMIZE);
             SetForegroundWindow(hWnd);
-            Console.WriteLine("[WindowStyle] Applied: maximized + dark title bar");
+            Console.WriteLine("[WindowStyle] Applied: maximized + dark title bar + custom icon");
         }
         catch (Exception ex)
         {

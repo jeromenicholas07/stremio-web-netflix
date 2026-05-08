@@ -10,12 +10,19 @@
 // Image caches use a CacheFirst strategy with a custom random-expiry plugin
 // (7-21 days, deterministic per URL) layered on top of Workbox's hard
 // ExpirationPlugin (LRU + 21-day ceiling + purge-on-quota-error).
+//
+// Note on opaque responses: cross-origin <img> requests run in `no-cors`
+// mode by default, which yields opaque responses (status 0, no readable
+// headers/body). We allow opaque caching via CacheableResponsePlugin and
+// track expiry in our own IndexedDB store rather than relying on the
+// `Date` header (which is unreadable on opaque responses).
 
 import { clientsClaim } from 'workbox-core';
 import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching';
 import { registerRoute } from 'workbox-routing';
 import { CacheFirst } from 'workbox-strategies';
 import { ExpirationPlugin } from 'workbox-expiration';
+import { CacheableResponsePlugin } from 'workbox-cacheable-response';
 
 // ─── Lifecycle ───────────────────────────────────────────────────────────
 self.skipWaiting();
@@ -25,10 +32,55 @@ cleanupOutdatedCaches();
 // ─── Precache (injected by Workbox at build time) ────────────────────────
 precacheAndRoute(self.__WB_MANIFEST || []);
 
+// ─── IndexedDB-backed expiry store ───────────────────────────────────────
+// Workbox's ExpirationPlugin uses a single global maxAge; we want a random
+// per-URL TTL between 7 and 21 days, deterministic from a hash of the URL
+// so the same poster keeps the same effective lifetime across sessions.
+const EXPIRY_DB_NAME = 'sw-image-expiry';
+const EXPIRY_STORE = 'entries';
+let _expiryDbPromise = null;
+
+function openExpiryDb() {
+    if (_expiryDbPromise) return _expiryDbPromise;
+    _expiryDbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(EXPIRY_DB_NAME, 1);
+        req.onupgradeneeded = () => {
+            req.result.createObjectStore(EXPIRY_STORE);
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+    return _expiryDbPromise;
+}
+
+async function setExpiry(url, expiresAt) {
+    try {
+        const db = await openExpiryDb();
+        await new Promise((resolve) => {
+            const tx = db.transaction(EXPIRY_STORE, 'readwrite');
+            tx.objectStore(EXPIRY_STORE).put(expiresAt, url);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => resolve();
+            tx.onabort = () => resolve();
+        });
+    } catch { /* never let cache writes break image loads */ }
+}
+
+async function getExpiry(url) {
+    try {
+        const db = await openExpiryDb();
+        return await new Promise((resolve) => {
+            const tx = db.transaction(EXPIRY_STORE, 'readonly');
+            const req = tx.objectStore(EXPIRY_STORE).get(url);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => resolve(undefined);
+        });
+    } catch {
+        return undefined;
+    }
+}
+
 // ─── Random per-URL expiry plugin ────────────────────────────────────────
-// Each cached image gets a deterministic TTL between 7 and 21 days, derived
-// from a hash of its URL. The same poster keeps the same effective expiry
-// across reloads so the cache doesn't get re-shuffled on every visit.
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 const RANGE_MS = 14 * 24 * 60 * 60 * 1000;
 
@@ -46,69 +98,43 @@ function ttlForUrl(url) {
 }
 
 const RandomExpiryPlugin = {
-    cachedResponseWillBeUsed: async ({ request, cachedResponse, cacheName, event, state }) => {
+    // Stamp each newly-cached entry with a random expiry timestamp.
+    cacheDidUpdate: async ({ request }) => {
+        await setExpiry(request.url, Date.now() + ttlForUrl(request.url));
+    },
+    // On read, treat as miss if past the per-URL expiry.
+    cachedResponseWillBeUsed: async ({ request, cachedResponse }) => {
         if (!cachedResponse) return null;
-        // Date header is set by upstream (TMDB / Cinemeta / YT all send it).
-        // If it's missing for any reason, fall through and let the hard
-        // ExpirationPlugin enforce the 21-day ceiling.
-        const dateHeader = cachedResponse.headers.get('date');
-        if (!dateHeader) return cachedResponse;
-        const cachedAt = new Date(dateHeader).getTime();
-        if (!cachedAt || Number.isNaN(cachedAt)) return cachedResponse;
-        if (Date.now() - cachedAt > ttlForUrl(request.url)) return null;
+        const expiresAt = await getExpiry(request.url);
+        if (!expiresAt) return cachedResponse; // unknown — keep
+        if (Date.now() > expiresAt) return null;
         return cachedResponse;
     },
 };
 
-// ─── TMDB images (posters, backdrops, logos) ────────────────────────────
-registerRoute(
-    ({ url }) => url.hostname === 'image.tmdb.org',
-    new CacheFirst({
-        cacheName: 'tmdb-images-v1',
-        // Force CORS so the cached response carries headers (incl. Date).
-        // image.tmdb.org sends Access-Control-Allow-Origin: *.
-        fetchOptions: { mode: 'cors', credentials: 'omit' },
+// ─── Image route factory ────────────────────────────────────────────────
+function imageRoute(cacheName, maxEntries) {
+    return new CacheFirst({
+        cacheName,
         plugins: [
+            // Cache opaque (status 0) responses too — cross-origin <img>
+            // tags fetch with no-cors mode which yields opaque responses.
+            new CacheableResponsePlugin({ statuses: [0, 200] }),
             RandomExpiryPlugin,
             new ExpirationPlugin({
-                maxEntries: 15000,
+                maxEntries,
                 maxAgeSeconds: 21 * 24 * 60 * 60,
                 purgeOnQuotaError: true,
             }),
         ],
-    }),
-);
+    });
+}
+
+// ─── TMDB images (posters, backdrops, logos) ────────────────────────────
+registerRoute(({ url }) => url.hostname === 'image.tmdb.org', imageRoute('tmdb-images-v1', 15000));
 
 // ─── Cinemeta posters / logos ───────────────────────────────────────────
-registerRoute(
-    ({ url }) => url.hostname === 'images.metahub.space',
-    new CacheFirst({
-        cacheName: 'metahub-images-v1',
-        fetchOptions: { mode: 'cors', credentials: 'omit' },
-        plugins: [
-            RandomExpiryPlugin,
-            new ExpirationPlugin({
-                maxEntries: 10000,
-                maxAgeSeconds: 21 * 24 * 60 * 60,
-                purgeOnQuotaError: true,
-            }),
-        ],
-    }),
-);
+registerRoute(({ url }) => url.hostname === 'images.metahub.space', imageRoute('metahub-images-v1', 10000));
 
 // ─── YouTube thumbnails (used for trailer letterbox detection) ──────────
-registerRoute(
-    ({ url }) => url.hostname === 'i.ytimg.com',
-    new CacheFirst({
-        cacheName: 'ytimg-thumbnails-v1',
-        fetchOptions: { mode: 'cors', credentials: 'omit' },
-        plugins: [
-            RandomExpiryPlugin,
-            new ExpirationPlugin({
-                maxEntries: 5000,
-                maxAgeSeconds: 21 * 24 * 60 * 60,
-                purgeOnQuotaError: true,
-            }),
-        ],
-    }),
-);
+registerRoute(({ url }) => url.hostname === 'i.ytimg.com', imageRoute('ytimg-thumbnails-v1', 5000));

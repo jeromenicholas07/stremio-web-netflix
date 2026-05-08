@@ -40,7 +40,7 @@ class StremioLauncherFULL
     // with the freshly-downloaded exe and relaunches. Bump this whenever you
     // ship a new StremioLauncherFULL.exe — and update the same value in the
     // version file deployed to gh-pages (the deploy script handles this).
-    const string LAUNCHER_VERSION = "2026-05-08-debug-toggle";
+    const string LAUNCHER_VERSION = "2026-05-08-cors-fix-icon";
 
     // Bump BASE_LAUNCHER_VERSION whenever StremioLauncher.exe changes. We
     // write this string into <rootDir>\StremioLauncher.version on a fresh
@@ -48,7 +48,7 @@ class StremioLauncherFULL
     // on disk differs we re-download just the base launcher. This is the
     // same pattern as ADDON_VERSION below — small targeted update, no
     // full re-install.
-    const string BASE_LAUNCHER_VERSION = "2026-05-08-debug-toggle";
+    const string BASE_LAUNCHER_VERSION = "2026-05-08-cors-fix-icon";
 
     // Bump ADDON_VERSION on every addon code change. The launcher checks
     // <rootDir>\stremio-adult-addon\.addon-version against this on every
