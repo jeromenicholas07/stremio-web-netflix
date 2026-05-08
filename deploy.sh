@@ -24,7 +24,7 @@
 #
 #  5. To recompile StremioLauncher.exe (C# 5, .NET 4.x):
 #     MSYS_NO_PATHCONV=1 "C:/Windows/Microsoft.NET/Framework64/v4.0.30319/csc.exe" \
-#       /target:exe /out:StremioLauncher.exe /platform:anycpu /optimize StremioLauncher.cs
+#       /target:winexe /out:StremioLauncher.exe /platform:anycpu /optimize StremioLauncher.cs
 #     Then upload: gh release upload v1.0.0 StremioLauncher.exe --clobber \
 #       --repo jeromenicholas07/stremio-web-netflix
 # ============================================================
@@ -87,10 +87,10 @@ if [ -x "$CSC" ]; then
     if [ -f StremioLauncher.ico ]; then
         ICON_FLAG="/win32icon:StremioLauncher.ico"
     fi
-    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo $ICON_FLAG \
+    MSYS_NO_PATHCONV=1 "$CSC" /target:winexe /optimize /nologo $ICON_FLAG \
         /out:build/StremioLauncher.exe StremioLauncher.cs \
         || { echo "ERROR: StremioLauncher.cs failed to compile"; exit 1; }
-    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo $ICON_FLAG \
+    MSYS_NO_PATHCONV=1 "$CSC" /target:winexe /optimize /nologo $ICON_FLAG \
         "/r:$DLL_DIR\\System.IO.Compression.dll" \
         "/r:$DLL_DIR\\System.IO.Compression.FileSystem.dll" \
         /out:build/StremioLauncherFULL.exe StremioLauncherFULL.cs \

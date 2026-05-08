@@ -7,7 +7,7 @@
 //
 // Deployable via GitHub Pages alongside the web UI. No CI required — compile
 // locally with:
-//   csc.exe /target:exe /out:StremioLauncherFULL.exe ^
+//   csc.exe /target:winexe /out:StremioLauncherFULL.exe ^
 //           /r:System.IO.Compression.dll ^
 //           /r:System.IO.Compression.FileSystem.dll ^
 //           StremioLauncherFULL.cs
@@ -40,7 +40,7 @@ class StremioLauncherFULL
     // with the freshly-downloaded exe and relaunches. Bump this whenever you
     // ship a new StremioLauncherFULL.exe — and update the same value in the
     // version file deployed to gh-pages (the deploy script handles this).
-    const string LAUNCHER_VERSION = "2026-05-08-icon";
+    const string LAUNCHER_VERSION = "2026-05-08-debug-toggle";
 
     // Bump BASE_LAUNCHER_VERSION whenever StremioLauncher.exe changes. We
     // write this string into <rootDir>\StremioLauncher.version on a fresh
@@ -48,7 +48,7 @@ class StremioLauncherFULL
     // on disk differs we re-download just the base launcher. This is the
     // same pattern as ADDON_VERSION below — small targeted update, no
     // full re-install.
-    const string BASE_LAUNCHER_VERSION = "2026-05-08-icon";
+    const string BASE_LAUNCHER_VERSION = "2026-05-08-debug-toggle";
 
     // Bump ADDON_VERSION on every addon code change. The launcher checks
     // <rootDir>\stremio-adult-addon\.addon-version against this on every
@@ -97,8 +97,39 @@ class StremioLauncherFULL
         return code;
     }
 
+    // ── Debug console (winexe by default — no terminal popup) ──
+    // Compiled with /target:winexe so the bootstrapper runs without a
+    // console window. If the "Debug" toggle is on (flag file present), we
+    // attach a console at startup so the user can see service logs.
+    [DllImport("kernel32.dll")]
+    static extern bool AllocConsole();
+
+    static string DebugFlagPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StremioLauncherFULL", "debug.flag");
+    }
+
+    static void TryAttachDebugConsole()
+    {
+        try
+        {
+            if (!File.Exists(DebugFlagPath())) return;
+            if (!AllocConsole()) return;
+            var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+            Console.SetOut(stdout);
+            var stderr = new StreamWriter(Console.OpenStandardError()) { AutoFlush = true };
+            Console.SetError(stderr);
+            Console.WriteLine("[DEBUG] Console attached (debug flag is set)");
+        }
+        catch { /* never block startup on console init */ }
+    }
+
     static int Main()
     {
+        TryAttachDebugConsole();
+
         // TLS 1.2 required for GitHub / nodejs.org downloads
         ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
 

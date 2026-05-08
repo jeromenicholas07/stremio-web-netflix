@@ -70,14 +70,14 @@ if (Test-Path "StremioLauncher.ico") {
 
 # 1. Compile StremioLauncher.exe (base)
 Write-Host "`n[1/4] Compiling StremioLauncher.exe..." -ForegroundColor Yellow
-& $csc.FullName /target:exe @iconArgs /out:build\StremioLauncher.exe StremioLauncher.cs
+& $csc.FullName /target:winexe @iconArgs /out:build\StremioLauncher.exe StremioLauncher.cs
 if ($LASTEXITCODE -ne 0) { throw "StremioLauncher.exe compilation failed" }
 Write-Host "  OK: build\StremioLauncher.exe"
 
 # 2. Compile StremioLauncherFULL.exe (bootstrapper)
 Write-Host "`n[2/4] Compiling StremioLauncherFULL.exe..." -ForegroundColor Yellow
 & $csc.FullName `
-    /target:exe `
+    /target:winexe `
     @iconArgs `
     /out:build\StremioLauncherFULL.exe `
     /r:"$refDir\System.IO.Compression.dll" `

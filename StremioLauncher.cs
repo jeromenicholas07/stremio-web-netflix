@@ -15,8 +15,41 @@ class StremioLauncher
     static TcpListener _corsTcp;
     static Process _serverProc;
 
+    // ── Debug console (winexe by default — no terminal popup) ──
+    // Compiled with /target:winexe so the launcher runs without a console
+    // window. If the user has flipped the "Debug" toggle in settings, a
+    // shared flag file exists and we attach a console at startup.
+    [DllImport("kernel32.dll")]
+    static extern bool AllocConsole();
+
+    static string DebugFlagPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StremioLauncherFULL", "debug.flag");
+    }
+
+    static void TryAttachDebugConsole()
+    {
+        try
+        {
+            if (!File.Exists(DebugFlagPath())) return;
+            if (!AllocConsole()) return;
+            // Console.* caches handles before AllocConsole runs — re-bind to
+            // the new console's stdout/stderr or the writes go nowhere.
+            var stdout = new StreamWriter(Console.OpenStandardOutput()) { AutoFlush = true };
+            Console.SetOut(stdout);
+            var stderr = new StreamWriter(Console.OpenStandardError()) { AutoFlush = true };
+            Console.SetError(stderr);
+            Console.WriteLine("[DEBUG] Console attached (debug flag is set)");
+        }
+        catch { /* never block startup on console init */ }
+    }
+
     static int Main()
     {
+        TryAttachDebugConsole();
+
         // Kill any previous instances and free ports
         KillExisting();
 
@@ -74,7 +107,9 @@ class StremioLauncher
             Console.WriteLine("[INFO] FFmpeg not found - subtitle sync will use HLS fallback");
         }
 
-        Thread.Sleep(500);
+        // (No artificial wait here — shell launch proceeds immediately.
+        //  The streaming server's port-readiness check runs on a background
+        //  thread inside StartStreamingServer.)
 
         // Graceful shutdown on Ctrl+C or console close
         Console.CancelKeyPress += delegate { Shutdown(); };
@@ -224,21 +259,27 @@ class StremioLauncher
                 catch { }
             }) { IsBackground = true }.Start();
 
-            // Wait for it to start listening
-            for (int i = 0; i < 20; i++)
+            // Background-poll for port readiness instead of blocking the main
+            // thread. The shell launches immediately after the server PROCESS
+            // spawns; the web UI gracefully retries until 11470 is listening.
+            // Saves up to ~10s of perceived startup time on cold starts.
+            new Thread(() =>
             {
-                Thread.Sleep(500);
-                try
+                for (int i = 0; i < 60; i++)
                 {
-                    var test = new TcpClient();
-                    test.Connect(IPAddress.Loopback, 11470);
-                    test.Close();
-                    Console.WriteLine("[OK] Streaming server started on :11470");
-                    return;
+                    try
+                    {
+                        var test = new TcpClient();
+                        test.Connect(IPAddress.Loopback, 11470);
+                        test.Close();
+                        Console.WriteLine("[OK] Streaming server listening on :11470");
+                        return;
+                    }
+                    catch { }
+                    Thread.Sleep(500);
                 }
-                catch { }
-            }
-            Console.WriteLine("[WARN] Streaming server started but port 11470 not responding yet");
+                Console.WriteLine("[WARN] Streaming server started but port 11470 still not responding after 30s");
+            }) { IsBackground = true }.Start();
         }
         catch (Exception ex)
         {
@@ -569,6 +610,68 @@ class StremioLauncher
         return null;
     }
 
+    // ── Internal launcher control endpoints ──────────────────
+    // GET  /_launcher/debug     → {"enabled": <bool>}
+    // POST /_launcher/debug     body: {"enabled": <bool>}
+    //   ↳ writes/removes the flag file at %LOCALAPPDATA%\StremioLauncherFULL\debug.flag.
+    //     Read by both launcher .exes at startup to decide whether to attach
+    //     a console window (AllocConsole). Takes effect on next Stremio start.
+    static void HandleLauncherControl(Stream stream, string method, string path, Dictionary<string, string> reqHeaders)
+    {
+        if (path == "/_launcher/debug")
+        {
+            string flagPath = DebugFlagPath();
+            if (method == "GET")
+            {
+                bool enabled = File.Exists(flagPath);
+                WriteResponse(stream, 200, "application/json",
+                    Encoding.UTF8.GetBytes("{\"enabled\":" + (enabled ? "true" : "false") + "}"), true);
+                return;
+            }
+            if (method == "POST")
+            {
+                string body = ReadRequestBody(stream, reqHeaders);
+                bool enabled = body != null && body.IndexOf("\"enabled\"", StringComparison.Ordinal) >= 0
+                    && body.IndexOf("true", StringComparison.Ordinal) >= 0;
+                try
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(flagPath));
+                    if (enabled) File.WriteAllText(flagPath, "1");
+                    else if (File.Exists(flagPath)) File.Delete(flagPath);
+                    WriteResponse(stream, 200, "application/json",
+                        Encoding.UTF8.GetBytes("{\"ok\":true,\"enabled\":" + (enabled ? "true" : "false") + "}"), true);
+                }
+                catch (Exception ex)
+                {
+                    WriteResponse(stream, 500, "application/json",
+                        Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"" + ex.Message.Replace("\"", "\\\"") + "\"}"), true);
+                }
+                return;
+            }
+            WriteResponse(stream, 405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"), true);
+            return;
+        }
+        WriteResponse(stream, 404, "text/plain", Encoding.UTF8.GetBytes("Not Found"), true);
+    }
+
+    static string ReadRequestBody(Stream stream, Dictionary<string, string> reqHeaders)
+    {
+        string clStr;
+        int len = 0;
+        if (reqHeaders.TryGetValue("Content-Length", out clStr))
+            int.TryParse(clStr, out len);
+        if (len <= 0) return string.Empty;
+        byte[] buf = new byte[len];
+        int read = 0;
+        while (read < len)
+        {
+            int n = stream.Read(buf, read, len - read);
+            if (n <= 0) break;
+            read += n;
+        }
+        return Encoding.UTF8.GetString(buf, 0, read);
+    }
+
     static void WriteResponse(Stream s, int statusCode, string contentType, byte[] body, bool cors)
     {
         string statusText = statusCode == 200 ? "OK" : statusCode == 204 ? "No Content" :
@@ -767,6 +870,14 @@ class StremioLauncher
                 if (method == "OPTIONS")
                 {
                     WriteResponse(stream, 204, null, null, true);
+                    return;
+                }
+
+                // Internal launcher control endpoints — handled here instead
+                // of being proxied to the streaming server.
+                if (path.StartsWith("/_launcher/"))
+                {
+                    HandleLauncherControl(stream, method, path, reqHeaders);
                     return;
                 }
 

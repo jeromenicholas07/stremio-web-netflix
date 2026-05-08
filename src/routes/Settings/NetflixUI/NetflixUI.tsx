@@ -105,6 +105,7 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     const [autoPickQuality, setAutoPickQuality] = useState(() => getSetting('netflix_ui_autopick_quality', '4k'));
     const [autoPickFallback, setAutoPickFallback] = useState(() => getSetting('netflix_ui_autopick_fallback', '1080p'));
     const [autoPickSource, setAutoPickSource] = useState(() => getSetting('netflix_ui_autopick_source', 'realdebrid'));
+    const [debugEnabled, setDebugEnabled] = useState(() => getSetting('netflix_ui_debug', 'false') === 'true');
     const [saved, setSaved] = useState(false);
 
     // Trakt auth state
@@ -277,6 +278,35 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
         setSetting('netflix_ui_autopick_source', e.target.value);
         flashSaved();
     }, []);
+
+    // ─── Debug toggle ───
+    // Stored in localStorage for the in-app indicator + posted to the launcher's
+    // CORS proxy (port 12470) which writes/removes a flag file the .exe checks
+    // at startup to decide whether to attach a console window. Effect lands on
+    // the next Stremio launch, not the current session.
+    const onDebugToggle = useCallback(() => {
+        const next = !debugEnabled;
+        setDebugEnabled(next);
+        setSetting('netflix_ui_debug', String(next));
+        flashSaved();
+        fetch('http://127.0.0.1:12470/_launcher/debug', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: next }),
+        }).then((r) => {
+            if (!r.ok) {
+                toast?.show?.({ type: 'error', title: 'Debug toggle', message: `Launcher returned ${r.status}`, timeout: 4000 });
+            }
+        }).catch(() => {
+            // Browser/dev mode without the launcher running — toggle is best-effort.
+            toast?.show?.({
+                type: 'info',
+                title: 'Saved (UI only)',
+                message: 'Run via the launcher for the console window to follow this setting.',
+                timeout: 5000,
+            });
+        });
+    }, [debugEnabled, toast]);
 
     // ─── Sync Trakt Data ───
     const syncTraktData = useCallback(async () => {
@@ -594,6 +624,21 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
                     </Option>
                 </>
             )}
+
+            {/* ─── Developer ─── */}
+            <div className={styles['section-divider']}>Developer</div>
+
+            <Option label={'Debug'}>
+                <div className={styles['input-row']}>
+                    <span className={styles['option-desc']}>Show the launcher console window. Takes effect on next Stremio start.</span>
+                    <button
+                        className={debugEnabled ? styles['toggle-on'] : styles['toggle-off']}
+                        onClick={onDebugToggle}
+                    >
+                        {debugEnabled ? 'ON' : 'OFF'}
+                    </button>
+                </div>
+            </Option>
 
             {saved && <div className={styles['saved-toast']}>Saved</div>}
         </Section>
