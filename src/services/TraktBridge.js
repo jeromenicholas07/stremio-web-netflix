@@ -38,9 +38,11 @@ class TraktBridge {
         // the all-dismissed set so filters work without waiting for a sync.
         this._ratedImdbIds.forEach((id) => this._ratedIds.add(id));
         this._ratedTmdbIds.forEach((id) => this._ratedIds.add(`tmdb:${id}`));
-        this._watchedIds.forEach((id) => this._allDismissedIds.add(id));
-        this._notInterestedIds.forEach((id) => this._allDismissedIds.add(id));
-        this._ratedIds.forEach((id) => this._allDismissedIds.add(id));
+        // Use _rebuildDismissed as the single source of truth — populating
+        // by hand here drifts: it used to omit watchlist, which let
+        // already-watchlisted titles slip into Recommended Movies until
+        // the next mutation triggered a full rebuild.
+        this._rebuildDismissed();
         // Items marked watched locally but not yet confirmed by API
         this._pendingWatchedItems = new Map(); // id → item data
         // Device auth polling
