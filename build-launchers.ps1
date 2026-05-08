@@ -59,9 +59,18 @@ if (-not $refDir) {
     $refDir = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319"
 }
 
+# Embed the Stremio launcher icon (generated from
+# assets/images/stremio_custom_logo.svg by scripts/generate-icons.js)
+# so the .exes show the branded icon in Explorer / taskbar / Alt-Tab.
+$iconArgs = @()
+if (Test-Path "StremioLauncher.ico") {
+    $iconArgs = @("/win32icon:StremioLauncher.ico")
+    Write-Host "  Using icon: StremioLauncher.ico" -ForegroundColor DarkGray
+}
+
 # 1. Compile StremioLauncher.exe (base)
 Write-Host "`n[1/4] Compiling StremioLauncher.exe..." -ForegroundColor Yellow
-& $csc.FullName /target:exe /out:build\StremioLauncher.exe StremioLauncher.cs
+& $csc.FullName /target:exe @iconArgs /out:build\StremioLauncher.exe StremioLauncher.cs
 if ($LASTEXITCODE -ne 0) { throw "StremioLauncher.exe compilation failed" }
 Write-Host "  OK: build\StremioLauncher.exe"
 
@@ -69,6 +78,7 @@ Write-Host "  OK: build\StremioLauncher.exe"
 Write-Host "`n[2/4] Compiling StremioLauncherFULL.exe..." -ForegroundColor Yellow
 & $csc.FullName `
     /target:exe `
+    @iconArgs `
     /out:build\StremioLauncherFULL.exe `
     /r:"$refDir\System.IO.Compression.dll" `
     /r:"$refDir\System.IO.Compression.FileSystem.dll" `

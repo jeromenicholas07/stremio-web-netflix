@@ -80,10 +80,17 @@ DLL_DIR='C:\Windows\Microsoft.NET\Framework64\v4.0.30319'
 # trips it up. Local build/ is always reliable.
 mkdir -p build /tmp/stremio-deploy
 if [ -x "$CSC" ]; then
-    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo \
+    # Embed the Stremio launcher icon (generated from
+    # assets/images/stremio_custom_logo.svg via scripts/generate-icons.js)
+    # so Explorer / taskbar / Alt-Tab show the branded icon.
+    ICON_FLAG=""
+    if [ -f StremioLauncher.ico ]; then
+        ICON_FLAG="/win32icon:StremioLauncher.ico"
+    fi
+    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo $ICON_FLAG \
         /out:build/StremioLauncher.exe StremioLauncher.cs \
         || { echo "ERROR: StremioLauncher.cs failed to compile"; exit 1; }
-    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo \
+    MSYS_NO_PATHCONV=1 "$CSC" /target:exe /optimize /nologo $ICON_FLAG \
         "/r:$DLL_DIR\\System.IO.Compression.dll" \
         "/r:$DLL_DIR\\System.IO.Compression.FileSystem.dll" \
         /out:build/StremioLauncherFULL.exe StremioLauncherFULL.cs \

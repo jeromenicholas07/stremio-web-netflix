@@ -296,7 +296,7 @@ const Intro = ({ queryParams }) => {
             <div className={styles['background-container']} />
             <div className={styles['heading-container']}>
                 <div className={styles['logo-container']}>
-                    <Image className={styles['logo']} src={require('/assets/images/logo.png')} alt={' '} />
+                    <Image className={styles['logo']} src={require('/assets/images/stremio_custom_logo.svg')} alt={' '} />
                 </div>
                 <div className={styles['title-container']}>
                     {t('WEBSITE_SLOGAN_NEW_NEW')}

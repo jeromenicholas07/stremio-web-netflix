@@ -56,7 +56,7 @@ const HorizontalNavBar = React.memo(({ className, route, query, title, backButto
                     <Button className={styles['logo-container']} href={'#/'} tabIndex={-1}>
                         <Image
                             className={styles['logo']}
-                            src={require('/assets/images/stremio_symbol.png')}
+                            src={require('/assets/images/stremio_custom_logo.svg')}
                             alt={' '}
                         />
                     </Button>
