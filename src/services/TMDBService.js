@@ -7,8 +7,15 @@ const CACHE_TTL = 60 * 60 * 1000; // 1 hour (in-memory API responses)
 // Persistent (localStorage) cache for stable lookups: imdb→tmdb resolution and logo URLs.
 // These results don't change for a given title, so we keep them across page reloads.
 const PERSIST_KEY = 'tmdb_persist_cache_v1';
-const PERSIST_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days
-const PERSIST_MAX_ENTRIES = 2000;
+const PERSIST_TTL = 30 * 24 * 60 * 60 * 1000; // 30 days (default; per-entry override supported)
+// Default TTL for raw API responses (trending/popular/recommendations/etc.).
+// 6h balances freshness (trending changes daily) against not slamming TMDB
+// every page load.
+const API_RESPONSE_TTL = 6 * 60 * 60 * 1000;
+// Lowered from 2000 — entries now include full API payloads (a row of 20
+// TMDB items is ~15-20 KB) so we need to be more conservative to stay
+// under the browser's ~5 MB localStorage quota.
+const PERSIST_MAX_ENTRIES = 1000;
 
 // Patterns that indicate a bad trailer (sign language, behind-the-scenes, etc.)
 const BAD_TRAILER_PATTERNS = /sign\s*language|behind\s*the\s*scenes|bloopers|featurette|making\s*of|sneak\s*peek|clip\s*\d|opening\s*credits|recap|interview/i;
@@ -89,41 +96,57 @@ class TMDBService {
     }
 
     _savePersist() {
-        try {
-            // LRU eviction: if over cap, drop oldest entries by `time`
-            const keys = Object.keys(this._persist);
-            if (keys.length > PERSIST_MAX_ENTRIES) {
-                const sorted = keys
-                    .map((k) => ({ k, t: this._persist[k].time || 0 }))
-                    .sort((a, b) => a.t - b.t);
-                const toRemove = sorted.slice(0, keys.length - PERSIST_MAX_ENTRIES);
-                for (const { k } of toRemove) delete this._persist[k];
-            }
-            localStorage.setItem(PERSIST_KEY, JSON.stringify(this._persist));
-        } catch {
-            // Quota exceeded or unavailable — drop everything and try once more
-            try {
-                this._persist = {};
-                localStorage.removeItem(PERSIST_KEY);
-            } catch { /* silent */ }
+        // First pass: cap entry count via LRU
+        const keys = Object.keys(this._persist);
+        if (keys.length > PERSIST_MAX_ENTRIES) {
+            const sorted = keys
+                .map((k) => ({ k, t: this._persist[k].time || 0 }))
+                .sort((a, b) => a.t - b.t);
+            const toRemove = sorted.slice(0, keys.length - PERSIST_MAX_ENTRIES);
+            for (const { k } of toRemove) delete this._persist[k];
         }
+        try {
+            localStorage.setItem(PERSIST_KEY, JSON.stringify(this._persist));
+            return;
+        } catch { /* fall through to graceful eviction */ }
+
+        // Quota error: drop the oldest 25% and retry once before nuking.
+        // Avoids the previous "nuke everything" behavior that wiped warm
+        // logo/trailer caches the moment a single big row pushed us over.
+        try {
+            const remaining = Object.keys(this._persist)
+                .map((k) => ({ k, t: this._persist[k].time || 0 }))
+                .sort((a, b) => a.t - b.t);
+            const dropCount = Math.max(1, Math.ceil(remaining.length * 0.25));
+            for (let i = 0; i < dropCount; i++) delete this._persist[remaining[i].k];
+            localStorage.setItem(PERSIST_KEY, JSON.stringify(this._persist));
+            return;
+        } catch { /* still failing — last resort below */ }
+
+        try {
+            this._persist = {};
+            localStorage.removeItem(PERSIST_KEY);
+        } catch { /* silent */ }
     }
 
     _persistGet(key) {
         const entry = this._persist[key];
         if (!entry) return undefined;
-        if (Date.now() - (entry.time || 0) > PERSIST_TTL) {
+        const ttl = entry.ttl || PERSIST_TTL;
+        if (Date.now() - (entry.time || 0) > ttl) {
             delete this._persist[key];
             return undefined;
         }
         return entry.value;
     }
 
-    _persistSet(key, value) {
-        this._persist[key] = { value, time: Date.now() };
+    _persistSet(key, value, ttl) {
+        const entry = { value, time: Date.now() };
+        if (ttl) entry.ttl = ttl;
+        this._persist[key] = entry;
         // Throttle disk writes — bursty home-screen mounts can write dozens
         // of entries in a few hundred ms, and serializing the entire cache
-        // (2000+ entries) every time becomes the bottleneck.
+        // every time becomes the bottleneck.
         this._persistDirty = true;
         if (this._persistFlushTimer) return;
         this._persistFlushTimer = setTimeout(() => {
@@ -224,6 +247,18 @@ class TMDBService {
         const cached = this._getCached(cacheKey);
         if (cached) return cached;
 
+        // Persistent cache (localStorage, 6h default) — keeps row data alive
+        // across reloads so trending/popular/recommendations/etc. don't all
+        // re-fetch every time the page loads.
+        const persistKey = `api:${cacheKey}`;
+        const persisted = this._persistGet(persistKey);
+        if (persisted !== undefined) {
+            // Hydrate the in-memory cache so subsequent same-session calls
+            // skip the localStorage round-trip too.
+            this._setCache(cacheKey, persisted);
+            return persisted;
+        }
+
         // Dedup: if an identical request is already in-flight, ride that one
         // instead of issuing a second. Crucial for home-screen mounts where
         // multiple components can independently request the same item.
@@ -273,6 +308,9 @@ class TMDBService {
             if (!res.ok) return null;
             const data = await res.json();
             this._setCache(cacheKey, data);
+            // Mirror into the persistent cache so reloads can serve it without
+            // a network round-trip. 6h TTL — TMDB rows change daily at most.
+            this._persistSet(`api:${cacheKey}`, data, API_RESPONSE_TTL);
             return data;
         } catch {
             return null;
