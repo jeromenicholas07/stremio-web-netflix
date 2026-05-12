@@ -28,6 +28,51 @@ class TMDBService {
         this._cache = new Map();
         this._imdbCache = new Map(); // tmdbId → imdbId (mirrors persistent cache)
         this._persist = this._loadPersist();
+
+        // ─── Request flow control ────────────────────────────────
+        // In-flight deduplication: coalesce concurrent callers for the same
+        // cache key into a single HTTP request.
+        this._inflight = new Map(); // cacheKey → Promise
+
+        // Semaphore: cap concurrent TMDB fetches so a 100-card home-screen
+        // mount doesn't fire 100 simultaneous requests and trip 429.
+        // 4 slots × ~100ms RTT ≈ 40 req/s — well under TMDB's ~50/s limit.
+        this._maxConcurrent = 4;
+        this._activeFetches = 0;
+        this._waitQueue = []; // [resolve, ...] for slot acquisition
+
+        // Global pause until <ms timestamp>. Set by 429 responses; every
+        // outgoing fetch waits past this point before hitting the network.
+        this._pauseUntil = 0;
+
+        // Persist writes are O(n) over the whole cache — throttle so a burst
+        // of cacheable lookups doesn't synchronously serialize the cache N times.
+        this._persistDirty = false;
+        this._persistFlushTimer = null;
+    }
+
+    // ── Concurrency semaphore ──
+    async _acquireSlot() {
+        // Respect any active 429 pause first.
+        const wait = this._pauseUntil - Date.now();
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+
+        if (this._activeFetches < this._maxConcurrent) {
+            this._activeFetches++;
+            return;
+        }
+        await new Promise((r) => this._waitQueue.push(r));
+        this._activeFetches++;
+    }
+
+    _releaseSlot() {
+        this._activeFetches--;
+        if (this._waitQueue.length > 0) {
+            const next = this._waitQueue.shift();
+            // Defer with setTimeout(0) so the next slot acquisition doesn't
+            // happen inside the current microtask and re-enter immediately.
+            setTimeout(next, 0);
+        }
     }
 
     // --- Persistent cache (localStorage) for stable lookups ---
@@ -76,8 +121,18 @@ class TMDBService {
 
     _persistSet(key, value) {
         this._persist[key] = { value, time: Date.now() };
-        // Debounce-ish: write immediately. Volume is low (a few writes per page load).
-        this._savePersist();
+        // Throttle disk writes — bursty home-screen mounts can write dozens
+        // of entries in a few hundred ms, and serializing the entire cache
+        // (2000+ entries) every time becomes the bottleneck.
+        this._persistDirty = true;
+        if (this._persistFlushTimer) return;
+        this._persistFlushTimer = setTimeout(() => {
+            this._persistFlushTimer = null;
+            if (this._persistDirty) {
+                this._persistDirty = false;
+                this._savePersist();
+            }
+        }, 500);
     }
 
     // --- Settings stored in localStorage ---
@@ -169,6 +224,21 @@ class TMDBService {
         const cached = this._getCached(cacheKey);
         if (cached) return cached;
 
+        // Dedup: if an identical request is already in-flight, ride that one
+        // instead of issuing a second. Crucial for home-screen mounts where
+        // multiple components can independently request the same item.
+        if (this._inflight.has(cacheKey)) return this._inflight.get(cacheKey);
+
+        const promise = this._doFetchWithBackoff(path, params, apiKey, cacheKey, 3);
+        this._inflight.set(cacheKey, promise);
+        try {
+            return await promise;
+        } finally {
+            this._inflight.delete(cacheKey);
+        }
+    }
+
+    async _doFetchWithBackoff(path, params, apiKey, cacheKey, retries) {
         const url = new URL(`${TMDB_BASE}${path}`);
         url.searchParams.set('api_key', apiKey);
         // Always include language for localized results
@@ -177,14 +247,37 @@ class TMDBService {
         }
         Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
 
+        await this._acquireSlot();
+        let releaseInFinally = true;
         try {
             const res = await fetch(url.toString());
+            if (res.status === 429) {
+                // Honor Retry-After (seconds). TMDB also sometimes sets the
+                // ms-based `x-ratelimit-reset` header; either works as a hint.
+                const retryAfterSec = parseInt(res.headers.get('Retry-After') || '', 10);
+                const pauseMs = Number.isFinite(retryAfterSec) && retryAfterSec > 0
+                    ? retryAfterSec * 1000
+                    : 10000;
+                // Global pause — every in-flight + queued request will honor this.
+                this._pauseUntil = Math.max(this._pauseUntil, Date.now() + pauseMs);
+                if (retries > 0) {
+                    // Free the slot so other (paused) requests can resume after the
+                    // pause; we'll re-acquire on retry.
+                    this._releaseSlot();
+                    releaseInFinally = false;
+                    await new Promise((r) => setTimeout(r, pauseMs + 100));
+                    return this._doFetchWithBackoff(path, params, apiKey, cacheKey, retries - 1);
+                }
+                return null;
+            }
             if (!res.ok) return null;
             const data = await res.json();
             this._setCache(cacheKey, data);
             return data;
         } catch {
             return null;
+        } finally {
+            if (releaseInFinally) this._releaseSlot();
         }
     }
 
@@ -340,11 +433,22 @@ class TMDBService {
      *   4. Fallback to any language if preferred language has no results
      */
     async getBestTrailerYtId(tmdbId, mediaType = 'movie') {
+        // Trailer ytIds are stable per (tmdbId, mediaType, language) and a
+        // popular per-card lookup — persist them across reloads so the
+        // videos endpoint isn't re-hit on every home-screen mount.
+        const lang = this.getTrailerLanguage();
+        const persistKey = `trailer:${mediaType}:${tmdbId}:${lang}`;
+        const persisted = this._persistGet(persistKey);
+        if (persisted !== undefined) return persisted;
+
         const data = await this._fetch(`/${mediaType}/${tmdbId}`, {
             append_to_response: 'videos',
             language: this.getTrailerLanguage(),
         });
-        if (!data?.videos?.results) return null;
+        if (!data?.videos?.results) {
+            this._persistSet(persistKey, null);
+            return null;
+        }
 
         const preferredLang = this.getTrailerLanguage();
         const allVideos = data.videos.results;
@@ -367,7 +471,10 @@ class TMDBService {
             );
         }
 
-        if (trailers.length === 0) return null;
+        if (trailers.length === 0) {
+            this._persistSet(persistKey, null);
+            return null;
+        }
 
         // Rank trailers by quality score
         const ranked = trailers.map(v => {
@@ -396,7 +503,9 @@ class TMDBService {
         });
 
         ranked.sort((a, b) => b._score - a._score);
-        return ranked[0].key;
+        const ytId = ranked[0].key;
+        this._persistSet(persistKey, ytId);
+        return ytId;
     }
 
     /**
