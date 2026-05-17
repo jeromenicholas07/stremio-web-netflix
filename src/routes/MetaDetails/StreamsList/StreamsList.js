@@ -53,6 +53,12 @@ function detectQuality(stream) {
 
 function matchesSource(stream, source) {
     if (source === 'any') return true;
+    // Torrentio is an addon, not a debrid tag — its streams are identified by
+    // the addon name rather than a marker in the stream title. Matches both
+    // plain torrent and debrid-cached streams that Torrentio serves.
+    if (source === 'torrentio') {
+        return /torrentio/i.test(stream.addonName || '');
+    }
     const regex = SOURCE_PATTERNS[source];
     return regex ? regex.test(stream.name || '') : false;
 }

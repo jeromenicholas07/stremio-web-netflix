@@ -111,6 +111,22 @@ const Player = ({ urlParams, queryParams }) => {
     }, [settings]);
 
     const handleNextVideoNavigation = React.useCallback((deepLinks, bingeWatching, ended) => {
+        // When our auto-pick feature is on, always route the next video through
+        // its streams page so auto-pick resolves a FRESH stream for it. Core's
+        // `player` deeplink reuses the previous episode's recorded stream, which
+        // is the wrong file for a new episode — going through the streams page
+        // lets StreamsList's auto-pick re-run and select a valid stream.
+        // Auto-pick also implies the user wants continuous playback, so honor
+        // it on episode-end even when the native bingeWatching setting is off.
+        let autoPickOn = false;
+        try { autoPickOn = localStorage.getItem('netflix_ui_autopick') === 'true'; } catch { /* */ }
+
+        if (autoPickOn && deepLinks.metaDetailsStreams) {
+            isNavigating.current = true;
+            window.location.replace(deepLinks.metaDetailsStreams);
+            return;
+        }
+
         if (ended) {
             if (bingeWatching) {
                 if (deepLinks.player) {

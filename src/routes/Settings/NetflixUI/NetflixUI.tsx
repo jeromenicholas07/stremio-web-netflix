@@ -56,6 +56,7 @@ const SOURCE_OPTIONS = [
     { value: 'debridlink', label: 'Debrid-Link [DL+]' },
     { value: 'alldebrid', label: 'AllDebrid [AD+]' },
     { value: 'premiumize', label: 'Premiumize [PM+]' },
+    { value: 'torrentio', label: 'Torrentio' },
     { value: 'any', label: 'Any Source' },
 ];
 
