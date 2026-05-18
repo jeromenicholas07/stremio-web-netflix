@@ -4,23 +4,34 @@
 // seeders, peers, size, quality})), produced by the addon's torrent-search
 // handler.
 //
-// Normally: decode payload → POST /rd/files → if 1 playable video, straight
-// to /rd/resolve → encode the returned HTTPS URL for stremio-core's Player
-// and redirect. When `files.length > 1` we show a picker so the user
-// chooses which file to play; the spinner only re-appears after selection.
-//
-// Fallback: if RD isn't configured or every step fails, we queue the magnet
-// with the local streaming server and hand off an infoHash Stream to the
-// Player (existing behaviour — preserved).
+// Flow:
+//   1. Decode payload → infoHash (lazy-resolve via /rd/resolve-url if the
+//      catalog item arrived hash-less).
+//   2. If a Real-Debrid token is configured, AUTO-TRY RD with a short ~8s
+//      budget — instant playback when the torrent is RD-cached.
+//   3. If RD isn't cached / fails / times out (or there's no token), show a
+//      "choose how to play" picker: Play via Real-Debrid vs Play Direct
+//      (P2P, streamed through the local streaming server). RD failure is
+//      never a trap — Direct is always right there.
+//   4. When RD returns multiple playable videos, a file picker is shown.
 //
 // No PIN gate here — this is the regular (non-Incognito) torrent play path
-// used by the Prowlarr row in the main Search page.
+// used by the Prowlarr row in the main Search page AND the Incognito tab.
 
 const React = require('react');
 const classnames = require('classnames');
 const { useServices } = require('stremio/services');
 const { MainNavBars } = require('stremio/components');
 const styles = require('./styles.less');
+
+// Auto-RD probe budget. RD-cached torrents resolve in 1-3s; anything past
+// this is almost certainly an uncached torrent (RD would have to download
+// it), so we stop waiting and let the user pick Direct instead.
+const RD_AUTO_BUDGET_MS = 8000;
+// Budgets for the EXPLICIT "Play via Real-Debrid" choice — the user opted
+// in, so we wait longer than the auto-probe, but still bounded.
+const RD_FILES_BUDGET_MS = 12000;
+const RD_RESOLVE_BUDGET_MS = 15000;
 
 function base64UrlDecode(s) {
     const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4));
@@ -48,13 +59,32 @@ async function encodeStreamForCore(streamObj) {
 const ADDON_URL = 'http://127.0.0.1:7000';
 const RD_TOKEN_KEY = 'rd_token';
 
-async function rdFiles(infoHash, title, token) {
+function getRdToken() {
+    try { return localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { return ''; }
+}
+
+// Run a fetch-returning producer under a timeout. Resolves to whatever the
+// producer returns, or null if it throws / aborts / times out.
+async function withBudget(budgetMs, producer) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), budgetMs);
+    try {
+        return await producer(ctrl.signal);
+    } catch {
+        return null;
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+async function rdFiles(infoHash, title, token, signal) {
     if (!token) return null;
     try {
         const res = await fetch(`${ADDON_URL}/rd/files`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ infoHash, title, token }),
+            signal,
         });
         if (!res.ok) return null;
         const data = await res.json();
@@ -127,7 +157,7 @@ async function resolveHashFromUrl({ downloadUrl, magnetUrl, indexer }) {
     }
 }
 
-async function rdResolve(infoHash, title, token, fileId) {
+async function rdResolve(infoHash, title, token, fileId, signal) {
     if (!token) return null;
     try {
         const body = { infoHash, title, token };
@@ -136,6 +166,7 @@ async function rdResolve(infoHash, title, token, fileId) {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(body),
+            signal,
         });
         if (!res.ok) return null;
         const data = await res.json();
@@ -196,9 +227,13 @@ const Torrent = ({ urlParams }) => {
     const [error, setError] = React.useState(null);
     const [status, setStatus] = React.useState('Starting...');
 
+    // `choosing` → show the Direct vs Real-Debrid method picker.
+    // `notice`   → recoverable message shown atop the picker (e.g. RD failed).
+    const [choosing, setChoosing] = React.useState(false);
+    const [notice, setNotice] = React.useState(null);
+
     // Multi-file picker state. `files === null` while we haven't asked RD
-    // yet; an empty array means we asked and got nothing playable (fall
-    // through to magnet).
+    // yet; an empty array means we asked and got nothing playable.
     const [files, setFiles] = React.useState(null);
     const [picking, setPicking] = React.useState(false);
 
@@ -235,16 +270,17 @@ const Torrent = ({ urlParams }) => {
     const fromIncognito = typeof document !== 'undefined' &&
         (document.referrer || '').includes('/incognito');
 
-    // Fallback path: queue magnet in streaming server, encode an infoHash
+    // ─── Direct (P2P) playback ───
+    // Queue the magnet in the local streaming server, encode an infoHash
     // Stream, hand off to the Player. Reads `hashRef` (not the state
-    // closure) so a lazy-resolved hash from /rd/resolve-url is visible
-    // even if the callback was memoised before the state flipped.
+    // closure) so a lazy-resolved hash is visible even if the callback was
+    // memoised before the state flipped.
     const playViaMagnet = React.useCallback(async () => {
         if (startedMagnetRef.current) return;
         startedMagnetRef.current = true;
         const hash = hashRef.current;
         if (!hash) { setError('Missing infoHash — cannot queue torrent.'); return; }
-        setStatus('Queuing torrent in streaming server...');
+        setStatus('Starting direct stream…');
         try {
             core.transport.dispatch({
                 action: 'StreamingServer',
@@ -283,24 +319,10 @@ const Torrent = ({ urlParams }) => {
         window.location.replace(`#/player/${encodeURIComponent(encoded)}`);
     }, [core, title, payload]);
 
-    // RD resolve path (optionally with fileId). On success redirects to
-    // /player; on failure falls back to magnet.
-    const playViaRD = React.useCallback(async (fileId) => {
-        setPicking(false);
-        setStatus('Resolving via Real-Debrid...');
+    // Encode an RD-unrestricted result into a core Stream and navigate to
+    // the Player. Returns true on success, false if encoding was rejected.
+    const playRDResult = React.useCallback(async (rd) => {
         const hash = hashRef.current;
-        if (!hash) { await playViaMagnet(); return; }
-        let token = '';
-        try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
-        if (!token) {
-            await playViaMagnet();
-            return;
-        }
-        const rd = await rdResolve(hash, title, token, fileId);
-        if (!rd || !rd.url) {
-            await playViaMagnet();
-            return;
-        }
         const rdStream = {
             name: payload?.name || 'RD',
             description: rd.filename || title || 'Torrent',
@@ -312,14 +334,72 @@ const Torrent = ({ urlParams }) => {
             const decoded = await core.transport.decodeStream(rdEncoded);
             if (decoded) {
                 window.location.replace(`#/player/${encodeURIComponent(rdEncoded)}`);
-                return;
+                return true;
             }
             console.warn('[torrent-route] RD decodeStream returned null');
         } catch (err) {
             console.warn('[torrent-route] RD encode/decodeStream failed', err);
         }
-        await playViaMagnet();
-    }, [core, title, payload, playViaMagnet]);
+        return false;
+    }, [core, title, payload]);
+
+    // Resolve a (possibly specific) file via RD and play it. On failure,
+    // drop back to the method picker with a notice — Direct stays available.
+    const runRDResolve = React.useCallback(async (fileId) => {
+        setPicking(false);
+        setChoosing(false);
+        setNotice(null);
+        setStatus('Resolving via Real-Debrid…');
+        const hash = hashRef.current;
+        const token = getRdToken();
+        const rd = await withBudget(RD_RESOLVE_BUDGET_MS, (signal) =>
+            rdResolve(hash, title, token, fileId, signal));
+        if (rd && rd.url) {
+            setStatus('Starting playback…');
+            const played = await playRDResult(rd);
+            if (played) return;
+        }
+        // RD genuinely couldn't serve it (usually: not cached on RD).
+        // Surface it and let the user fall back to Direct.
+        setNotice('Real-Debrid couldn’t serve this torrent — it’s likely not cached. Play Direct (P2P) instead.');
+        setStatus('Choose how to play');
+        setChoosing(true);
+    }, [title, playRDResult]);
+
+    // ─── Method picker handlers ───
+    const onChooseDirect = React.useCallback(() => {
+        setChoosing(false);
+        setNotice(null);
+        playViaMagnet();
+    }, [playViaMagnet]);
+
+    const onChooseRD = React.useCallback(async () => {
+        const token = getRdToken();
+        if (!token) {
+            setNotice('Real-Debrid isn’t connected — connect it in Settings, or use Play Direct (P2P).');
+            return;
+        }
+        setChoosing(false);
+        setNotice(null);
+        setStatus('Checking Real-Debrid…');
+        const hash = hashRef.current;
+        // List files first so multi-video torrents get a picker.
+        const list = await withBudget(RD_FILES_BUDGET_MS, (signal) =>
+            rdFiles(hash, title, token, signal));
+        const videos = Array.isArray(list) ? list.filter((f) => f.isVideo) : [];
+        if (videos.length > 1) {
+            setFiles(videos);
+            setPicking(true);
+            setStatus('Choose a video to play');
+            return;
+        }
+        // Single video (or RD didn't enumerate) — resolve the largest.
+        await runRDResolve(null);
+    }, [title, runRDResolve]);
+
+    const handlePick = React.useCallback((fileId) => {
+        runRDResolve(fileId);
+    }, [runRDResolve]);
 
     React.useEffect(() => {
         if (ranRef.current) return;
@@ -333,13 +413,6 @@ const Torrent = ({ urlParams }) => {
             // .torrent bytes, breaking the server-side enrichment step).
             let hash = infoHash;
             if (!hash || hash.length < 16) {
-                // We deliberately do NOT short-circuit on payload.cold here.
-                // The frontend caches catalog metas in localStorage for hours,
-                // which means a stale `cold: true` flag from a previous
-                // (over-eager) version of the addon would lock the user out
-                // of every release on that indexer until cache expiry — even
-                // after the addon was fixed. Always go through the resolver
-                // so the live cold state on the addon is what matters.
                 const dl = payload.downloadUrl || '';
                 const mag = payload.magnetUrl || '';
                 if (!dl && !mag) { setError('Torrent has no infoHash'); return; }
@@ -353,9 +426,6 @@ const Torrent = ({ urlParams }) => {
                     hash = resolved.infoHash;
                     setInfoHash(resolved.infoHash);
                 } else if (resolved && resolved.error === 'quota_exceeded') {
-                    // PornoLab-style daily cap. Show a distinct, actionable
-                    // message so the user knows exactly what went wrong and
-                    // can pick a different indexer instead of retrying.
                     setError(resolved.message);
                     return;
                 } else {
@@ -364,43 +434,36 @@ const Torrent = ({ urlParams }) => {
                 }
             }
 
-            let token = '';
-            try { token = localStorage.getItem(RD_TOKEN_KEY) || ''; } catch { /* ignore */ }
+            const token = getRdToken();
 
-            // No RD token → skip the file enumeration round-trip entirely.
+            // No RD token → nothing to auto-try; go straight to the picker
+            // (Direct will be the realistic choice).
             if (!token) {
-                await playViaMagnet();
+                setStatus('Choose how to play');
+                setChoosing(true);
                 return;
             }
 
+            // Auto-try RD with a short budget. RD-cached torrents resolve
+            // in 1-3s and play instantly; uncached ones blow the budget and
+            // we pivot straight to the picker so the user isn't stuck
+            // staring at a "Resolving…" spinner for a minute.
             setStatus('Checking Real-Debrid…');
-            const list = await rdFiles(hash, title, token);
-            if (!Array.isArray(list) || list.length === 0) {
-                // RD failed or returned nothing usable — let resolve try its
-                // own path (it may still succeed; otherwise playViaRD falls
-                // through to magnet).
-                await playViaRD(null);
-                return;
+            const rd = await withBudget(RD_AUTO_BUDGET_MS, (signal) =>
+                rdResolve(hash, title, token, null, signal));
+            if (rd && rd.url) {
+                setStatus('Starting playback…');
+                const played = await playRDResult(rd);
+                if (played) return;
             }
 
-            const videos = list.filter(f => f.isVideo);
-            if (videos.length <= 1) {
-                // Single playable video (or none identified — resolve will
-                // pick the biggest file as fallback). No picker needed.
-                await playViaRD(null);
-                return;
-            }
-
-            // Multiple videos → show picker.
-            setFiles(videos);
-            setPicking(true);
-            setStatus('Choose a video to play');
+            // Not cached / failed / timed out — let the user choose.
+            setStatus('Choose how to play');
+            setChoosing(true);
         })();
-    }, [payload, infoHash, title, playViaRD, playViaMagnet]);
+    }, [payload, infoHash, title, playRDResult, setInfoHash]);
 
-    const handlePick = React.useCallback((fileId) => {
-        playViaRD(fileId);
-    }, [playViaRD]);
+    const showSpinner = !error && !picking && !choosing;
 
     return (
         <MainNavBars route={fromIncognito ? 'incognito' : 'search'}>
@@ -419,7 +482,7 @@ const Torrent = ({ urlParams }) => {
                 <div className={styles['resolving-content']}>
                     <div className={styles['resolving-title']} title={title}>{title}</div>
                     <div className={classnames(styles['resolving-status'], error && styles['error'])}>
-                        {error || picking ? null : <span className={styles['resolving-spinner']} aria-hidden="true" />}
+                        {showSpinner ? <span className={styles['resolving-spinner']} aria-hidden="true" /> : null}
                         <span>{error ? `Error: ${error}` : status}</span>
                     </div>
 
@@ -470,6 +533,33 @@ const Torrent = ({ urlParams }) => {
                             </div>
                         ) : null}
                     </div>
+
+                    {/* Method picker — Direct (P2P) vs Real-Debrid. */}
+                    {choosing ? (
+                        <div className={styles['file-picker']}>
+                            <div className={styles['file-picker-hint']}>
+                                {notice || 'How do you want to play this?'}
+                            </div>
+                            <div className={styles['file-picker-list']}>
+                                <button
+                                    className={styles['file-picker-item']}
+                                    onClick={onChooseRD}
+                                    type="button"
+                                >
+                                    <span className={styles['file-picker-name']}>Play via Real-Debrid</span>
+                                    <span className={styles['file-picker-size']}>instant if cached</span>
+                                </button>
+                                <button
+                                    className={styles['file-picker-item']}
+                                    onClick={onChooseDirect}
+                                    type="button"
+                                >
+                                    <span className={styles['file-picker-name']}>Play Direct (P2P)</span>
+                                    <span className={styles['file-picker-size']}>streams the torrent</span>
+                                </button>
+                            </div>
+                        </div>
+                    ) : null}
 
                     {picking && files && files.length > 1 ? (
                         <div className={styles['file-picker']}>
