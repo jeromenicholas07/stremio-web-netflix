@@ -14,7 +14,7 @@ const IncognitoCard = require('./IncognitoCard');
 const styles = require('./styles');
 
 function IncognitoSearchResults({ query }) {
-    const { results, loading, loadingMore, stale, hasMore, loadMore } = useIncognitoSearch(query);
+    const { results, loading, loadingMore, stale, refreshFailed, hasMore, loadMore } = useIncognitoSearch(query);
     const sentinelRef = React.useRef(null);
 
     // IntersectionObserver → loadMore. We reuse a single observer that
@@ -51,6 +51,10 @@ function IncognitoSearchResults({ query }) {
                 {stale ? (
                     <div className={styles['search-results-stale']} title="Refreshing in background">
                         refreshing…
+                    </div>
+                ) : refreshFailed ? (
+                    <div className={styles['search-results-stale']} title="Background refresh failed — showing cached results">
+                        couldn&rsquo;t refresh
                     </div>
                 ) : null}
             </div>

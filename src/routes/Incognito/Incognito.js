@@ -2,6 +2,7 @@ const React = require('react');
 const classnames = require('classnames');
 const { default: Icon } = require('@stremio/stremio-icons/react');
 const { MainNavBars, MetaRow } = require('stremio/components');
+const MetaRowPlaceholder = require('stremio/components/MetaRow/MetaRowPlaceholder');
 const usePinGate = require('./usePinGate');
 const PinDialog = require('./PinDialog');
 const IncognitoSettings = require('./IncognitoSettings');
@@ -134,11 +135,21 @@ const Incognito = ({ urlParams }) => {
                                 />
                             ))}
                             {customCatalogs.map((catalog) => {
-                                // Hide rows that haven't fetched yet (cold first
-                                // visit). Cached rows show instantly; errored
-                                // rows render empty rather than vanishing, so
-                                // the user still sees the title they added.
-                                if (catalog._customStatus === 'loading') return null;
+                                // Cold first visit (no cache yet): render a
+                                // skeleton row with the title so the user sees
+                                // the row they added immediately, instead of a
+                                // blank gap until the background fetch returns.
+                                // Cached rows show instantly; errored rows
+                                // render empty rather than vanishing.
+                                if (catalog._customStatus === 'loading') {
+                                    return (
+                                        <MetaRowPlaceholder
+                                            key={catalog.id}
+                                            className={classnames(styles['catalog-row'], 'animation-fade-in')}
+                                            title={catalog.name}
+                                        />
+                                    );
+                                }
                                 return (
                                     <MetaRow
                                         key={catalog.id}

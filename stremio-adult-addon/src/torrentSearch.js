@@ -9,8 +9,7 @@
 // CreateTorrent + navigates to the Player.
 
 const { LRUCache } = require('lru-cache');
-const { searchProwlarr } = require('./prowlarr');
-const { getConfig } = require('./config');
+const { hybridSearch } = require('./hybridSearch');
 
 // Categories: 2000 movies, 5000 TV, 3000 audio, 7000 books, 8000 other
 const GENERAL_CATEGORIES = [
@@ -116,20 +115,29 @@ async function handleTorrentSearch(query, extra = {}) {
         return { metas: [] };
     }
 
-    const config = getConfig();
     const skip = parseInt(extra.skip || '0', 10);
-    const cacheKey = `torrent-search:${query}:${skip}`;
+    // One-shot search: return a large merged set so the web client can
+    // render everything and reveal client-side (no fragile network paging).
+    const rawLimit = parseInt(extra.limit || '0', 10);
+    const limit = rawLimit > 0 ? Math.min(rawLimit, 200) : 200;
+    const cacheKey = `torrent-search:${query}:${skip}:${limit}`;
     const cached = cache.get(cacheKey);
     if (cached) return cached;
 
     let items;
     try {
-        items = await searchProwlarr({
+        // Hybrid: fast direct sources (apibay / Knaben / Torrents-CSV) in
+        // parallel, Prowlarr as a bounded supplement.
+        items = await hybridSearch({
             query,
-            offset: skip,
-            limit: config.pageSize,
-            sortBy: 'seeders',
-            categories: GENERAL_CATEGORIES,
+            cat: 0,
+            prowlarrOpts: {
+                query,
+                offset: skip,
+                limit: 200,
+                sortBy: 'seeders',
+                categories: GENERAL_CATEGORIES,
+            },
         });
     } catch (err) {
         console.error('[torrent-search]', err.message);
@@ -145,7 +153,7 @@ async function handleTorrentSearch(query, extra = {}) {
     const metas = playableItems
         .map(itemToMeta)
         .filter(Boolean)
-        .slice(0, config.pageSize);
+        .slice(0, limit);
 
     const result = { metas };
     cache.set(cacheKey, result);

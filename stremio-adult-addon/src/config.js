@@ -115,6 +115,11 @@ function getCacheDir() {
 function getConfig() {
     return {
         ...STATIC,
+        // ADDON_PORT env override — used for local testing alongside a
+        // production instance already bound to the default 7000.
+        addonPort: process.env.ADDON_PORT
+            ? parseInt(process.env.ADDON_PORT, 10) || STATIC.addonPort
+            : STATIC.addonPort,
         prowlarrApiKey: getProwlarrApiKey(),
     };
 }

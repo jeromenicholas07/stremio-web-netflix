@@ -69,6 +69,21 @@ function generateGroupId(normalizedTitle) {
 }
 
 /**
+ * Stable short fingerprint for items that lack a resolvable infoHash —
+ * used as a dedupe key (and baked into encoded ids for lazy resolution).
+ * Lives here in the shared utils module so catalog.js, torrentSearch.js
+ * and hybridSearch.js can all reuse it without a circular require.
+ */
+function fingerprint(downloadUrl, title) {
+    const seed = `${downloadUrl || ''}|${title || ''}`;
+    let h = 5381;
+    for (let i = 0; i < seed.length; i++) {
+        h = ((h << 5) + h + seed.charCodeAt(i)) | 0;
+    }
+    return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+/**
  * Format file size for display.
  */
 function formatSize(bytes) {
@@ -191,4 +206,4 @@ function buildDescription(representative, group) {
     return parts.join(' | ');
 }
 
-module.exports = { deduplicateItems, normalizeTitle, extractQuality, generateGroupId, formatSize };
+module.exports = { deduplicateItems, normalizeTitle, extractQuality, generateGroupId, formatSize, fingerprint };

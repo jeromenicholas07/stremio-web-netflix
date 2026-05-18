@@ -13,8 +13,10 @@
 // already does, so the two flows share the /torrent/<payload> route.
 
 const { searchProwlarr, isIndexerCold, getIndexerColdInfo } = require('./prowlarr');
+const { hybridSearch } = require('./hybridSearch');
 const { getConfig } = require('./config');
 const { fallbackPoster } = require('./poster');
+const { fingerprint } = require('./dedup');
 const { LRUCache } = require('lru-cache');
 
 // 3h TTL: aggregate Prowlarr searches take 2–5s cold (slowest indexer
@@ -66,17 +68,8 @@ function cleanTitle(raw) {
         .trim();
 }
 
-// Stable fingerprint for items we can't resolve to an infoHash — used as
-// the dedupe key and baked into the encoded id so click-to-play can lazy
-// resolve via /rd/resolve-url on the addon side.
-function fingerprint(downloadUrl, title) {
-    const seed = `${downloadUrl || ''}|${title || ''}`;
-    let h = 5381;
-    for (let i = 0; i < seed.length; i++) {
-        h = ((h << 5) + h + seed.charCodeAt(i)) | 0;
-    }
-    return (h >>> 0).toString(16).padStart(8, '0');
-}
+// `fingerprint` (dedupe key for items lacking an infoHash) now lives in
+// the shared utils module — see require('./dedup') above.
 
 /**
  * Convert a raw Prowlarr torrent item into a catalog meta. Always returns
@@ -257,13 +250,24 @@ async function handleCatalog(catalogId, extra = {}) {
 
     let items;
     try {
-        items = await searchProwlarr({
-            query,
-            offset: skip,
-            limit: fetchLimit,
-            sortBy,
-            ...(isSearch ? { categories: [] } : {}),
-        });
+        if (isSearch) {
+            // Search → hybrid: fast direct sources (apibay / Knaben /
+            // Torrents-CSV) in parallel, Prowlarr as a bounded supplement.
+            items = await hybridSearch({
+                query,
+                cat: 500,
+                prowlarrOpts: { query, offset: skip, limit: fetchLimit, sortBy, categories: [] },
+            });
+        } else {
+            // Browse catalogs (adult-latest / adult-popular) stay on Prowlarr
+            // — the direct adapters are query-driven and have no genre browse.
+            items = await searchProwlarr({
+                query,
+                offset: skip,
+                limit: fetchLimit,
+                sortBy,
+            });
+        }
     } catch (err) {
         console.error('[catalog]', catalogId, err.message);
         return { metas: [] };

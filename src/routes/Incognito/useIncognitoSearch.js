@@ -3,43 +3,27 @@ const React = require('react');
 const ADDON_URL_KEY = 'incognito_addon_url';
 const DEFAULT_ADDON_URL = 'http://127.0.0.1:7000';
 
-// Two-tier cache: fresh (<3h) render-and-done; stale (3h–30d) render
-// immediately then refresh in the background, merging new items into the
-// existing set rather than replacing. Persist to localStorage so a full
-// browser restart still paints cached searches instantly. LRU-cap to 50
-// most-recent queries to stay well under the 5 MB origin quota.
+// Two-tier SWR cache: fresh (<3h) render-and-done; stale (3h-30d) render
+// immediately then refresh in the background, MERGING new items into the
+// stored set rather than replacing. Persisted to localStorage so a browser
+// restart still paints cached searches instantly. LRU-capped to 50 queries.
 //
-// Cache is AGGREGATIVE: every refresh adds previously-unseen items to the
-// stored list (capped at MAX_PER_QUERY) so users build up a growing
-// library of releases over time. Items dropped by Prowlarr (deleted
-// releases) stay accessible from the cache; new releases prepend on top.
+// Cache is AGGREGATIVE — each refresh adds previously-unseen items (capped
+// at MAX_PER_QUERY) so the user builds up a growing set of releases over
+// time even as the upstream cycles old ones out.
 const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
 const STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MAX_ENTRIES = 50;
-// Hard cap on items stored per query, to keep a single search row from
-// dominating the 5 MB localStorage budget. 500 is comfortably large
-// (~25 cards per scroll, 20 scrolls deep) while keeping JSON
-// serialisation cheap.
 const MAX_PER_QUERY = 500;
-// v2: previous versions baked a `cold: true` flag into cached metas based
-// on over-eager addon-side cold-state. Bumping the cache key drops those
-// stale entries on upgrade so users don't get locked into bogus "daily
-// limit reached" errors on every click.
 const LS_KEY = 'incognito_search_cache_v2';
 
-// Each search pulls down a full page at a time and can keep appending more
-// via `loadMore()`. PAGE_SIZE is the client-side request — addon clamps to
-// 200 and Prowlarr caps at whatever the indexer yields, so we ask for 100
-// and accept whatever comes back.
-const PAGE_SIZE = 100;
-// Auto-fill: keep paginating after first paint until the grid contains at
-// least this many entries (or the upstream runs out). Adult indexers
-// frequently return 40-80 raw items per query, which after dedupe leaves
-// a sparse first page; chaining loadMore() invisibly fills the grid to a
-// satisfying density without any user scroll. Hard-capped by AUTO_FILL_MAX
-// loadMore calls so a misbehaving addon doesn't trigger an infinite loop.
-const AUTO_FILL_TARGET = 100;
-const AUTO_FILL_MAX_PAGES = 5;
+// One-shot fetch: the hybrid backend returns the full merged result set
+// (~200 items) in a SINGLE response, so there is no network pagination.
+// The grid reveals these REVEAL_STEP at a time as the user scrolls —
+// purely client-side, which removes the old skip-based dedup/exhaustion
+// bugs entirely.
+const FETCH_LIMIT = 200;
+const REVEAL_STEP = 60;
 
 const _searchCache = new Map();
 
@@ -112,15 +96,6 @@ function classifyEntry(entry) {
     return 'expired';
 }
 
-async function fetchPage({ addonUrl, query, skip, signal }) {
-    const encoded = encodeURIComponent(query);
-    const url = `${addonUrl}/catalog/other/adult-search/search=${encoded}&skip=${skip}&limit=${PAGE_SIZE}.json`;
-    const res = await fetch(url, { signal });
-    if (!res.ok) throw new Error(`Search failed: ${res.status}`);
-    const data = await res.json();
-    return Array.isArray(data.metas) ? data.metas : [];
-}
-
 function dedupeById(list) {
     const seen = new Set();
     const out = [];
@@ -133,12 +108,21 @@ function dedupeById(list) {
     return out;
 }
 
-// Merge a freshly-fetched page into the existing cached metas. Fresh items
-// take precedence (they may carry updated seeders/leechers/quality), and
-// any cached items that aren't in the fresh batch are kept appended so the
-// user still sees previously-discovered releases that have aged out of
-// Prowlarr's current top-N. Cap at MAX_PER_QUERY so a year of refreshes
-// doesn't blow the localStorage quota.
+// One-shot search fetch. The addon returns the full merged result set in a
+// single response (`limit` is the only param — no `skip`).
+async function fetchAll({ addonUrl, query, signal }) {
+    const encoded = encodeURIComponent(query);
+    const url = `${addonUrl}/catalog/other/adult-search/search=${encoded}&limit=${FETCH_LIMIT}.json`;
+    const res = await fetch(url, { signal });
+    if (!res.ok) throw new Error(`Search failed: ${res.status}`);
+    const data = await res.json();
+    return Array.isArray(data.metas) ? dedupeById(data.metas) : [];
+}
+
+// Merge a fresh fetch into cached metas. Fresh items take precedence (they
+// may carry updated seeders/quality); cached-only items are kept appended
+// so the user still sees previously-discovered releases. Capped at
+// MAX_PER_QUERY so a year of refreshes doesn't blow the localStorage quota.
 function mergeWithCache(existing, fresh, maxSize = MAX_PER_QUERY) {
     if (!Array.isArray(existing) || existing.length === 0) {
         return Array.isArray(fresh) ? fresh.slice(0, maxSize) : [];
@@ -156,13 +140,13 @@ function mergeWithCache(existing, fresh, maxSize = MAX_PER_QUERY) {
 }
 
 /**
- * URL-driven search hook. The `query` argument is the source of truth —
- * it comes from the route (#/incognito/search/<urlencoded>).
+ * URL-driven search hook. `query` comes from the route
+ * (#/incognito/search/<urlencoded>).
  *
- * Returns `{ results, loading, loadingMore, stale, hasMore, loadMore, query }`:
- * the grid renders `results` directly and calls `loadMore()` when the user
- * scrolls near the bottom. `hasMore` flips false when a page returns
- * fewer items than PAGE_SIZE (Prowlarr ran out of results for this query).
+ * Returns `{ results, loading, loadingMore, stale, refreshFailed, hasMore,
+ * loadMore, query }`. The full result set is fetched once; `results` is the
+ * revealed slice the grid renders, grown REVEAL_STEP at a time by `loadMore`
+ * (a pure client-side operation — no network).
  */
 const useIncognitoSearch = (query) => {
     const trimmed = typeof query === 'string' ? query.trim() : '';
@@ -171,181 +155,101 @@ const useIncognitoSearch = (query) => {
 
     // Seed synchronously so cached hits paint on first render.
     const initial = React.useMemo(() => {
-        if (!cacheKey) return { results: [], loading: false, stale: false };
+        if (!cacheKey) return { all: [], loading: false, stale: false };
         const entry = readCacheEntry(cacheKey);
         const cls = classifyEntry(entry);
-        if (cls === 'fresh') return { results: entry.metas, loading: false, stale: false };
-        if (cls === 'stale') return { results: entry.metas, loading: false, stale: true };
-        return { results: [], loading: true, stale: false };
+        if (cls === 'fresh') return { all: entry.metas, loading: false, stale: false };
+        if (cls === 'stale') return { all: entry.metas, loading: false, stale: true };
+        return { all: [], loading: true, stale: false };
     }, [cacheKey]);
 
-    const [results, setResults] = React.useState(initial.results);
+    const [all, setAll] = React.useState(initial.all);
+    const [revealed, setRevealed] = React.useState(() => Math.min(initial.all.length, REVEAL_STEP));
     const [loading, setLoading] = React.useState(initial.loading);
-    const [loadingMore, setLoadingMore] = React.useState(false);
     const [stale, setStale] = React.useState(initial.stale);
-    const [hasMore, setHasMore] = React.useState(true);
+    const [refreshFailed, setRefreshFailed] = React.useState(false);
 
-    // Refs so loadMore() can read the latest state without re-creating the
-    // callback on every render (IntersectionObserver keeps a stable ref).
-    const resultsRef = React.useRef(initial.results);
-    const hasMoreRef = React.useRef(true);
-    const loadingMoreRef = React.useRef(false);
-    const abortRef = React.useRef(null);
-    // Per-query auto-fill page counter; resets when `cacheKey` changes.
-    const autoFillCountRef = React.useRef(0);
+    // Ref so the stable loadMore callback can read the latest full length.
+    const allRef = React.useRef(initial.all);
+    React.useEffect(() => { allRef.current = all; }, [all]);
 
-    React.useEffect(() => { resultsRef.current = results; }, [results]);
-    React.useEffect(() => { hasMoreRef.current = hasMore; }, [hasMore]);
-    React.useEffect(() => { loadingMoreRef.current = loadingMore; }, [loadingMore]);
-    React.useEffect(() => { autoFillCountRef.current = 0; }, [cacheKey]);
-
-    // First-page load (stale-while-revalidate + cache seed).
     React.useEffect(() => {
         if (!trimmed || !addonUrl) {
-            setResults([]);
-            setLoading(false);
-            setStale(false);
-            setHasMore(false);
+            setAll([]); setRevealed(0); setLoading(false); setStale(false); setRefreshFailed(false);
             return undefined;
         }
 
         const entry = readCacheEntry(cacheKey);
         const cls = classifyEntry(entry);
+        const controller = new AbortController();
 
-        // Fresh cache — no network work. Assume more pages may exist
-        // (the cache only stores page 1) and let the auto-fill effect
-        // top up to AUTO_FILL_TARGET if the cache held fewer entries.
+        // Fresh cache — no network.
         if (cls === 'fresh') {
-            setResults(entry.metas);
-            setLoading(false);
-            setStale(false);
-            // Be optimistic about hasMore — we only set it false when a
-            // loadMore call returns zero NEW (post-dedupe) items.
-            setHasMore(entry.metas.length > 0);
+            setAll(entry.metas);
+            setRevealed(Math.min(entry.metas.length, REVEAL_STEP));
+            setLoading(false); setStale(false); setRefreshFailed(false);
             return undefined;
         }
 
-        const controller = new AbortController();
-        abortRef.current = controller;
-
-        const doFetch = async () => fetchPage({
-            addonUrl, query: trimmed, skip: 0, signal: controller.signal,
-        });
-
+        // Stale — paint immediately, refresh + merge in the background.
         if (cls === 'stale') {
-            // Paint stale immediately, refresh in background. The refresh
-            // MERGES new items into the existing cached set rather than
-            // replacing — over time the user accumulates releases that
-            // Prowlarr has since cycled out of its top-N for this query.
-            setResults(entry.metas);
-            setLoading(false);
-            setStale(true);
-            setHasMore(entry.metas.length > 0);
-            doFetch()
+            setAll(entry.metas);
+            setRevealed(Math.min(entry.metas.length, REVEAL_STEP));
+            setLoading(false); setStale(true); setRefreshFailed(false);
+            fetchAll({ addonUrl, query: trimmed, signal: controller.signal })
                 .then((metas) => {
                     const merged = mergeWithCache(entry.metas, metas);
                     writeCacheEntry(cacheKey, merged);
-                    setResults(merged);
+                    setAll(merged);
                     setStale(false);
-                    setHasMore(metas.length > 0);
                 })
                 .catch((err) => {
-                    if (err.name !== 'AbortError') {
-                        console.warn('[incognito-search] stale refresh failed:', err);
-                    }
+                    if (err.name === 'AbortError') return;
+                    // Surface the failure instead of leaving "refreshing…"
+                    // stuck forever — the stale data stays usable.
+                    console.warn('[incognito-search] stale refresh failed:', err);
+                    setStale(false);
+                    setRefreshFailed(true);
                 });
             return () => controller.abort();
         }
 
-        // Cold miss — show spinner.
-        setLoading(true);
-        setResults([]);
-        setHasMore(true);
-        doFetch()
+        // Cold miss — spinner, then one fetch.
+        setLoading(true); setAll([]); setRevealed(0); setStale(false); setRefreshFailed(false);
+        fetchAll({ addonUrl, query: trimmed, signal: controller.signal })
             .then((metas) => {
                 writeCacheEntry(cacheKey, metas);
-                setResults(metas);
+                setAll(metas);
+                setRevealed(Math.min(metas.length, REVEAL_STEP));
                 setLoading(false);
-                setStale(false);
-                // hasMore stays true unless we KNOW the upstream is empty.
-                setHasMore(metas.length > 0);
             })
             .catch((err) => {
                 if (err.name === 'AbortError') return;
                 console.error('Incognito search error:', err);
-                setResults([]);
-                setLoading(false);
-                setHasMore(false);
+                setAll([]); setRevealed(0); setLoading(false);
             });
 
         return () => controller.abort();
     }, [trimmed, addonUrl, cacheKey]);
 
-    // Append the next page of results. Safe to call repeatedly: guards on
-    // `loadingMore` + `hasMore` via refs. Detects exhaustion based on NEW
-    // (post-dedupe) item count, not raw page length — Prowlarr's offset
-    // semantics mean later pages often contain duplicates of earlier
-    // pages after the addon's cross-indexer dedupe.
-    const loadMore = React.useCallback(async () => {
-        if (!trimmed || !addonUrl) return;
-        if (loadingMoreRef.current || !hasMoreRef.current) return;
-        const currentLen = resultsRef.current.length;
-        if (currentLen === 0) return; // wait for first page
+    // Reveal the next chunk — purely client-side, instant, no network.
+    const loadMore = React.useCallback(() => {
+        setRevealed((r) => Math.min(r + REVEAL_STEP, allRef.current.length));
+    }, []);
 
-        loadingMoreRef.current = true;
-        setLoadingMore(true);
-        try {
-            const next = await fetchPage({
-                addonUrl, query: trimmed, skip: currentLen, signal: undefined,
-            });
-            if (next.length === 0) {
-                setHasMore(false);
-            } else {
-                const merged = dedupeById([...resultsRef.current, ...next]);
-                const newItemsCount = merged.length - currentLen;
-                if (newItemsCount === 0) {
-                    // Every item was already in our results — Prowlarr
-                    // genuinely has nothing new to give us. Stop paginating.
-                    setHasMore(false);
-                } else {
-                    setResults(merged);
-                    // Persist the grown grid back into the cache so the
-                    // user's accumulated results survive a tab close.
-                    writeCacheEntry(cacheKey, merged.slice(0, MAX_PER_QUERY));
-                    setHasMore(true);
-                }
-            }
-        } catch (err) {
-            console.warn('[incognito-search] loadMore failed:', err);
-            // Don't flip hasMore=false on transient errors — let the user
-            // retry by scrolling again.
-        } finally {
-            loadingMoreRef.current = false;
-            setLoadingMore(false);
-        }
-    }, [trimmed, addonUrl, cacheKey]);
+    const results = React.useMemo(() => all.slice(0, revealed), [all, revealed]);
+    const hasMore = revealed < all.length;
 
-    // Auto-fill: chain loadMore() until results.length >= AUTO_FILL_TARGET
-    // or the upstream is exhausted (or we hit the safety cap). This makes
-    // the first paint of a fresh query feel "full" — adult indexers
-    // routinely return 50-80 items per query before dedupe, leaving a
-    // sparse grid that the user would otherwise have to scroll to top up.
-    React.useEffect(() => {
-        if (loading) return undefined;
-        if (loadingMore) return undefined;
-        if (!hasMore) return undefined;
-        if (results.length === 0) return undefined;
-        if (results.length >= AUTO_FILL_TARGET) return undefined;
-        if (autoFillCountRef.current >= AUTO_FILL_MAX_PAGES) return undefined;
-
-        autoFillCountRef.current += 1;
-        // Defer to next tick so React commits this render first; loadMore
-        // toggles loadingMore which we read on the next pass.
-        const t = setTimeout(() => loadMore(), 0);
-        return () => clearTimeout(t);
-    }, [results.length, loading, loadingMore, hasMore, loadMore]);
-
-    return { results, loading, loadingMore, stale, hasMore, loadMore, query: query || '' };
+    return {
+        results,
+        loading,
+        loadingMore: false,
+        stale,
+        refreshFailed,
+        hasMore,
+        loadMore,
+        query: query || '',
+    };
 };
 
 function clearSearchCache() {
