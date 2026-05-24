@@ -1,7 +1,0 @@
-<svg width="512" height="512" viewBox="52 52 408 408" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Diamond -->
-  <rect x="106" y="106" width="300" height="300" rx="42" transform="rotate(45 256 256)" fill="black" stroke="white" stroke-width="18"></rect>
-
-  <!-- Play Icon -->
-  <path d="M220 185C220 176 230 170 238 175L325 235C333 240 333 252 325 257L238 317C230 322 220 316 220 307V185Z" fill="white"></path>
-</svg>
