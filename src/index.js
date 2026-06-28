@@ -55,6 +55,22 @@ const root = ReactDOM.createRoot(document.getElementById('app'));
 root.render(<App />);
 
 if (process.env.NODE_ENV === 'production' && process.env.SERVICE_WORKER_DISABLED !== 'true' && process.env.SERVICE_WORKER_DISABLED !== true && 'serviceWorker' in navigator) {
+    // When a freshly-deployed service worker activates and takes control
+    // (skipWaiting + clientsClaim), reload once so the page re-fetches the
+    // now-current index.html (network-first) and runs the latest bundle. This
+    // makes a deploy take effect on the FIRST relaunch of the Stremio shell
+    // instead of leaving the user on stale code until they restart twice.
+    //
+    // Guarded against reload loops, and skipped on the very first install
+    // (no prior controller) where there is no stale page to replace.
+    let reloadingForSwUpdate = false;
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (reloadingForSwUpdate || !hadController) return;
+        reloadingForSwUpdate = true;
+        window.location.reload();
+    });
+
     window.addEventListener('load', () => {
         navigator.serviceWorker.register('service-worker.js')
             .catch((registrationError) => {

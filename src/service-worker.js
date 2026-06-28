@@ -19,8 +19,8 @@
 
 import { clientsClaim } from 'workbox-core';
 import { precacheAndRoute, cleanupOutdatedCaches } from 'workbox-precaching';
-import { registerRoute } from 'workbox-routing';
-import { CacheFirst } from 'workbox-strategies';
+import { registerRoute, NavigationRoute } from 'workbox-routing';
+import { CacheFirst, NetworkFirst } from 'workbox-strategies';
 import { ExpirationPlugin } from 'workbox-expiration';
 import { CacheableResponsePlugin } from 'workbox-cacheable-response';
 
@@ -31,6 +31,24 @@ cleanupOutdatedCaches();
 
 // ─── Precache (injected by Workbox at build time) ────────────────────────
 precacheAndRoute(self.__WB_MANIFEST || []);
+
+// ─── HTML navigation: always network-first ───────────────────────────────
+// The HTML document references the hashed bundle (scripts/main.<hash>.js).
+// GitHub Pages serves index.html with `Cache-Control: max-age=600`, so the
+// Stremio shell's HTTP disk cache pins a STALE index.html — and therefore a
+// stale bundle — for up to 10 minutes after every deploy. That is the root
+// cause of "I deployed a UI fix but the exe still shows the old behaviour".
+//
+// Serving navigations network-first (bypassing the HTTP cache with
+// cache:'reload') means a fresh deploy is picked up on the very next launch.
+// Falls back to the last cached copy when offline so the app still opens.
+const navigationHandler = new NetworkFirst({
+    cacheName: 'html-navigations-v1',
+    networkTimeoutSeconds: 8,
+    fetchOptions: { cache: 'reload' },
+    plugins: [new CacheableResponsePlugin({ statuses: [0, 200] })],
+});
+registerRoute(new NavigationRoute(navigationHandler));
 
 // ─── IndexedDB-backed expiry store ───────────────────────────────────────
 // Workbox's ExpirationPlugin uses a single global maxAge; we want a random
