@@ -80,6 +80,24 @@ describe('streamPreflight', () => {
         global.fetch = originalFetch;
     });
 
+    it('trusts a small octet-stream Content-Length when the proxy drops Range (shell stub case)', async () => {
+        const originalFetch = global.fetch;
+        const headers = {
+            'content-type': 'application/octet-stream',
+            'content-length': '2119075',
+        };
+        global.fetch = jest.fn().mockResolvedValue({
+            status: 200,
+            headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+        });
+
+        const total = await probeContentLength('http://test/proxy', null);
+        expect(total).toBe(2119075);
+        expect(isStubSize(total)).toBe(true);
+
+        global.fetch = originalFetch;
+    });
+
     it('ignores a tiny HTML error body served as 200 (does not treat it as a stub)', async () => {
         const originalFetch = global.fetch;
         const headers = {

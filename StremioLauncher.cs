@@ -118,7 +118,14 @@ class StremioLauncher
         // Launch Stremio Shell with dev tools enabled
         // Pass streamingServerUrl via hash param so SearchParamsHandler configures
         // stremio-core to use our CORS proxy (12470) instead of direct 11470.
-        string webuiUrl = "https://jeromenicholas07.github.io/stremio-web-netflix/"
+        //
+        // The ?v= query busts the shell webview's HTTP disk cache for index.html.
+        // Without it GitHub Pages' max-age=600 pins a stale bundle for up to 10
+        // minutes after every deploy (the service worker often does not control
+        // navigations inside the Stremio shell webview).
+        const string WEB_UI_CACHE_VERSION = "2026-06-28-ui-cache-bust";
+        string webuiUrl = "https://jeromenicholas07.github.io/stremio-web-netflix/?v="
+            + Uri.EscapeDataString(WEB_UI_CACHE_VERSION)
             + "#/?streamingServerUrl=" + Uri.EscapeDataString("http://127.0.0.1:12470/");
         Console.WriteLine("[OK] Launching Stremio...");
         Console.WriteLine("[INFO] URL: " + webuiUrl);

@@ -27,6 +27,7 @@ const {
     getStreamKey,
     getStreamAttemptNumber,
     getTopEnabledSourceKey,
+    normalizeSettings,
     pickBestStream,
     setAutoPickOverride,
     storeAutoPickSelection,
@@ -83,6 +84,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
         setSelectedAddon(value);
     }, [platform]);
     React.useEffect(() => {
+        if (typeof type !== 'string' || !type || typeof metaId !== 'string' || !metaId) return;
         setOverrideSettingsState(getAutoPickOverride(type, metaId));
     }, [type, metaId]);
     const effectiveAutoPickSettings = React.useMemo(() => {
@@ -91,10 +93,18 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     const isCustomMode = overrideSettings !== null;
     const onAutoPickModeChange = React.useCallback((custom) => {
         if (custom) {
-            // Seed the per-show override from whatever is currently in effect
-            // (global defaults), so switching to Custom starts from a sane base.
-            const seeded = setAutoPickOverride(type, metaId, getEffectiveAutoPickSettings(type, metaId));
-            setOverrideSettingsState(seeded);
+            const base = getEffectiveAutoPickSettings(type, metaId);
+            setAutoPickOverride(type, metaId, base);
+            // Always flip UI state even if storage is unavailable (common in
+            // some embedded webviews). Re-read from storage when possible.
+            const saved = getAutoPickOverride(type, metaId) || normalizeSettings(base);
+            setOverrideSettingsState(saved);
+            setAutoPickPanelOpen(true);
+            try {
+                window.localStorage.setItem(AUTOPICK_PANEL_OPEN_KEY, 'true');
+            } catch {
+                // In-memory panel state still works.
+            }
         } else {
             setAutoPickOverride(type, metaId, null);
             setOverrideSettingsState(null);
@@ -307,6 +317,9 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     }, [countLoadingAddons, autoPickStreams.length, autoPickStateKey]);
     React.useEffect(() => {
         if (autoPickTriggered.current) return;
+        // Don't auto-pick while the user is editing settings — otherwise the
+        // player opens before they can switch to Custom or change priorities.
+        if (autoPickPanelOpen) return;
         // Don't auto-pick when user clicked "More Info" (info=1) or paused it.
         if (queryParams && queryParams.has('info')) return;
         if (queryParams && queryParams.has('autopickPaused')) return;
@@ -440,7 +453,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             cancelled = true;
             controller.abort();
         };
-    }, [autoPickSignature, autoPickReady, countLoadingAddons, autoPickStateKey]);
+    }, [autoPickSignature, autoPickReady, countLoadingAddons, autoPickStateKey, autoPickPanelOpen]);
 
     const handleEpisodePicker = React.useCallback((season, episode) => {
         onEpisodeSearch(season, episode);

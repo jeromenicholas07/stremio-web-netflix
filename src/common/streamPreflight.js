@@ -164,17 +164,21 @@ async function probeContentLength(proxyUrl, signal) {
         // Fall back to Content-Length when there is no Content-Range. Some CORS
         // proxies (notably the launcher's bundled proxy in the shell .exe) do
         // not forward the Range request header, so the upstream answers 200
-        // with the FULL size instead of 206 + Content-Range. We trust that size
-        // when it is either plainly real media (large) OR a video payload — the
-        // latter covers the ~2 MB copyright stub, which is below the large-size
-        // floor but is always served as video/mp4. A tiny HTML error page
-        // (text/html) is still ignored, so we never misread it as a stub.
+        // with the FULL size instead of 206 + Content-Range. The ~2 MB RD
+        // copyright stub is always in the 0.5–4 MB band regardless of whether
+        // the Content-Type is video/mp4 or application/octet-stream. Tiny HTML
+        // error pages (≈100 bytes) are ignored via the minimum-size floor.
         if (total === null) {
             const contentLength = res.headers.get('content-length');
             if (contentLength) {
                 const parsed = parseInt(contentLength, 10);
-                if (Number.isFinite(parsed) && (parsed >= STUB_KNOWN_MAX_BYTES || /^video\//i.test(contentType))) {
-                    total = parsed;
+                const STUB_MIN_BYTES = 512 * 1024; // 512 KB — well above error-page sizes
+                if (Number.isFinite(parsed) && parsed > 0) {
+                    if (parsed > STUB_KNOWN_MAX_BYTES) {
+                        total = parsed;
+                    } else if (parsed >= STUB_MIN_BYTES || /^video\//i.test(contentType)) {
+                        total = parsed;
+                    }
                 }
             }
         }
