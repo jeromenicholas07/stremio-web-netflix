@@ -10,6 +10,7 @@ type Props = {
     checked: boolean,
     disabled?: boolean,
     tabIndex?: number,
+    onClick?: (event?: React.MouseEvent) => void,
     children?: React.ReactNode,
 };
 

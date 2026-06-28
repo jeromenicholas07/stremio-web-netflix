@@ -29,6 +29,13 @@ const useWhisperSync = require('./useWhisperSync');
 const styles = require('./styles');
 const Video = require('./Video');
 const { default: Indicator } = require('./Indicator/Indicator');
+const {
+    buildMetaDetailsStreamsHash,
+    getAutoPickSelection,
+    getPlayableAutoPickSettings,
+    isRecoverableAutoPickError,
+    recordAutoPickFailure,
+} = require('stremio/common/autoPick');
 
 const findTrackByLang = (tracks, lang) => tracks.find((track) => track.lang === lang || langs.where('1', track.lang)?.[2] === lang);
 const findTrackById = (tracks, id) => tracks.find((track) => track.id === id);
@@ -118,8 +125,7 @@ const Player = ({ urlParams, queryParams }) => {
         // lets StreamsList's auto-pick re-run and select a valid stream.
         // Auto-pick also implies the user wants continuous playback, so honor
         // it on episode-end even when the native bingeWatching setting is off.
-        let autoPickOn = false;
-        try { autoPickOn = localStorage.getItem('netflix_ui_autopick') === 'true'; } catch { /* */ }
+        const autoPickOn = !!getPlayableAutoPickSettings(urlParams.type, urlParams.id);
 
         if (autoPickOn && deepLinks.metaDetailsStreams) {
             isNavigating.current = true;
@@ -148,7 +154,7 @@ const Player = ({ urlParams, queryParams }) => {
                 window.location.replace(deepLinks.metaDetailsStreams);
             }
         }
-    }, []);
+    }, [urlParams.type, urlParams.id]);
 
     const onEnded = React.useCallback(() => {
         // here we need to explicitly check for isNavigating.current
@@ -171,6 +177,23 @@ const Player = ({ urlParams, queryParams }) => {
 
     const onError = React.useCallback((error) => {
         console.error('Player', error);
+        const autoPickSelection = getAutoPickSelection(urlParams.type, urlParams.id, urlParams.videoId);
+        if (
+            error.critical &&
+            autoPickSelection &&
+            !isNavigating.current &&
+            isRecoverableAutoPickError(error)
+        ) {
+            const reason = /copyright/i.test(error.message || '') ? 'copyright' : 'unavailable';
+            recordAutoPickFailure(autoPickSelection, reason);
+            isNavigating.current = true;
+            window.location.replace(buildMetaDetailsStreamsHash(urlParams.type, urlParams.id, urlParams.videoId, {
+                autopickRetry: String(Date.now()),
+                autopickReason: reason,
+            }));
+            return;
+        }
+
         if (error.critical) {
             setError(error);
         } else {
@@ -181,7 +204,7 @@ const Player = ({ urlParams, queryParams }) => {
                 timeout: 3000
             });
         }
-    }, []);
+    }, [urlParams.type, urlParams.id, urlParams.videoId]);
 
     const onSubtitlesTrackLoaded = React.useCallback(() => {
         toast.show({

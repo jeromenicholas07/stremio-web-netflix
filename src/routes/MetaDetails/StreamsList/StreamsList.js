@@ -4,136 +4,143 @@ const React = require('react');
 const PropTypes = require('prop-types');
 const classnames = require('classnames');
 const { useTranslation } = require('react-i18next');
+const { useRouteFocused } = require('stremio-router');
 const { default: Icon } = require('@stremio/stremio-icons/react');
-const { Button, Image, MultiselectMenu } = require('stremio/components');
+const { Button, Image, MultiselectMenu, AutoPickEditor } = require('stremio/components');
 const { useServices } = require('stremio/services');
 const Stream = require('./Stream');
 const styles = require('./styles');
-const { usePlatform, useProfile } = require('stremio/common');
+const { usePlatform, useProfile, useStreamingServer } = require('stremio/common');
+const {
+    clearAutoPickFailures,
+    clearAutoPickFailure,
+    clearAutoPickSelection,
+    describeStream,
+    detectAvailability,
+    detectIsForeign,
+    formatAutoPickSkipSummary,
+    getAutoPickFailures,
+    getAutoPickOverride,
+    getEffectiveAutoPickSettings,
+    getQualityLabel,
+    getSourceLabel,
+    getStreamKey,
+    getStreamAttemptNumber,
+    getTopEnabledSourceKey,
+    pickBestStream,
+    setAutoPickOverride,
+    storeAutoPickSelection,
+} = require('stremio/common/autoPick');
+const { preflightAutoPickStream } = require('stremio/common/streamPreflight');
 const { default: SeasonEpisodePicker } = require('../EpisodePicker');
 
 const ALL_ADDONS_KEY = 'ALL';
+const AUTOPICK_PANEL_OPEN_KEY = 'netflix_ui_autopick_panel_open';
 
-// ─── Auto-pick scoring ───
-const SOURCE_PATTERNS = {
-    realdebrid: /\[RD[+\s]|RealDebrid/i,
-    debridlink: /\[DL[+\s]|Debrid-Link/i,
-    alldebrid: /\[AD[+\s]|AllDebrid/i,
-    premiumize: /\[PM[+\s]|Premiumize/i,
-};
+// After the last addon reports, wait this long so streams that arrive in the
+// same render batch are all considered before the candidate walk begins.
+const AUTOPICK_SETTLE_MS = 500;
+// Hard cap on how long auto-pick waits for addons. If one addon hangs in a
+// Loading state, proceed with whatever has loaded rather than waiting forever.
+const AUTOPICK_MAX_WAIT_MS = 12000;
 
-function getAutoPickSettings() {
-    try {
-        const enabled = localStorage.getItem('netflix_ui_autopick') === 'true';
-        if (!enabled) return null;
-        return {
-            quality: localStorage.getItem('netflix_ui_autopick_quality') || '4k',
-            fallback: localStorage.getItem('netflix_ui_autopick_fallback') || '1080p',
-            source: localStorage.getItem('netflix_ui_autopick_source') || 'realdebrid',
-        };
-    } catch { return null; }
+function isPlaybackOrStreamsHash(hash) {
+    const path = (hash || '').slice(1).split('?')[0];
+    return /^\/player\//.test(path) || /^\/(?:metadetails|detail)\/[^/]*\/[^/]*\/[^/]*$/.test(path);
 }
 
-function isHDR(stream) {
-    const combined = ((stream.name || '') + ' ' + (stream.description || '')).toLowerCase();
-    return /hdr|dolby\s*vision|dv(?:\b|[^a-z])/i.test(combined);
-}
-
-function detectQuality(stream) {
-    const name = (stream.name || '').toLowerCase();
-    const desc = (stream.description || '').toLowerCase();
-    if (name.includes('4k') || name.includes('2160p') || desc.includes('2160p')) {
-        return isHDR(stream) ? '4k_hdr' : '4k';
-    }
-    if (name.includes('1080p') || desc.includes('1080p')) return '1080p';
-    if (name.includes('720p') || desc.includes('720p')) return '720p';
-    if (name.includes('480p') || desc.includes('480p')) return '480p';
-    return null;
-}
-
-function matchesSource(stream, source) {
-    if (source === 'any') return true;
-    // Torrentio is an addon, not a debrid tag — its streams are identified by
-    // the addon name rather than a marker in the stream title. Matches both
-    // plain torrent and debrid-cached streams that Torrentio serves.
-    if (source === 'torrentio') {
-        return /torrentio/i.test(stream.addonName || '');
-    }
-    const regex = SOURCE_PATTERNS[source];
-    return regex ? regex.test(stream.name || '') : false;
-}
-
-function scoreStream(stream, settings) {
-    const desc = (stream.description || '').toLowerCase();
-    let score = 0;
-
-    const quality = detectQuality(stream);
-    if (quality === settings.quality) score += 1000;
-    else if (quality === settings.fallback) score += 500;
-    else if (quality === '4k_hdr') score += 450;
-    else if (quality === '4k') score += 400;
-    else if (quality === '1080p') score += 300;
-    else if (quality === '720p') score += 200;
-    else if (quality === '480p') score += 100;
-    else score += 50; // unknown quality
-
-    // Seeder bonus (parsed from description like "👤 177")
-    const seedMatch = desc.match(/👤\s*(\d+)/);
-    if (seedMatch) score += Math.min(parseInt(seedMatch[1], 10), 100);
-
-    return score;
-}
-
-function pickBestStream(allStreams, settings) {
-    if (!settings || allStreams.length === 0) return null;
-
-    // ONLY consider streams from the selected provider
-    const providerStreams = allStreams.filter((stream) => {
-        if (!stream.name) return false;
-        if (/subscription|rent|buy/i.test(stream.description || '')) return false;
-        return matchesSource(stream, settings.source);
-    });
-
-    if (providerStreams.length === 0) return null;
-
-    let best = null;
-    let bestScore = -1;
-    for (const stream of providerStreams) {
-        const s = scoreStream(stream, settings);
-        if (s > bestScore) {
-            bestScore = s;
-            best = stream;
-        }
-    }
-    return best;
-}
-
-const StreamsList = ({ className, video, type, onEpisodeSearch, queryParams, ...props }) => {
+const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryParams, ...props }) => {
     const { t } = useTranslation();
     const { core } = useServices();
     const platform = usePlatform();
     const profile = useProfile();
+    const streamingServer = useStreamingServer();
+    const routeFocused = useRouteFocused();
     const streamsContainerRef = React.useRef(null);
+    const skipBackGuardRef = React.useRef(false);
     const [selectedAddon, setSelectedAddon] = React.useState(ALL_ADDONS_KEY);
+    const [overrideSettings, setOverrideSettingsState] = React.useState(() => getAutoPickOverride(type, metaId));
+    const [autoPickPanelOpen, setAutoPickPanelOpen] = React.useState(() => {
+        try {
+            return window.localStorage.getItem(AUTOPICK_PANEL_OPEN_KEY) === 'true';
+        } catch {
+            return false;
+        }
+    });
+    const toggleAutoPickPanel = React.useCallback(() => {
+        setAutoPickPanelOpen((open) => {
+            const next = !open;
+            try {
+                window.localStorage.setItem(AUTOPICK_PANEL_OPEN_KEY, String(next));
+            } catch {
+                // Storage may be unavailable; in-memory state still works.
+            }
+            return next;
+        });
+    }, []);
     const onAddonSelected = React.useCallback((value) => {
         streamsContainerRef.current.scrollTo({ top: 0, left: 0, behavior: platform.name === 'ios' ? 'smooth' : 'instant' });
         setSelectedAddon(value);
     }, [platform]);
+    React.useEffect(() => {
+        setOverrideSettingsState(getAutoPickOverride(type, metaId));
+    }, [type, metaId]);
+    const effectiveAutoPickSettings = React.useMemo(() => {
+        return overrideSettings || getEffectiveAutoPickSettings(type, metaId);
+    }, [overrideSettings, type, metaId]);
+    const isCustomMode = overrideSettings !== null;
+    const onAutoPickModeChange = React.useCallback((custom) => {
+        if (custom) {
+            // Seed the per-show override from whatever is currently in effect
+            // (global defaults), so switching to Custom starts from a sane base.
+            const seeded = setAutoPickOverride(type, metaId, getEffectiveAutoPickSettings(type, metaId));
+            setOverrideSettingsState(seeded);
+        } else {
+            setAutoPickOverride(type, metaId, null);
+            setOverrideSettingsState(null);
+        }
+    }, [type, metaId]);
+    const onOverrideChange = React.useCallback((next) => {
+        const saved = setAutoPickOverride(type, metaId, next);
+        setOverrideSettingsState(saved);
+    }, [type, metaId]);
     const showInstallAddonsButton = React.useMemo(() => {
         return !profile || profile.auth === null || profile.auth?.user?.isNewUser === true && !video?.upcoming;
     }, [profile, video]);
-    const backButtonOnClick = React.useCallback(() => {
-        if (video.deepLinks && typeof video.deepLinks.metaDetailsVideos === 'string') {
-            window.location.replace(video.deepLinks.metaDetailsVideos + (
+    const backDestination = React.useMemo(() => {
+        if (video?.deepLinks && typeof video.deepLinks.metaDetailsVideos === 'string') {
+            return video.deepLinks.metaDetailsVideos + (
                 typeof video.season === 'number' ?
                     `?${new URLSearchParams({ 'season': video.season })}`
                     :
-                    null
-            ));
-        } else {
-            window.history.back();
+                    ''
+            );
         }
+
+        return '#/';
     }, [video]);
+    const backButtonOnClick = React.useCallback(() => {
+        window.location.replace(backDestination);
+    }, [backDestination]);
+    React.useEffect(() => {
+        if (!routeFocused) return undefined;
+
+        const onHashChange = () => {
+            if (skipBackGuardRef.current) {
+                skipBackGuardRef.current = false;
+                return;
+            }
+
+            if (isPlaybackOrStreamsHash(window.location.hash)) {
+                window.location.replace(backDestination);
+            }
+        };
+
+        window.addEventListener('hashchange', onHashChange);
+        return () => {
+            window.removeEventListener('hashchange', onHashChange);
+        };
+    }, [routeFocused, backDestination]);
     const countLoadingAddons = React.useMemo(() => {
         return props.streams.filter((stream) => stream.content.type === 'Loading').length;
     }, [props.streams]);
@@ -161,14 +168,44 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, queryParams, ...
             }, {});
     }, [props.streams]);
     const filteredStreams = React.useMemo(() => {
-        return selectedAddon === ALL_ADDONS_KEY ?
+        const base = selectedAddon === ALL_ADDONS_KEY ?
             Object.values(streamsByAddon).map(({ streams }) => streams).flat(1)
             :
             streamsByAddon[selectedAddon] ?
                 streamsByAddon[selectedAddon].streams
                 :
                 [];
-    }, [streamsByAddon, selectedAddon]);
+
+        if (!effectiveAutoPickSettings.englishOnly) {
+            return base;
+        }
+
+        // Keep foreign-language releases in the list but sink them below the
+        // English ones (stable: original order preserved within each group).
+        // Auto-pick still skips them entirely via rankStream.
+        const english = [];
+        const foreign = [];
+        base.forEach((stream) => {
+            (detectIsForeign(stream) ? foreign : english).push(stream);
+        });
+        return english.concat(foreign);
+    }, [streamsByAddon, selectedAddon, effectiveAutoPickSettings.englishOnly]);
+    // Auto-pick always walks the full merged list (all addons), independent of
+    // the addon filter dropdown the user may have selected for browsing.
+    const autoPickStreams = React.useMemo(() => {
+        const base = Object.values(streamsByAddon).map(({ streams }) => streams).flat(1);
+
+        if (!effectiveAutoPickSettings.englishOnly) {
+            return base;
+        }
+
+        const english = [];
+        const foreign = [];
+        base.forEach((stream) => {
+            (detectIsForeign(stream) ? foreign : english).push(stream);
+        });
+        return english.concat(foreign);
+    }, [streamsByAddon, effectiveAutoPickSettings.englishOnly]);
     const selectableOptions = React.useMemo(() => {
         return {
             options: [
@@ -187,30 +224,135 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, queryParams, ...
             onSelect: onAddonSelected
         };
     }, [streamsByAddon, selectedAddon]);
+    const onManualStreamClick = React.useCallback((stream) => {
+        skipBackGuardRef.current = true;
+        setTimeout(() => {
+            skipBackGuardRef.current = false;
+        }, 1000);
+        clearAutoPickSelection(type, metaId, video?.id);
+        if (video?.id) {
+            clearAutoPickFailure(type, metaId, video.id, getStreamKey(stream));
+        }
+        if (typeof stream.onClick === 'function') {
+            stream.onClick();
+        }
+    }, [type, metaId, video?.id]);
+
+    // ─── Available options detected from the actually-loaded streams ───
+    const allReadyStreams = React.useMemo(() => {
+        return Object.values(streamsByAddon).map(({ streams }) => streams).flat(1);
+    }, [streamsByAddon]);
+    const availability = React.useMemo(() => {
+        return detectAvailability(allReadyStreams, effectiveAutoPickSettings);
+    }, [allReadyStreams, effectiveAutoPickSettings]);
 
     // ─── Auto-pick best stream ───
-    // Picks immediately as soon as any stream from the selected provider loads.
-    // Does NOT wait for all addons — if 1080p RD loads first, it plays that.
+    // Solid flow:
+    //   1. Wait until every stream addon has reported (countLoadingAddons === 0),
+    //      then settle briefly so same-tick batches merge — or bail out of the
+    //      wait after a hard cap so a single hung addon can't block forever.
+    //   2. Walk the merged candidate list in strict priority order.
+    //   3. Preflight each candidate; skip only confirmed copyright stubs.
+    //   4. Play the first candidate that isn't a confirmed stub.
+    // The driver effect is keyed on a STABLE content signature (not the array
+    // reference) so it doesn't thrash/restart on every unrelated re-render, and
+    // preflight-blocked keys persist in a ref so restarts never re-pick them.
     const autoPickTriggered = React.useRef(false);
-    const [autoPickActive] = React.useState(() => !!getAutoPickSettings());
+    const blockedKeysRef = React.useRef(new Set());
+    const waitStartRef = React.useRef(Date.now());
     const [autoPickInfo, setAutoPickInfo] = React.useState(null);
+    const [autoPickReady, setAutoPickReady] = React.useState(false);
+    const retryToken = queryParams?.get('autopickRetry') || null;
+    const retryReason = queryParams?.get('autopickReason') || null;
+    const failedCount = React.useMemo(() => {
+        return video?.id ? getAutoPickFailures(type, metaId, video.id).length : 0;
+        // retryToken changes whenever a new failure was recorded before redirect.
+    }, [type, metaId, video?.id, retryToken]);
+    const autoPickStateKey = React.useMemo(() => {
+        return [
+            type,
+            metaId,
+            video?.id,
+            retryToken,
+            JSON.stringify(effectiveAutoPickSettings),
+        ].join('|');
+    }, [type, metaId, video?.id, retryToken, effectiveAutoPickSettings]);
+    // Stable signature of the candidate set — only changes when the actual
+    // streams change, so the driver effect won't re-run on cosmetic re-renders.
+    const autoPickSignature = React.useMemo(() => {
+        return autoPickStreams.map(getStreamKey).join('\u241F');
+    }, [autoPickStreams]);
+    // Reset per-title state whenever the title/episode/settings/retry changes.
+    React.useEffect(() => {
+        autoPickTriggered.current = false;
+        blockedKeysRef.current = new Set();
+        waitStartRef.current = Date.now();
+        setAutoPickReady(false);
+        setAutoPickInfo(null);
+    }, [autoPickStateKey]);
+    // Readiness gate: ready once all addons settle, or after a hard cap.
+    React.useEffect(() => {
+        if (autoPickStreams.length === 0 && countLoadingAddons > 0) {
+            setAutoPickReady(false);
+        }
+        if (countLoadingAddons === 0) {
+            const settle = setTimeout(() => setAutoPickReady(true), AUTOPICK_SETTLE_MS);
+            return () => clearTimeout(settle);
+        }
+        // Some addon is still loading — proceed anyway once the hard cap elapses.
+        const elapsed = Date.now() - waitStartRef.current;
+        const remaining = Math.max(0, AUTOPICK_MAX_WAIT_MS - elapsed);
+        const cap = setTimeout(() => setAutoPickReady(true), remaining);
+        return () => clearTimeout(cap);
+    }, [countLoadingAddons, autoPickStreams.length, autoPickStateKey]);
     React.useEffect(() => {
         if (autoPickTriggered.current) return;
-        if (filteredStreams.length === 0) return;
-        // Don't auto-pick when user clicked "More Info" (info=1 query param).
-        // Auto-pick only fires when user clicked the poster/play action directly.
+        // Don't auto-pick when user clicked "More Info" (info=1) or paused it.
         if (queryParams && queryParams.has('info')) return;
+        if (queryParams && queryParams.has('autopickPaused')) return;
 
-        const settings = getAutoPickSettings();
+        const settings = effectiveAutoPickSettings.enabled ? effectiveAutoPickSettings : null;
         if (!settings) return;
 
-        const best = pickBestStream(filteredStreams, settings);
-        if (best && best.deepLinks?.player) {
+        const topSourceKey = getTopEnabledSourceKey(settings);
+
+        // Still waiting for addons to load/settle — show the waiting banner.
+        if (!autoPickReady) {
+            setAutoPickInfo({
+                waiting: true,
+                settling: countLoadingAddons === 0,
+                sourceLabel: getSourceLabel(topSourceKey),
+            });
+            return undefined;
+        }
+
+        if (autoPickStreams.length === 0) return;
+
+        // Fresh (non-retry) entry: drop any stale persisted player failures so
+        // we always start the walk from the true top candidate.
+        if (!retryToken && video?.id) {
+            clearAutoPickFailures(type, metaId, video.id);
+        }
+
+        let cancelled = false;
+        const controller = new AbortController();
+
+        const commit = (best, described, attempt, blockedCount) => {
             autoPickTriggered.current = true;
-            setAutoPickInfo({ name: best.name, description: (best.description || '').split('\n')[0] });
-            // Fire analytics
+            setAutoPickInfo({
+                attempt,
+                blockedCount,
+                qualityLabel: described.qualityLabel,
+                sourceLabel: described.sourceLabel,
+            });
+            storeAutoPickSelection({
+                type,
+                metaId,
+                videoId: video?.id,
+                stream: best,
+                settings,
+            });
             if (typeof best.onClick === 'function') best.onClick();
-            // Mark video as watched for external player
             if (profile.settings.playerType !== null) {
                 core.transport.dispatch({
                     action: 'MetaDetails',
@@ -220,16 +362,105 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, queryParams, ...
                     }
                 });
             }
-            // Small delay so user sees the selection
+            // Small delay so the user sees what was picked.
             setTimeout(() => {
+                if (cancelled) return;
+                skipBackGuardRef.current = true;
+                setTimeout(() => {
+                    skipBackGuardRef.current = false;
+                }, 1000);
                 window.location = best.deepLinks.player;
             }, 800);
-        }
-    }, [filteredStreams]);
+        };
+
+        const run = async () => {
+            // Seed skips from persisted player failures (this title) + any
+            // preflight blocks remembered from a previous run of this effect.
+            const failedSet = new Set([
+                ...(video?.id ? getAutoPickFailures(type, metaId, video.id).map(({ streamKey }) => streamKey) : []),
+                ...blockedKeysRef.current,
+            ]);
+
+            while (!cancelled) {
+                const best = pickBestStream(autoPickStreams, settings, {
+                    failedStreamKeys: Array.from(failedSet),
+                });
+                const blockedCount = blockedKeysRef.current.size;
+
+                if (!best || !best.deepLinks?.player) {
+                    // Nothing left to try. If addons are still arriving, keep
+                    // waiting; otherwise report a clean failure.
+                    if (countLoadingAddons > 0) {
+                        setAutoPickInfo({
+                            waiting: true,
+                            settling: true,
+                            sourceLabel: getSourceLabel(getTopEnabledSourceKey(settings)),
+                        });
+                        return;
+                    }
+                    autoPickTriggered.current = true;
+                    setAutoPickInfo({ failed: true, blockedCount });
+                    return;
+                }
+
+                const described = describeStream(best, settings);
+                const attempt = getStreamAttemptNumber(autoPickStreams, best);
+                setAutoPickInfo({
+                    attempt,
+                    blockedCount,
+                    qualityLabel: described.qualityLabel,
+                    sourceLabel: described.sourceLabel,
+                    checking: true,
+                });
+
+                const verdict = await preflightAutoPickStream({
+                    core,
+                    stream: best,
+                    ssBaseUrl: streamingServer.baseUrl,
+                    signal: controller.signal,
+                });
+                if (cancelled) return;
+
+                if (verdict.blocked) {
+                    // Confirmed copyright stub — remember it and try the next.
+                    blockedKeysRef.current.add(getStreamKey(best));
+                    failedSet.add(getStreamKey(best));
+                    continue;
+                }
+
+                // Real media (or preflight inconclusive → fail open) — play it.
+                commit(best, described, attempt, blockedKeysRef.current.size);
+                return;
+            }
+        };
+
+        run();
+
+        return () => {
+            cancelled = true;
+            controller.abort();
+        };
+    }, [autoPickSignature, autoPickReady, countLoadingAddons, autoPickStateKey]);
 
     const handleEpisodePicker = React.useCallback((season, episode) => {
         onEpisodeSearch(season, episode);
     }, [onEpisodeSearch]);
+
+    const autoPickSummary = React.useMemo(() => {
+        const sources = effectiveAutoPickSettings.sources.filter((s) => s.enabled).map((s) => getSourceLabel(s.key));
+        const qualities = effectiveAutoPickSettings.qualities.filter((q) => q.enabled).map((q) => getQualityLabel(q.key));
+        return {
+            sources: sources.length > 0 ? sources.join(' \u203A ') : 'None',
+            qualities: qualities.length > 0 ? qualities.join(' \u203A ') : 'None',
+        };
+    }, [effectiveAutoPickSettings]);
+
+    const autoPickSkipSummary = React.useMemo(() => {
+        return autoPickInfo && autoPickInfo.blockedCount > 0 ?
+            formatAutoPickSkipSummary(autoPickInfo.blockedCount)
+            :
+            null;
+    }, [autoPickInfo]);
 
     return (
         <div className={classnames(className, styles['streams-list-container'])}>
@@ -258,19 +489,166 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, queryParams, ...
                 }
             </div>
             {
-                autoPickActive && countLoadingAddons > 0 ?
-                    <div className={styles['autopick-banner']}>
-                        <span className={styles['autopick-spinner']} />
-                        <span>{t('MOBILE_ADDONS_LOADING')}... Auto-pick will select the best stream</span>
+                video ?
+                    <div className={classnames(styles['autopick-panel'], { [styles['open']]: autoPickPanelOpen })}>
+                        <Button
+                            className={styles['autopick-panel-header']}
+                            title={autoPickPanelOpen ? 'Hide auto-pick settings' : 'Show auto-pick settings'}
+                            onClick={toggleAutoPickPanel}
+                        >
+                            <span className={classnames(styles['autopick-status-dot'], { [styles['on']]: effectiveAutoPickSettings.enabled })} />
+                            <div className={styles['autopick-status-text']}>
+                                <div className={styles['autopick-status-title']}>
+                                    {'Auto-pick '}{effectiveAutoPickSettings.enabled ? 'on' : 'off'}
+                                    <span className={styles['autopick-status-mode']}>
+                                        {isCustomMode ? ' \u00b7 Custom' : ' \u00b7 Global'}
+                                    </span>
+                                </div>
+                                <div className={styles['autopick-status-subtitle']}>
+                                    {autoPickSummary.sources}{' \u203A '}{autoPickSummary.qualities}
+                                </div>
+                            </div>
+                            <span className={styles['autopick-chevron']}>{'\u203A'}</span>
+                        </Button>
+                        {
+                            autoPickPanelOpen ?
+                                <div className={styles['autopick-panel-body']}>
+                                    <div className={styles['autopick-mode']}>
+                                        <Button
+                                            className={classnames(styles['autopick-mode-button'], { [styles['active']]: !isCustomMode })}
+                                            title={'Use the global auto-pick defaults'}
+                                            onClick={() => onAutoPickModeChange(false)}
+                                        >
+                                            Global
+                                        </Button>
+                                        <Button
+                                            className={classnames(styles['autopick-mode-button'], { [styles['active']]: isCustomMode })}
+                                            title={'Set auto-pick just for this show'}
+                                            onClick={() => onAutoPickModeChange(true)}
+                                        >
+                                            Custom
+                                        </Button>
+                                    </div>
+                                    {
+                                        isCustomMode ?
+                                            <AutoPickEditor
+                                                className={styles['autopick-editor']}
+                                                value={effectiveAutoPickSettings}
+                                                onChange={onOverrideChange}
+                                                availability={availability}
+                                            />
+                                            :
+                                            <div className={styles['autopick-summary']}>
+                                                <div className={styles['autopick-summary-hint']}>
+                                                    {'Using your global defaults. Switch to Custom to tune this show.'}
+                                                </div>
+                                            </div>
+                                    }
+                                </div>
+                                :
+                                null
+                        }
                     </div>
                     :
-                    autoPickInfo ?
+                    null
+            }
+            {
+                autoPickInfo && autoPickInfo.waiting ?
+                    <div className={classnames(styles['autopick-banner'], styles['autopick-banner-waiting'])}>
+                        <span className={styles['autopick-spinner']} />
+                        <span className={styles['autopick-text']}>
+                            <span className={styles['autopick-title']}>
+                                {'Loading '}{autoPickInfo.sourceLabel}{' streams\u2026'}
+                            </span>
+                            <span className={styles['autopick-subtle']}>
+                                {
+                                    autoPickInfo.settling ?
+                                        'Collecting streams from all addons\u2026'
+                                        :
+                                        'Auto-pick starts once all stream addons finish loading'
+                                }
+                            </span>
+                        </span>
+                    </div>
+                    :
+                    autoPickInfo && !autoPickInfo.failed && autoPickInfo.checking ?
                         <div className={styles['autopick-banner']}>
-                            <span className={styles['autopick-check']}>&#10003;</span>
-                            <span>Auto-playing: {autoPickInfo.description}</span>
+                            <span className={styles['autopick-spinner']} />
+                            <span className={styles['autopick-text']}>
+                                <span className={styles['autopick-title']}>
+                                    {'Checking #'}{autoPickInfo.attempt}{' \u00b7 '}{autoPickInfo.qualityLabel}{' \u00b7 '}{autoPickInfo.sourceLabel}
+                                </span>
+                                {
+                                    autoPickSkipSummary ?
+                                        <span className={styles['autopick-subtle']}>{autoPickSkipSummary}</span>
+                                        :
+                                        null
+                                }
+                            </span>
                         </div>
                         :
-                        null
+                        autoPickInfo && !autoPickInfo.failed && !autoPickInfo.checking ?
+                            <div className={styles['autopick-banner']}>
+                                <span className={styles['autopick-check']}>{'\u2713'}</span>
+                                <span className={styles['autopick-text']}>
+                                    <span className={styles['autopick-title']}>
+                                        {'Playing #'}{autoPickInfo.attempt}{' \u00b7 '}{autoPickInfo.qualityLabel}{' \u00b7 '}{autoPickInfo.sourceLabel}
+                                    </span>
+                                    {
+                                        autoPickSkipSummary ?
+                                            <span className={styles['autopick-subtle']}>{autoPickSkipSummary}</span>
+                                            :
+                                            null
+                                    }
+                                </span>
+                            </div>
+                            :
+                            autoPickInfo && autoPickInfo.failed ?
+                                <div className={classnames(styles['autopick-banner'], styles['autopick-banner-failed'])}>
+                                    <span className={styles['autopick-warning']}>!</span>
+                                    <span className={styles['autopick-text']}>
+                                        <span className={styles['autopick-title']}>
+                                            {'Auto-pick stopped \u2014 no playable stream found'}
+                                        </span>
+                                        <span className={styles['autopick-subtle']}>
+                                            {
+                                                autoPickInfo.blockedCount > 0 ?
+                                                    `${autoPickInfo.blockedCount} copyright-blocked, none left to try \u2014 pick one below`
+                                                    :
+                                                    'Pick one below'
+                                            }
+                                        </span>
+                                    </span>
+                                </div>
+                                :
+                                retryToken && retryReason ?
+                                    <div className={styles['autopick-banner']}>
+                                        <span className={styles['autopick-spinner']} />
+                                        <span className={styles['autopick-text']}>
+                                            <span className={styles['autopick-title']}>
+                                                {retryReason === 'copyright' ? 'Previous stream was copyright-blocked' : 'Previous stream unavailable'}
+                                            </span>
+                                            <span className={styles['autopick-subtle']}>
+                                                {'Finding attempt #'}{failedCount + 1}{'\u2026'}
+                                            </span>
+                                        </span>
+                                    </div>
+                                    :
+                                    effectiveAutoPickSettings.enabled &&
+                                countLoadingAddons > 0 ?
+                                        <div className={classnames(styles['autopick-banner'], styles['autopick-banner-waiting'])}>
+                                            <span className={styles['autopick-spinner']} />
+                                            <span className={styles['autopick-text']}>
+                                                <span className={styles['autopick-title']}>
+                                                    {'Loading '}{getSourceLabel(getTopEnabledSourceKey(effectiveAutoPickSettings))}{' streams\u2026'}
+                                                </span>
+                                                <span className={styles['autopick-subtle']}>
+                                                    {'Auto-pick starts once all stream addons finish loading'}
+                                                </span>
+                                            </span>
+                                        </div>
+                                        :
+                                        null
             }
             {
                 props.streams.length === 0 ?
@@ -339,7 +717,7 @@ const StreamsList = ({ className, video, type, onEpisodeSearch, queryParams, ...
                                             thumbnail={stream.thumbnail}
                                             progress={stream.progress}
                                             deepLinks={stream.deepLinks}
-                                            onClick={stream.onClick}
+                                            onClick={() => onManualStreamClick(stream)}
                                         />
                                     ))}
                                     {
@@ -363,6 +741,7 @@ StreamsList.propTypes = {
     streams: PropTypes.arrayOf(PropTypes.object).isRequired,
     video: PropTypes.object,
     type: PropTypes.string,
+    metaId: PropTypes.string,
     onEpisodeSearch: PropTypes.func,
     queryParams: PropTypes.instanceOf(URLSearchParams),
 };

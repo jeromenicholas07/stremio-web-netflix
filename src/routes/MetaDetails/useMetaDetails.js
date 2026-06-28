@@ -2,6 +2,16 @@
 
 const React = require('react');
 const { useModelState } = require('stremio/common');
+const { getAutoPickOverride, getGlobalAutoPickSettings } = require('stremio/common/autoPick');
+
+function isAutoPickEnabled(urlParams) {
+    const global = getGlobalAutoPickSettings();
+    if (typeof urlParams.type === 'string' && typeof urlParams.id === 'string') {
+        const override = getAutoPickOverride(urlParams.type, urlParams.id);
+        return (override || global).enabled;
+    }
+    return global.enabled;
+}
 
 const map = (metaDetails) => ({
     ...metaDetails,
@@ -57,7 +67,7 @@ const useMetaDetails = (urlParams) => {
                             }
                             :
                             null,
-                        guessStream: true,
+                        guessStream: !isAutoPickEnabled(urlParams),
                     }
                 }
             };

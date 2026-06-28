@@ -1,9 +1,14 @@
 import React, { forwardRef, useState, useCallback, useEffect, useRef } from 'react';
+import { AutoPickEditor } from 'stremio/components';
 import { Section, Option } from '../components';
 import styles from './NetflixUI.less';
 
 const { useToast } = require('stremio/common');
 const traktBridge = require('stremio/services/TraktBridge');
+const {
+    getGlobalAutoPickSettings,
+    setGlobalAutoPickSettings,
+} = require('stremio/common/autoPick');
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
 
@@ -40,24 +45,6 @@ const TRAILER_LANGUAGES = [
 const REC_SOURCES = [
     { value: 'tmdb', label: 'TMDB (Recommended)' },
     { value: 'disabled', label: 'Disabled' },
-];
-
-const QUALITY_OPTIONS = [
-    { value: '4k_hdr', label: '4K HDR (2160p)' },
-    { value: '4k', label: '4K (2160p)' },
-    { value: '1080p', label: '1080p' },
-    { value: '720p', label: '720p' },
-    { value: '480p', label: '480p' },
-    { value: 'any', label: 'Any Quality' },
-];
-
-const SOURCE_OPTIONS = [
-    { value: 'realdebrid', label: 'RealDebrid [RD+]' },
-    { value: 'debridlink', label: 'Debrid-Link [DL+]' },
-    { value: 'alldebrid', label: 'AllDebrid [AD+]' },
-    { value: 'premiumize', label: 'Premiumize [PM+]' },
-    { value: 'torrentio', label: 'Torrentio' },
-    { value: 'any', label: 'Any Source' },
 ];
 
 type TestStatus = 'idle' | 'loading' | 'success' | 'error';
@@ -102,10 +89,7 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     const [trailerSource, setTrailerSource] = useState(() => getSetting('netflix_ui_trailer_source', 'tmdb'));
     const [trailerLang, setTrailerLang] = useState(() => getSetting('netflix_ui_trailer_lang', 'en'));
     const [recSource, setRecSource] = useState(() => getSetting('netflix_ui_rec_source', 'tmdb'));
-    const [autoPickEnabled, setAutoPickEnabled] = useState(() => getSetting('netflix_ui_autopick', 'false') === 'true');
-    const [autoPickQuality, setAutoPickQuality] = useState(() => getSetting('netflix_ui_autopick_quality', '4k'));
-    const [autoPickFallback, setAutoPickFallback] = useState(() => getSetting('netflix_ui_autopick_fallback', '1080p'));
-    const [autoPickSource, setAutoPickSource] = useState(() => getSetting('netflix_ui_autopick_source', 'realdebrid'));
+    const [autoPick, setAutoPick] = useState(() => getGlobalAutoPickSettings());
     const [debugEnabled, setDebugEnabled] = useState(() => getSetting('netflix_ui_debug', 'false') === 'true');
     const [saved, setSaved] = useState(false);
 
@@ -255,28 +239,9 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
         flashSaved();
     }, []);
 
-    const onAutoPickToggle = useCallback(() => {
-        const next = !autoPickEnabled;
-        setAutoPickEnabled(next);
-        setSetting('netflix_ui_autopick', String(next));
-        flashSaved();
-    }, [autoPickEnabled]);
-
-    const onAutoPickQualityChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-        setAutoPickQuality(e.target.value);
-        setSetting('netflix_ui_autopick_quality', e.target.value);
-        flashSaved();
-    }, []);
-
-    const onAutoPickFallbackChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-        setAutoPickFallback(e.target.value);
-        setSetting('netflix_ui_autopick_fallback', e.target.value);
-        flashSaved();
-    }, []);
-
-    const onAutoPickSourceChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-        setAutoPickSource(e.target.value);
-        setSetting('netflix_ui_autopick_source', e.target.value);
+    const onAutoPickChange = useCallback((next: any) => {
+        setAutoPick(next);
+        setGlobalAutoPickSettings(next);
         flashSaved();
     }, []);
 
@@ -401,7 +366,7 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     const copyCode = useCallback((code: string) => {
         navigator.clipboard?.writeText(code).then(() => {
             toast?.show?.({ type: 'success', title: 'Code copied to clipboard' });
-        }).catch(() => {});
+        }).catch(() => undefined);
     }, []);
 
     return (
@@ -587,44 +552,11 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
             <div className={styles['section-divider']}>Playback</div>
 
             <Option label={'Auto-Pick Stream'}>
-                <div className={styles['input-row']}>
-                    <span className={styles['option-desc']}>Automatically select the best available stream</span>
-                    <button
-                        className={autoPickEnabled ? styles['toggle-on'] : styles['toggle-off']}
-                        onClick={onAutoPickToggle}
-                    >
-                        {autoPickEnabled ? 'ON' : 'OFF'}
-                    </button>
-                </div>
+                <AutoPickEditor
+                    value={autoPick}
+                    onChange={onAutoPickChange}
+                />
             </Option>
-
-            {autoPickEnabled && (
-                <>
-                    <Option label={'Preferred Quality'}>
-                        <select className={styles['select-input']} value={autoPickQuality} onChange={onAutoPickQualityChange}>
-                            {QUALITY_OPTIONS.map((q) => (
-                                <option key={q.value} value={q.value}>{q.label}</option>
-                            ))}
-                        </select>
-                    </Option>
-
-                    <Option label={'Fallback Quality'}>
-                        <select className={styles['select-input']} value={autoPickFallback} onChange={onAutoPickFallbackChange}>
-                            {QUALITY_OPTIONS.map((q) => (
-                                <option key={q.value} value={q.value}>{q.label}</option>
-                            ))}
-                        </select>
-                    </Option>
-
-                    <Option label={'Preferred Source'}>
-                        <select className={styles['select-input']} value={autoPickSource} onChange={onAutoPickSourceChange}>
-                            {SOURCE_OPTIONS.map((s) => (
-                                <option key={s.value} value={s.value}>{s.label}</option>
-                            ))}
-                        </select>
-                    </Option>
-                </>
-            )}
 
             {/* ─── Developer ─── */}
             <div className={styles['section-divider']}>Developer</div>

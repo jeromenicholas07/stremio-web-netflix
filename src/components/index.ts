@@ -1,4 +1,5 @@
 import AddonDetailsModal from './AddonDetailsModal';
+import AutoPickEditor from './AutoPickEditor';
 import BottomSheet from './BottomSheet';
 import Button from './Button';
 import Checkbox from './Checkbox';
@@ -33,6 +34,7 @@ import Video from './Video';
 
 export {
     AddonDetailsModal,
+    AutoPickEditor,
     BottomSheet,
     Button,
     Checkbox,
