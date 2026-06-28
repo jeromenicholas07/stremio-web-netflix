@@ -155,24 +155,31 @@ async function probeContentLength(proxyUrl, signal) {
         }
 
         let total = null;
+        const contentType = res.headers.get('content-type') || '';
         const contentRange = res.headers.get('content-range');
         if (contentRange) {
             const m = contentRange.match(/\/(\d+)\s*$/);
             if (m) total = parseInt(m[1], 10);
         }
-        // Only fall back to Content-Length when there is no Content-Range and
-        // the body looks like real media (not a tiny error page).
+        // Fall back to Content-Length when there is no Content-Range. Some CORS
+        // proxies (notably the launcher's bundled proxy in the shell .exe) do
+        // not forward the Range request header, so the upstream answers 200
+        // with the FULL size instead of 206 + Content-Range. We trust that size
+        // when it is either plainly real media (large) OR a video payload — the
+        // latter covers the ~2 MB copyright stub, which is below the large-size
+        // floor but is always served as video/mp4. A tiny HTML error page
+        // (text/html) is still ignored, so we never misread it as a stub.
         if (total === null) {
             const contentLength = res.headers.get('content-length');
             if (contentLength) {
                 const parsed = parseInt(contentLength, 10);
-                if (Number.isFinite(parsed) && parsed >= STUB_KNOWN_MAX_BYTES) {
+                if (Number.isFinite(parsed) && (parsed >= STUB_KNOWN_MAX_BYTES || /^video\//i.test(contentType))) {
                     total = parsed;
                 }
             }
         }
 
-        log('probe response', { status: res.status, contentRange, contentLength: res.headers.get('content-length'), total });
+        log('probe response', { status: res.status, contentType, contentRange, contentLength: res.headers.get('content-length'), total });
 
         // We only needed the headers; don't pull the body.
         controller.abort();

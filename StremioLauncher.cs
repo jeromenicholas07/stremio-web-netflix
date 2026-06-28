@@ -978,6 +978,39 @@ class StremioLauncher
                 if (reqHeaders.TryGetValue("Content-Type", out ct))
                     wr.ContentType = ct;
 
+                // Forward the Range request header. HttpWebRequest treats Range
+                // as a restricted header (setting it via Headers[] throws), so
+                // parse "bytes=A-B" and use AddRange. Without this the upstream
+                // answers 200 + full size instead of 206 + Content-Range, which
+                // breaks auto-pick copyright preflight (it can't see the tiny
+                // stub size) and degrades player seeking.
+                string rangeHeader;
+                if (reqHeaders.TryGetValue("Range", out rangeHeader) && !string.IsNullOrEmpty(rangeHeader))
+                {
+                    try
+                    {
+                        string spec = rangeHeader.Trim();
+                        if (spec.StartsWith("bytes=", StringComparison.OrdinalIgnoreCase))
+                            spec = spec.Substring(6);
+                        string firstRange = spec.Split(',')[0].Trim();
+                        int dash = firstRange.IndexOf('-');
+                        if (dash >= 0)
+                        {
+                            string fromStr = firstRange.Substring(0, dash).Trim();
+                            string toStr = firstRange.Substring(dash + 1).Trim();
+                            long from, to;
+                            if (fromStr.Length > 0 && toStr.Length > 0
+                                && long.TryParse(fromStr, out from) && long.TryParse(toStr, out to))
+                                wr.AddRange(from, to);
+                            else if (fromStr.Length > 0 && long.TryParse(fromStr, out from))
+                                wr.AddRange(from);
+                            else if (toStr.Length > 0 && long.TryParse(toStr, out to))
+                                wr.AddRange("bytes", -to);
+                        }
+                    }
+                    catch { /* unparseable Range → proceed without it */ }
+                }
+
                 if (method != "GET" && method != "HEAD")
                 {
                     string clStr;
@@ -1021,10 +1054,23 @@ class StremioLauncher
                     var sb = new StringBuilder();
                     sb.AppendFormat("HTTP/1.1 {0} {1}\r\n", (int)upstream.StatusCode, upstream.StatusDescription);
                     sb.Append("Access-Control-Allow-Origin: *\r\n");
+                    // Expose range headers so cross-origin fetch() (the web UI on
+                    // GitHub Pages talking to this loopback proxy) can actually
+                    // read them. Content-Length is CORS-safelisted, but
+                    // Content-Range / Accept-Ranges are not without this.
+                    sb.Append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, Content-Type\r\n");
                     if (upstream.ContentType != null)
                         sb.AppendFormat("Content-Type: {0}\r\n", upstream.ContentType);
                     if (upstream.ContentLength >= 0)
                         sb.AppendFormat("Content-Length: {0}\r\n", upstream.ContentLength);
+                    // Forward range headers so partial-content responses (206)
+                    // carry the total size and seeking works through the proxy.
+                    string upstreamContentRange = upstream.Headers["Content-Range"];
+                    if (!string.IsNullOrEmpty(upstreamContentRange))
+                        sb.AppendFormat("Content-Range: {0}\r\n", upstreamContentRange);
+                    string upstreamAcceptRanges = upstream.Headers["Accept-Ranges"];
+                    if (!string.IsNullOrEmpty(upstreamAcceptRanges))
+                        sb.AppendFormat("Accept-Ranges: {0}\r\n", upstreamAcceptRanges);
                     sb.Append("Connection: close\r\n");
                     sb.Append("\r\n");
 

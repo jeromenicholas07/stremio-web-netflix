@@ -42,4 +42,57 @@ describe('streamPreflight', () => {
 
         global.fetch = originalFetch;
     });
+
+    it('reads the total from Content-Range when present (206)', async () => {
+        const originalFetch = global.fetch;
+        const headers = {
+            'content-range': 'bytes 0-1/2119075',
+            'content-type': 'video/mp4',
+            'content-length': '2',
+        };
+        global.fetch = jest.fn().mockResolvedValue({
+            status: 206,
+            headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+        });
+
+        await expect(probeContentLength('http://test/proxy', null)).resolves.toBe(2119075);
+
+        global.fetch = originalFetch;
+    });
+
+    it('trusts a small video Content-Length when the proxy drops Range (shell .exe stub case)', async () => {
+        // The launcher CORS proxy does not forward Range, so the ~2 MB copyright
+        // stub comes back as 200 + full Content-Length and NO Content-Range.
+        const originalFetch = global.fetch;
+        const headers = {
+            'content-type': 'video/mp4',
+            'content-length': '2119075',
+        };
+        global.fetch = jest.fn().mockResolvedValue({
+            status: 200,
+            headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+        });
+
+        const total = await probeContentLength('http://test/proxy', null);
+        expect(total).toBe(2119075);
+        expect(isStubSize(total)).toBe(true);
+
+        global.fetch = originalFetch;
+    });
+
+    it('ignores a tiny HTML error body served as 200 (does not treat it as a stub)', async () => {
+        const originalFetch = global.fetch;
+        const headers = {
+            'content-type': 'text/html',
+            'content-length': '148',
+        };
+        global.fetch = jest.fn().mockResolvedValue({
+            status: 200,
+            headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+        });
+
+        await expect(probeContentLength('http://test/proxy', null)).resolves.toBeNull();
+
+        global.fetch = originalFetch;
+    });
 });

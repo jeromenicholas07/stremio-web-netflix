@@ -490,13 +490,13 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             </div>
             {
                 video ?
-                    <div className={classnames(styles['autopick-panel'], { [styles['open']]: autoPickPanelOpen })}>
+                    <div className={classnames(styles['autopick-panel'], { 'open': autoPickPanelOpen })}>
                         <Button
                             className={styles['autopick-panel-header']}
                             title={autoPickPanelOpen ? 'Hide auto-pick settings' : 'Show auto-pick settings'}
                             onClick={toggleAutoPickPanel}
                         >
-                            <span className={classnames(styles['autopick-status-dot'], { [styles['on']]: effectiveAutoPickSettings.enabled })} />
+                            <span className={classnames(styles['autopick-status-dot'], { 'on': effectiveAutoPickSettings.enabled })} />
                             <div className={styles['autopick-status-text']}>
                                 <div className={styles['autopick-status-title']}>
                                     {'Auto-pick '}{effectiveAutoPickSettings.enabled ? 'on' : 'off'}
@@ -515,14 +515,14 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                                 <div className={styles['autopick-panel-body']}>
                                     <div className={styles['autopick-mode']}>
                                         <Button
-                                            className={classnames(styles['autopick-mode-button'], { [styles['active']]: !isCustomMode })}
+                                            className={classnames(styles['autopick-mode-button'], { 'active': !isCustomMode })}
                                             title={'Use the global auto-pick defaults'}
                                             onClick={() => onAutoPickModeChange(false)}
                                         >
                                             Global
                                         </Button>
                                         <Button
-                                            className={classnames(styles['autopick-mode-button'], { [styles['active']]: isCustomMode })}
+                                            className={classnames(styles['autopick-mode-button'], { 'active': isCustomMode })}
                                             title={'Set auto-pick just for this show'}
                                             onClick={() => onAutoPickModeChange(true)}
                                         >

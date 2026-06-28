@@ -48,7 +48,7 @@ class StremioLauncherFULL
     // on disk differs we re-download just the base launcher. This is the
     // same pattern as ADDON_VERSION below — small targeted update, no
     // full re-install.
-    const string BASE_LAUNCHER_VERSION = "2026-05-08-icon-hires";
+    const string BASE_LAUNCHER_VERSION = "2026-06-28-cors-range-forward";
 
     // Bump ADDON_VERSION on every addon code change. The launcher checks
     // <rootDir>\stremio-adult-addon\.addon-version against this on every
