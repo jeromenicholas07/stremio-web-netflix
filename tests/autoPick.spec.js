@@ -53,6 +53,35 @@ describe('autoPick', () => {
         global.sessionStorage = createStorageMock();
     });
 
+    it('ships the tuned RD + Torrentio defaults (on, English-only)', () => {
+        const defaults = autoPick.getDefaultAutoPickSettings();
+        expect(defaults.enabled).toBe(true);
+        expect(defaults.englishOnly).toBe(true);
+        expect(defaults.sources.map((s) => [s.key, s.enabled])).toEqual([
+            ['rd_plus', true],
+            ['rd_download', true],
+            ['debridlink', false],
+            ['alldebrid', false],
+            ['premiumize', false],
+            ['torrentio', true],
+            ['other', false],
+        ]);
+        expect(defaults.qualities.map((q) => [q.key, q.enabled])).toEqual([
+            ['4k', true],
+            ['1080p', true],
+            ['4k_hdr', true],
+            ['720p', true],
+            ['480p', true],
+            ['other', true],
+        ]);
+    });
+
+    it('uses the tuned defaults as the global settings for a fresh user', () => {
+        const global = autoPick.getGlobalAutoPickSettings();
+        expect(global.enabled).toBe(true);
+        expect(global.sources.filter((s) => s.enabled).map((s) => s.key)).toEqual(['rd_plus', 'rd_download', 'torrentio']);
+    });
+
     it('migrates legacy per-show overrides into the ordered model', () => {
         autoPick.setGlobalAutoPickSettings({
             enabled: true,

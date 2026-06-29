@@ -127,21 +127,23 @@ function isStubSize(contentLength) {
     return contentLength <= STUB_KNOWN_MAX_BYTES;
 }
 
-function shouldUseRangeProbe(fetchBase) {
-    // Cross-origin fetch to the loopback CORS proxy: skip Range so the
-    // response is 200 + full Content-Length (CORS-safelisted) instead of
-    // 206 + Content-Range (often unreadable cross-origin). Also avoids
-    // PNA/CORS preflight complexity for a tiny probe.
-    if (typeof fetchBase === 'string' && /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/?$/i.test(fetchBase)) {
-        return false;
-    }
-    return true;
-}
-
 // Issue a tiny ranged GET through the proxy and read the total byte size from
 // Content-Range (preferred) or Content-Length, then abort the body download.
+//
+// Range-first is both the most reliable and the fastest strategy:
+//   - A `Range: bytes=0-1` request makes the upstream answer 206 +
+//     `Content-Range: bytes 0-1/<total>`, so we learn the FULL size while
+//     transferring only 2 bytes — even for a multi-GB file.
+//   - The launcher CORS proxy forwards Range and exposes Content-Range
+//     (Access-Control-Expose-Headers) + sets Allow-Private-Network, so the
+//     206/Content-Range is readable cross-origin from the shell .exe.
+//
+// Some proxies strip Range and answer 200; we then fall back to Content-Length
+// (with a stub-band heuristic), and as a last resort retry once WITHOUT Range
+// (a plain GET, body aborted after headers) for proxies that only emit a
+// usable size on a non-range request.
 async function probeContentLength(proxyUrl, signal, options = {}) {
-    const useRange = options.useRange !== false && shouldUseRangeProbe(options.fetchBase);
+    const useRange = options.useRange !== false;
     const controller = new AbortController();
     const onAbort = () => controller.abort();
     if (signal) {
@@ -202,9 +204,12 @@ async function probeContentLength(proxyUrl, signal, options = {}) {
 
         if (Number.isFinite(total)) return total;
 
-        // 206 but Content-Range not readable cross-origin — retry without Range.
-        if (useRange && res.status === 206) {
-            return probeContentLength(proxyUrl, signal, { useRange: false, fetchBase: options.fetchBase });
+        // No usable size from the ranged probe — could be a 206 whose
+        // Content-Range was stripped cross-origin, or a proxy that drops Range
+        // and answers chunked (no Content-Length). Retry once as a plain GET;
+        // the body is aborted right after headers either way.
+        if (useRange) {
+            return probeContentLength(proxyUrl, signal, { useRange: false });
         }
 
         return null;
@@ -247,7 +252,7 @@ async function preflightAutoPickStream({ core, stream, ssBaseUrl, signal } = {})
         const proxyUrl = buildProxyUrl(fetchBase, url, proxyHeaders);
         log('preflighting', { name: stream && stream.name, url, fetchBase });
 
-        const contentLength = await probeContentLength(proxyUrl, signal, { fetchBase });
+        const contentLength = await probeContentLength(proxyUrl, signal);
         if (contentLength === null) return { skipped: true, reason: 'no-size' };
 
         const blocked = isStubSize(contentLength);

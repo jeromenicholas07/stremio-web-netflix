@@ -98,24 +98,51 @@ describe('streamPreflight', () => {
         global.fetch = originalFetch;
     });
 
-    it('probes without Range against loopback CORS proxy (200 + full stub size)', async () => {
+    it('probes Range-first even against the loopback CORS proxy', async () => {
         const originalFetch = global.fetch;
         const headers = {
+            'content-range': 'bytes 0-1/2119075',
             'content-type': 'application/octet-stream',
-            'content-length': '2119075',
+            'content-length': '2',
         };
         global.fetch = jest.fn().mockResolvedValue({
-            status: 200,
+            status: 206,
             headers: { get: (name) => headers[name.toLowerCase()] ?? null },
         });
 
-        const total = await probeContentLength(
-            'http://127.0.0.1:12470/proxy/test',
-            null,
-            { fetchBase: 'http://127.0.0.1:12470' },
-        );
+        const total = await probeContentLength('http://127.0.0.1:12470/proxy/test', null);
         expect(total).toBe(2119075);
-        expect(global.fetch.mock.calls[0][1].headers).toEqual({});
+        // The very first probe carries the Range header (2-byte body).
+        expect(global.fetch.mock.calls[0][1].headers).toEqual({ Range: 'bytes=0-1' });
+
+        global.fetch = originalFetch;
+    });
+
+    it('retries without Range when the ranged probe yields no size, then reads Content-Length', async () => {
+        const originalFetch = global.fetch;
+        // First (ranged) response: proxy answered chunked, no size at all.
+        const ranged = {
+            status: 200,
+            headers: { get: () => null },
+        };
+        // Second (no-Range) response: full Content-Length of the ~2 MB stub.
+        const plain = {
+            status: 200,
+            headers: {
+                get: (name) => ({ 'content-type': 'video/mp4', 'content-length': '2119075' }[name.toLowerCase()] ?? null),
+            },
+        };
+        global.fetch = jest.fn()
+            .mockResolvedValueOnce(ranged)
+            .mockResolvedValueOnce(plain);
+
+        const total = await probeContentLength('http://test/proxy', null);
+        expect(total).toBe(2119075);
+        expect(isStubSize(total)).toBe(true);
+        // Two attempts: ranged, then the no-Range retry.
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+        expect(global.fetch.mock.calls[0][1].headers).toEqual({ Range: 'bytes=0-1' });
+        expect(global.fetch.mock.calls[1][1].headers).toEqual({});
 
         global.fetch = originalFetch;
     });

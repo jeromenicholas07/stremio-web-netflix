@@ -30,6 +30,12 @@ type Props = {
     onChange: (next: Value) => void;
     availability?: Availability | null;
     showMasterToggle?: boolean;
+    // Source keys to hide from the editor (e.g. debrid services switched off in
+    // the global settings). Hidden sources stay in the stored value untouched so
+    // toggling them back on globally restores them — they are merged back on
+    // every change. Used by the per-show Custom editor to avoid crowding the UI
+    // with sources the user never uses.
+    hiddenSourceKeys?: string[];
 };
 
 type PriorityListProps = {
@@ -170,7 +176,13 @@ const PriorityList = ({ title, hint, items, disabled, labelFor, countFor, onChan
     );
 };
 
-const AutoPickEditor = ({ className, value, onChange, availability, showMasterToggle = true }: Props) => {
+const AutoPickEditor = ({ className, value, onChange, availability, showMasterToggle = true, hiddenSourceKeys }: Props) => {
+    const hiddenSet = React.useMemo(() => new Set(hiddenSourceKeys || []), [hiddenSourceKeys]);
+    const visibleSources = React.useMemo(
+        () => value.sources.filter((source) => !hiddenSet.has(source.key)),
+        [value.sources, hiddenSet]
+    );
+
     const onToggleEnabled = useCallback(() => {
         onChange({ ...value, enabled: !value.enabled });
     }, [value, onChange]);
@@ -179,9 +191,12 @@ const AutoPickEditor = ({ className, value, onChange, availability, showMasterTo
         onChange({ ...value, englishOnly: value.englishOnly === false });
     }, [value, onChange]);
 
-    const onSourcesChange = useCallback((sources: Item[]) => {
-        onChange({ ...value, sources });
-    }, [value, onChange]);
+    const onSourcesChange = useCallback((nextVisible: Item[]) => {
+        // The editor only reorders/toggles the visible subset; merge the hidden
+        // sources back (untouched, at the end) so they survive in storage.
+        const hidden = value.sources.filter((source) => hiddenSet.has(source.key));
+        onChange({ ...value, sources: [...nextVisible, ...hidden] });
+    }, [value, onChange, hiddenSet]);
 
     const onQualitiesChange = useCallback((qualities: Item[]) => {
         onChange({ ...value, qualities });
@@ -195,7 +210,7 @@ const AutoPickEditor = ({ className, value, onChange, availability, showMasterTo
             <PriorityList
                 title={'Sources'}
                 hint={'Tried top to bottom. Turn off the ones you never want.'}
-                items={value.sources}
+                items={visibleSources}
                 disabled={showMasterToggle && !value.enabled}
                 labelFor={getSourceLabel}
                 countFor={availability ? sourceCount : undefined}

@@ -6,7 +6,7 @@ const classnames = require('classnames');
 const { useTranslation } = require('react-i18next');
 const { useRouteFocused } = require('stremio-router');
 const { default: Icon } = require('@stremio/stremio-icons/react');
-const { Button, Image, MultiselectMenu, AutoPickEditor } = require('stremio/components');
+const { Button, Image, MultiselectMenu, AutoPickEditor, Toggle } = require('stremio/components');
 const { useServices } = require('stremio/services');
 const Stream = require('./Stream');
 const styles = require('./styles');
@@ -21,7 +21,8 @@ const {
     formatAutoPickSkipSummary,
     getAutoPickFailures,
     getAutoPickOverride,
-    getEffectiveAutoPickSettings,
+    getGlobalAutoPickSettings,
+    setGlobalAutoPickSettings,
     getQualityLabel,
     getSourceLabel,
     getStreamKey,
@@ -60,6 +61,10 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     const skipBackGuardRef = React.useRef(false);
     const [selectedAddon, setSelectedAddon] = React.useState(ALL_ADDONS_KEY);
     const [overrideSettings, setOverrideSettingsState] = React.useState(() => getAutoPickOverride(type, metaId));
+    // Global defaults kept in state so the in-panel master toggle updates the UI
+    // immediately (and the per-show effective settings recompute) without a
+    // round-trip through the Settings page.
+    const [globalSettings, setGlobalSettingsState] = React.useState(() => getGlobalAutoPickSettings());
     // Panel open state is session-only. Persisting it (as we briefly did) left
     // autoPickPanelOpen=true across launches and blocked auto-pick entirely.
     const [autoPickPanelOpen, setAutoPickPanelOpen] = React.useState(false);
@@ -73,14 +78,22 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     React.useEffect(() => {
         if (typeof type !== 'string' || !type || typeof metaId !== 'string' || !metaId) return;
         setOverrideSettingsState(getAutoPickOverride(type, metaId));
+        setGlobalSettingsState(getGlobalAutoPickSettings());
     }, [type, metaId]);
     const effectiveAutoPickSettings = React.useMemo(() => {
-        return overrideSettings || getEffectiveAutoPickSettings(type, metaId);
-    }, [overrideSettings, type, metaId]);
+        return overrideSettings || globalSettings;
+    }, [overrideSettings, globalSettings]);
     const isCustomMode = overrideSettings !== null;
+    // Sources switched off in the global settings are hidden from the per-show
+    // Custom editor so unused debrid services (e.g. AllDebrid) don't crowd it.
+    const hiddenSourceKeys = React.useMemo(() => {
+        return globalSettings.sources
+            .filter((source) => !source.enabled)
+            .map((source) => source.key);
+    }, [globalSettings]);
     const onAutoPickModeChange = React.useCallback((custom) => {
         if (custom) {
-            const base = getEffectiveAutoPickSettings(type, metaId);
+            const base = overrideSettings || globalSettings;
             setAutoPickOverride(type, metaId, base);
             const saved = getAutoPickOverride(type, metaId) || normalizeSettings(base);
             setOverrideSettingsState(saved);
@@ -89,7 +102,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             setAutoPickOverride(type, metaId, null);
             setOverrideSettingsState(null);
         }
-    }, [type, metaId]);
+    }, [type, metaId, overrideSettings, globalSettings]);
     const onOverrideChange = React.useCallback((next) => {
         const normalized = normalizeSettings(next);
         setAutoPickOverride(type, metaId, normalized);
@@ -98,6 +111,15 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
         // set overrideSettingsState to null and snapped back to Global.
         setOverrideSettingsState(getAutoPickOverride(type, metaId) || normalized);
     }, [type, metaId]);
+    // Master on/off lives on whichever scope is active: the per-show override in
+    // Custom mode, the shared global defaults otherwise.
+    const onAutoPickEnabledToggle = React.useCallback(() => {
+        if (overrideSettings) {
+            onOverrideChange({ ...overrideSettings, enabled: !overrideSettings.enabled });
+        } else {
+            setGlobalSettingsState(setGlobalAutoPickSettings({ enabled: !globalSettings.enabled }));
+        }
+    }, [overrideSettings, globalSettings, onOverrideChange]);
     const showInstallAddonsButton = React.useMemo(() => {
         return !profile || profile.auth === null || profile.auth?.user?.isNewUser === true && !video?.upcoming;
     }, [profile, video]);
@@ -485,25 +507,33 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             {
                 video ?
                     <div className={classnames(styles['autopick-panel'], { 'open': autoPickPanelOpen })}>
-                        <Button
-                            className={styles['autopick-panel-header']}
-                            title={autoPickPanelOpen ? 'Hide auto-pick settings' : 'Show auto-pick settings'}
-                            onClick={toggleAutoPickPanel}
-                        >
-                            <span className={classnames(styles['autopick-status-dot'], { 'on': effectiveAutoPickSettings.enabled })} />
-                            <div className={styles['autopick-status-text']}>
-                                <div className={styles['autopick-status-title']}>
-                                    {'Auto-pick '}{effectiveAutoPickSettings.enabled ? 'on' : 'off'}
-                                    <span className={styles['autopick-status-mode']}>
-                                        {isCustomMode ? ' \u00b7 Custom' : ' \u00b7 Global'}
-                                    </span>
+                        <div className={styles['autopick-panel-header']}>
+                            <Button
+                                className={styles['autopick-header-main']}
+                                title={autoPickPanelOpen ? 'Hide auto-pick settings' : 'Show auto-pick settings'}
+                                onClick={toggleAutoPickPanel}
+                            >
+                                <span className={classnames(styles['autopick-status-dot'], { 'on': effectiveAutoPickSettings.enabled })} />
+                                <div className={styles['autopick-status-text']}>
+                                    <div className={styles['autopick-status-title']}>
+                                        {'Auto-pick '}{effectiveAutoPickSettings.enabled ? 'on' : 'off'}
+                                        <span className={styles['autopick-status-mode']}>
+                                            {isCustomMode ? ' \u00b7 Custom' : ' \u00b7 Global'}
+                                        </span>
+                                    </div>
+                                    <div className={styles['autopick-status-subtitle']}>
+                                        {autoPickSummary.sources}{' \u203A '}{autoPickSummary.qualities}
+                                    </div>
                                 </div>
-                                <div className={styles['autopick-status-subtitle']}>
-                                    {autoPickSummary.sources}{' \u203A '}{autoPickSummary.qualities}
-                                </div>
-                            </div>
-                            <span className={styles['autopick-chevron']}>{'\u203A'}</span>
-                        </Button>
+                                <span className={styles['autopick-chevron']}>{'\u203A'}</span>
+                            </Button>
+                            <Toggle
+                                className={styles['autopick-header-toggle']}
+                                checked={effectiveAutoPickSettings.enabled}
+                                title={effectiveAutoPickSettings.enabled ? 'Turn auto-pick off' : 'Turn auto-pick on'}
+                                onClick={onAutoPickEnabledToggle}
+                            />
+                        </div>
                         {
                             autoPickPanelOpen ?
                                 <div className={styles['autopick-panel-body']}>
@@ -530,6 +560,8 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                                                 value={effectiveAutoPickSettings}
                                                 onChange={onOverrideChange}
                                                 availability={availability}
+                                                hiddenSourceKeys={hiddenSourceKeys}
+                                                showMasterToggle={false}
                                             />
                                             :
                                             <div className={styles['autopick-summary']}>

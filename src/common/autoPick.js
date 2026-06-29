@@ -101,13 +101,34 @@ function parseJson(value, fallback) {
 //   sources: Array<{ key, enabled }>,    // ordered by priority (top = first tried)
 //   qualities: Array<{ key, enabled }>,  // ordered by priority (top = preferred)
 // }
+// Out-of-the-box defaults. Auto-pick is on, English-only, and tuned for the
+// common Real-Debrid + Torrentio setup: cached RD first, then RD download, then
+// Torrentio P2P, with the other debrid services off (users enable the ones they
+// pay for). Quality prefers plain 4K/1080p over HDR (HDR tone-mapping is often
+// worse on non-HDR displays) before stepping down. The explicit order/enabled
+// here is the source of truth for new users; normalizeList fills any gaps.
 function getDefaultAutoPickSettings() {
     return {
-        enabled: false,
+        enabled: true,
         // Skip releases tagged for a non-English language (e.g. ITA, 🇮🇹).
         englishOnly: true,
-        sources: SOURCES.map(({ key }) => ({ key, enabled: true })),
-        qualities: QUALITIES.map(({ key }) => ({ key, enabled: true })),
+        sources: [
+            { key: 'rd_plus', enabled: true },
+            { key: 'rd_download', enabled: true },
+            { key: 'debridlink', enabled: false },
+            { key: 'alldebrid', enabled: false },
+            { key: 'premiumize', enabled: false },
+            { key: 'torrentio', enabled: true },
+            { key: 'other', enabled: false },
+        ],
+        qualities: [
+            { key: '4k', enabled: true },
+            { key: '1080p', enabled: true },
+            { key: '4k_hdr', enabled: true },
+            { key: '720p', enabled: true },
+            { key: '480p', enabled: true },
+            { key: 'other', enabled: true },
+        ],
     };
 }
 
@@ -191,6 +212,15 @@ function getGlobalAutoPickSettings() {
     const stored = getStorageItem('localStorage', CONFIG_KEY);
     if (stored) {
         return normalizeSettings(parseJson(stored, null));
+    }
+
+    // Only migrate from the v1 keys if the user actually has them. A truly
+    // fresh install has no legacy keys and should get the tuned defaults
+    // (auto-pick on, RD + Torrentio) rather than the v1 migration's off state.
+    const hasLegacy = Object.values(LEGACY_KEYS)
+        .some((key) => getStorageItem('localStorage', key) !== null);
+    if (!hasLegacy) {
+        return getDefaultAutoPickSettings();
     }
 
     return normalizeSettings({
