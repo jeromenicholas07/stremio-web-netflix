@@ -16,6 +16,12 @@ const API_RESPONSE_TTL = 6 * 60 * 60 * 1000;
 // TMDB items is ~15-20 KB) so we need to be more conservative to stay
 // under the browser's ~5 MB localStorage quota.
 const PERSIST_MAX_ENTRIES = 1000;
+// Hard byte budget for the serialized cache. The entry-count cap alone is not
+// enough: 1000 full-payload rows (~18 KB each) is ~18 MB, which blows the
+// shared ~5 MB localStorage quota and starves stremio-core's own writes
+// (library_recent) plus small settings (auto-pick, debug). We keep the TMDB
+// cache well under budget so the rest of the app always has room.
+const PERSIST_MAX_BYTES = 2 * 1024 * 1024; // 2 MB of serialized JSON
 
 // Patterns that indicate a bad trailer (sign language, behind-the-scenes, etc.)
 const BAD_TRAILER_PATTERNS = /sign\s*language|behind\s*the\s*scenes|bloopers|featurette|making\s*of|sneak\s*peek|clip\s*\d|opening\s*credits|recap|interview/i;
@@ -35,6 +41,14 @@ class TMDBService {
         this._cache = new Map();
         this._imdbCache = new Map(); // tmdbId → imdbId (mirrors persistent cache)
         this._persist = this._loadPersist();
+        // An older build capped this cache by entry count only, so existing
+        // installs can carry a multi-MB blob that has already blown the shared
+        // localStorage quota (breaking stremio-core's library writes + small
+        // settings). Trim it back under budget immediately on startup so the
+        // rest of the app regains room without waiting for the next row fetch.
+        if (JSON.stringify(this._persist).length > PERSIST_MAX_BYTES) {
+            this._savePersist();
+        }
 
         // ─── Request flow control ────────────────────────────────
         // In-flight deduplication: coalesce concurrent callers for the same
@@ -95,8 +109,26 @@ class TMDBService {
         }
     }
 
+    // Drop the oldest entries until the callback reports we're within budget.
+    // Returns the final serialized string so callers can write it directly.
+    _evictOldestUntil(withinBudget) {
+        let serialized = JSON.stringify(this._persist);
+        while (!withinBudget(serialized)) {
+            const keys = Object.keys(this._persist);
+            if (keys.length === 0) break;
+            // Drop in 10% batches so we don't re-serialize once per entry.
+            const batch = Math.max(1, Math.ceil(keys.length * 0.1));
+            const sorted = keys
+                .map((k) => ({ k, t: this._persist[k].time || 0 }))
+                .sort((a, b) => a.t - b.t);
+            for (let i = 0; i < batch; i++) delete this._persist[sorted[i].k];
+            serialized = JSON.stringify(this._persist);
+        }
+        return serialized;
+    }
+
     _savePersist() {
-        // First pass: cap entry count via LRU
+        // First pass: cap entry count via LRU.
         const keys = Object.keys(this._persist);
         if (keys.length > PERSIST_MAX_ENTRIES) {
             const sorted = keys
@@ -105,8 +137,12 @@ class TMDBService {
             const toRemove = sorted.slice(0, keys.length - PERSIST_MAX_ENTRIES);
             for (const { k } of toRemove) delete this._persist[k];
         }
+        // Second pass: cap the serialized SIZE. This is what keeps the cache
+        // from crowding out stremio-core's library writes + small settings and
+        // blowing the shared quota — an entry-count cap can't bound bytes.
+        let serialized = this._evictOldestUntil((s) => s.length <= PERSIST_MAX_BYTES);
         try {
-            localStorage.setItem(PERSIST_KEY, JSON.stringify(this._persist));
+            localStorage.setItem(PERSIST_KEY, serialized);
             return;
         } catch { /* fall through to graceful eviction */ }
 
@@ -492,7 +528,7 @@ class TMDBService {
         const allVideos = data.videos.results;
 
         // Filter to YouTube trailers only
-        let trailers = allVideos.filter(v =>
+        let trailers = allVideos.filter((v) =>
             v.site === 'YouTube' &&
             v.type === 'Trailer' &&
             v.key &&
@@ -501,7 +537,7 @@ class TMDBService {
 
         if (trailers.length === 0) {
             // Fallback: accept Teasers too, but still YouTube + not bad patterns
-            trailers = allVideos.filter(v =>
+            trailers = allVideos.filter((v) =>
                 v.site === 'YouTube' &&
                 (v.type === 'Trailer' || v.type === 'Teaser') &&
                 v.key &&
@@ -515,7 +551,7 @@ class TMDBService {
         }
 
         // Rank trailers by quality score
-        const ranked = trailers.map(v => {
+        const ranked = trailers.map((v) => {
             let score = 0;
             // Official gets highest priority
             if (v.official === true) score += 100;
@@ -552,7 +588,7 @@ class TMDBService {
     async getVideos(tmdbId, mediaType = 'movie') {
         const data = await this._fetch(`/${mediaType}/${tmdbId}`, { append_to_response: 'videos' });
         if (!data?.videos?.results) return [];
-        return data.videos.results.filter(v => v.type === 'Trailer' && v.site === 'YouTube');
+        return data.videos.results.filter((v) => v.type === 'Trailer' && v.site === 'YouTube');
     }
 
     /**
