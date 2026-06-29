@@ -3,6 +3,7 @@
 const {
     isStubSize,
     parseAdvertisedSizeBytes,
+    preflightAutoPickStream,
     probeContentLength,
     STUB_KNOWN_MAX_BYTES,
 } = require('../src/common/streamPreflight');
@@ -255,5 +256,85 @@ describe('streamPreflight', () => {
         expect(global.fetch.mock.calls[1][1].headers).toEqual({});
 
         global.fetch = originalFetch;
+    });
+
+    describe('preflightAutoPickStream via the launcher probe (shell .exe)', () => {
+        const RESOLVE_URL = 'https://torrentio.strem.fun/resolve/realdebrid/TOKEN/HASH/null/35/BoJack.S03E12.mkv';
+        const core = {
+            transport: {
+                decodeStream: async () => ({ url: RESOLVE_URL, behaviorHints: {} }),
+            },
+        };
+        const stream = { name: '[RD download] Torrentio', deepLinks: { player: '#/player/ENCODEDSTREAM/extra' } };
+
+        function launcherJson(size, contentType) {
+            return {
+                ok: true,
+                status: 200,
+                json: () => Promise.resolve({ size, contentType }),
+            };
+        }
+
+        it('blocks the copyright stub using the launcher-reported size', async () => {
+            const originalFetch = global.fetch;
+            global.fetch = jest.fn((u) => {
+                expect(u).toContain('/_launcher/probe-size?');
+                expect(u).toContain('u=https%3A%2F%2Ftorrentio.strem.fun');
+                return Promise.resolve(launcherJson(2119075, 'application/octet-stream'));
+            });
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict.blocked).toBe(true);
+
+            global.fetch = originalFetch;
+        });
+
+        it('plays a real file using the launcher-reported size', async () => {
+            const originalFetch = global.fetch;
+            global.fetch = jest.fn(() => Promise.resolve(launcherJson(2.4 * 1024 * 1024 * 1024, 'video/mp4')));
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict.blocked).toBe(false);
+
+            global.fetch = originalFetch;
+        });
+
+        it('fails open when the launcher cannot determine a size', async () => {
+            const originalFetch = global.fetch;
+            global.fetch = jest.fn(() => Promise.resolve(launcherJson(-1, '')));
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict.skipped).toBe(true);
+
+            global.fetch = originalFetch;
+        });
+
+        it('falls back to the proxy probe when the launcher endpoint is missing (old launcher)', async () => {
+            const originalFetch = global.fetch;
+            const calls = [];
+            global.fetch = jest.fn((u) => {
+                calls.push(u);
+                // 1st call: launcher probe → 404 (old launcher).
+                if (u.includes('/_launcher/probe-size')) {
+                    return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve(null) });
+                }
+                // Fallback /proxy probe: ranged 500 → retry → stub body.
+                if (u.includes('/proxy/')) {
+                    return Promise.resolve(streamResponse({
+                        contentType: 'application/octet-stream',
+                        totalBytes: 2119075,
+                        chunk: 512 * 1024,
+                    }));
+                }
+                return Promise.resolve({ ok: false, status: 500, headers: { get: () => null } });
+            });
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict.blocked).toBe(true);
+            expect(calls[0]).toContain('/_launcher/probe-size');
+            expect(calls.some((u) => u.includes('/proxy/'))).toBe(true);
+
+            global.fetch = originalFetch;
+        });
     });
 });

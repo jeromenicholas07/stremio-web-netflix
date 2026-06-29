@@ -123,7 +123,7 @@ class StremioLauncher
         // Without it GitHub Pages' max-age=600 pins a stale bundle for up to 10
         // minutes after every deploy (the service worker often does not control
         // navigations inside the Stremio shell webview).
-        const string WEB_UI_CACHE_VERSION = "2026-06-29-rd-preflight";
+        const string WEB_UI_CACHE_VERSION = "2026-06-30-launcher-probe";
         string webuiUrl = "https://jeromenicholas07.github.io/stremio-web-netflix/?v="
             + Uri.EscapeDataString(WEB_UI_CACHE_VERSION)
             + "#/?streamingServerUrl=" + Uri.EscapeDataString("http://127.0.0.1:12470/");
@@ -708,8 +708,39 @@ class StremioLauncher
     //   ↳ writes/removes the flag file at %LOCALAPPDATA%\StremioLauncherFULL\debug.flag.
     //     Read by both launcher .exes at startup to decide whether to attach
     //     a console window (AllocConsole). Takes effect on next Stremio start.
-    static void HandleLauncherControl(Stream stream, string method, string path, Dictionary<string, string> reqHeaders)
+    static void HandleLauncherControl(Stream stream, string method, string path, string qs, Dictionary<string, string> reqHeaders)
     {
+        // GET /_launcher/probe-size?u=<url>&h=<key:val>&h=...
+        //   → {"size": <bytes or -1>, "contentType": "<ct>"}
+        // Server-side size probe for the auto-pick copyright preflight. The
+        // browser cannot size these streams itself: the streaming-server /proxy
+        // is origin-locked to the `d` param and 500s when a Torrentio
+        // /resolve/... URL 302-redirects to real-debrid.com. Here we fetch the
+        // URL directly with AllowAutoRedirect, so the whole resolve→RD→CDN chain
+        // is followed and we read the final Content-Length (or measure a capped
+        // body for chunked responses). size = -1 means "unknown" (caller plays).
+        if (path == "/_launcher/probe-size")
+        {
+            if (method != "GET")
+            {
+                WriteResponse(stream, 405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"), true);
+                return;
+            }
+            string target = GetQueryParam(qs, "u");
+            if (string.IsNullOrEmpty(target))
+            {
+                WriteResponse(stream, 400, "application/json", Encoding.UTF8.GetBytes("{\"size\":-1}"), true);
+                return;
+            }
+            long size = -1;
+            string ctype = "";
+            try { size = ProbeRemoteSize(target, GetQueryParams(qs, "h"), out ctype); }
+            catch { size = -1; ctype = ""; }
+            string ctEsc = (ctype ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
+            WriteResponse(stream, 200, "application/json",
+                Encoding.UTF8.GetBytes("{\"size\":" + size + ",\"contentType\":\"" + ctEsc + "\"}"), true);
+            return;
+        }
         if (path == "/_launcher/debug")
         {
             string flagPath = DebugFlagPath();
@@ -744,6 +775,109 @@ class StremioLauncher
             return;
         }
         WriteResponse(stream, 404, "text/plain", Encoding.UTF8.GetBytes("Not Found"), true);
+    }
+
+    // All values for a repeated query param (e.g. h=a:1&h=b:2 → ["a:1","b:2"]).
+    static List<string> GetQueryParams(string queryString, string name)
+    {
+        var list = new List<string>();
+        if (string.IsNullOrEmpty(queryString)) return list;
+        foreach (string part in queryString.Split('&'))
+        {
+            int eq = part.IndexOf('=');
+            if (eq < 0) continue;
+            string key = Uri.UnescapeDataString(part.Substring(0, eq));
+            if (string.Equals(key, name, StringComparison.OrdinalIgnoreCase))
+                list.Add(Uri.UnescapeDataString(part.Substring(eq + 1)));
+        }
+        return list;
+    }
+
+    static void SetProbeHeader(HttpWebRequest wr, string k, string v)
+    {
+        try
+        {
+            switch (k.ToLowerInvariant())
+            {
+                case "user-agent": wr.UserAgent = v; break;
+                case "accept": wr.Accept = v; break;
+                case "referer": wr.Referer = v; break;
+                case "host": wr.Host = v; break;
+                case "content-type": wr.ContentType = v; break;
+                case "range": break; // never forward a Range to the probe
+                default: wr.Headers[k] = v; break;
+            }
+        }
+        catch { /* restricted/invalid header — skip */ }
+    }
+
+    // GET the URL following redirects and return the total byte size: the
+    // final response's Content-Length, or — when the response is chunked with
+    // no length — the body size measured up to a ~4 MB cap (enough to tell the
+    // ~2 MB RD copyright stub from a real multi-GB file without downloading it).
+    // Returns -1 on any error so the caller fails open (plays).
+    static long ProbeRemoteSize(string url, List<string> headers, out string contentType)
+    {
+        contentType = "";
+        HttpWebRequest wr;
+        try { wr = (HttpWebRequest)WebRequest.Create(url); }
+        catch { return -1; }
+        wr.Method = "GET";
+        wr.AllowAutoRedirect = true;
+        wr.Timeout = 15000;
+        wr.ReadWriteTimeout = 15000;
+        wr.ServicePoint.Expect100Continue = false;
+        try { wr.UserAgent = "Stremio"; } catch { }
+        if (headers != null)
+        {
+            foreach (string h in headers)
+            {
+                if (string.IsNullOrEmpty(h)) continue;
+                int c = h.IndexOf(':');
+                if (c <= 0) continue;
+                SetProbeHeader(wr, h.Substring(0, c).Trim(), h.Substring(c + 1).Trim());
+            }
+        }
+
+        HttpWebResponse resp;
+        try { resp = (HttpWebResponse)wr.GetResponse(); }
+        catch (WebException wex)
+        {
+            // An error response can still carry a usable Content-Length.
+            var er = wex.Response as HttpWebResponse;
+            if (er == null) return -1;
+            using (er)
+            {
+                contentType = er.ContentType ?? "";
+                return er.ContentLength >= 0 ? er.ContentLength : -1;
+            }
+        }
+        catch { return -1; }
+
+        using (resp)
+        {
+            contentType = resp.ContentType ?? "";
+            if (resp.ContentLength >= 0) return resp.ContentLength;
+
+            // Chunked / no length: measure the body, bounded.
+            try
+            {
+                using (var s = resp.GetResponseStream())
+                {
+                    byte[] buf = new byte[65536];
+                    long total = 0;
+                    long cap = 4L * 1024 * 1024;
+                    int n;
+                    while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                    {
+                        total += n;
+                        if (total > cap) return cap + 1;
+                    }
+                    return total;
+                }
+            }
+            catch { return -1; }
+        }
     }
 
     static string ReadRequestBody(Stream stream, Dictionary<string, string> reqHeaders)
@@ -973,7 +1107,7 @@ class StremioLauncher
                 // of being proxied to the streaming server.
                 if (path.StartsWith("/_launcher/"))
                 {
-                    HandleLauncherControl(stream, method, path, reqHeaders);
+                    HandleLauncherControl(stream, method, path, qs, reqHeaders);
                     return;
                 }
 

@@ -261,6 +261,51 @@ async function probeContentLength(proxyUrl, signal, options = {}) {
     }
 }
 
+// True when the fetch base is the launcher's loopback CORS proxy (the shell
+// .exe). Only there does the launcher size-probe endpoint exist.
+function isLauncherBase(fetchBase) {
+    return typeof fetchBase === 'string' && /^https?:\/\/(?:127\.0\.0\.1|localhost):12470\b/i.test(fetchBase);
+}
+
+// Ask the launcher to size the stream server-side. This is the reliable path in
+// the shell: the streaming-server /proxy is origin-locked and 500s when a
+// Torrentio /resolve/... URL redirects cross-origin to real-debrid.com, whereas
+// the launcher fetches the URL directly (AllowAutoRedirect) and reads the final
+// size. Returns { size, contentType }, { unavailable: true } (old launcher with
+// no endpoint → caller falls back), or null on error.
+async function probeSizeViaLauncher(fetchBase, url, proxyHeaders, signal) {
+    const params = new URLSearchParams();
+    params.set('u', url);
+    if (proxyHeaders && proxyHeaders.request) {
+        Object.entries(proxyHeaders.request).forEach(([key, value]) => params.append('h', `${key}:${value}`));
+    }
+    const probeUrl = `${fetchBase}/_launcher/probe-size?${params.toString()}`;
+
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (signal) {
+        if (signal.aborted) controller.abort();
+        else signal.addEventListener('abort', onAbort);
+    }
+    // The launcher may read up to ~4 MB for chunked responses, so allow extra.
+    const timer = setTimeout(() => controller.abort(), PREFLIGHT_TIMEOUT_MS + 8000);
+
+    try {
+        const res = await fetch(probeUrl, { method: 'GET', signal: controller.signal });
+        if (res.status === 404) return { unavailable: true };
+        if (!res.ok) return null;
+        const data = await res.json().catch(() => null);
+        if (!data || typeof data.size !== 'number') return null;
+        return { size: data.size, contentType: data.contentType || '' };
+    } catch (err) {
+        log('launcher probe error', err && err.message);
+        return null;
+    } finally {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+    }
+}
+
 // Preflight a single auto-pick candidate.
 //
 // Returns one of:
@@ -288,9 +333,28 @@ async function preflightAutoPickStream({ core, stream, ssBaseUrl, signal } = {})
         const proxyHeaders = decoded.behaviorHints && decoded.behaviorHints.proxyHeaders;
 
         const fetchBase = getFetchBase(ssBaseUrl);
-        const proxyUrl = buildProxyUrl(fetchBase, url, proxyHeaders);
         log('preflighting', { name: stream && stream.name, url, fetchBase });
 
+        // Shell .exe: size the stream server-side via the launcher (follows the
+        // resolve→RD redirect chain that the streaming-server /proxy can't).
+        if (isLauncherBase(fetchBase)) {
+            const launcher = await probeSizeViaLauncher(fetchBase, url, proxyHeaders, signal);
+            if (launcher && !launcher.unavailable) {
+                if (!Number.isFinite(launcher.size) || launcher.size < 0) {
+                    return { skipped: true, reason: 'launcher-no-size' };
+                }
+                const total = classifyProbedSize(launcher.size, launcher.contentType);
+                if (total === null) return { skipped: true, reason: 'launcher-ambiguous' };
+                const blocked = isStubSize(total);
+                log('verdict (launcher)', { name: stream && stream.name, blocked, size: launcher.size, contentType: launcher.contentType });
+                return { blocked, contentLength: total };
+            }
+            // Old launcher (no endpoint) or transient error → fall back to the
+            // streaming-server /proxy probe below (best effort).
+            log('launcher probe unavailable, falling back to proxy', { result: launcher });
+        }
+
+        const proxyUrl = buildProxyUrl(fetchBase, url, proxyHeaders);
         const contentLength = await probeContentLength(proxyUrl, signal);
         if (contentLength === null) return { skipped: true, reason: 'no-size' };
 
