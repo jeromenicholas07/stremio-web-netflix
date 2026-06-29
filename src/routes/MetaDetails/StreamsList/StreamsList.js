@@ -36,7 +36,6 @@ const { preflightAutoPickStream } = require('stremio/common/streamPreflight');
 const { default: SeasonEpisodePicker } = require('../EpisodePicker');
 
 const ALL_ADDONS_KEY = 'ALL';
-const AUTOPICK_PANEL_OPEN_KEY = 'netflix_ui_autopick_panel_open';
 
 // After the last addon reports, wait this long so streams that arrive in the
 // same render batch are all considered before the candidate walk begins.
@@ -61,23 +60,11 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     const skipBackGuardRef = React.useRef(false);
     const [selectedAddon, setSelectedAddon] = React.useState(ALL_ADDONS_KEY);
     const [overrideSettings, setOverrideSettingsState] = React.useState(() => getAutoPickOverride(type, metaId));
-    const [autoPickPanelOpen, setAutoPickPanelOpen] = React.useState(() => {
-        try {
-            return window.localStorage.getItem(AUTOPICK_PANEL_OPEN_KEY) === 'true';
-        } catch {
-            return false;
-        }
-    });
+    // Panel open state is session-only. Persisting it (as we briefly did) left
+    // autoPickPanelOpen=true across launches and blocked auto-pick entirely.
+    const [autoPickPanelOpen, setAutoPickPanelOpen] = React.useState(false);
     const toggleAutoPickPanel = React.useCallback(() => {
-        setAutoPickPanelOpen((open) => {
-            const next = !open;
-            try {
-                window.localStorage.setItem(AUTOPICK_PANEL_OPEN_KEY, String(next));
-            } catch {
-                // Storage may be unavailable; in-memory state still works.
-            }
-            return next;
-        });
+        setAutoPickPanelOpen((open) => !open);
     }, []);
     const onAddonSelected = React.useCallback((value) => {
         streamsContainerRef.current.scrollTo({ top: 0, left: 0, behavior: platform.name === 'ios' ? 'smooth' : 'instant' });
@@ -95,24 +82,21 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
         if (custom) {
             const base = getEffectiveAutoPickSettings(type, metaId);
             setAutoPickOverride(type, metaId, base);
-            // Always flip UI state even if storage is unavailable (common in
-            // some embedded webviews). Re-read from storage when possible.
             const saved = getAutoPickOverride(type, metaId) || normalizeSettings(base);
             setOverrideSettingsState(saved);
             setAutoPickPanelOpen(true);
-            try {
-                window.localStorage.setItem(AUTOPICK_PANEL_OPEN_KEY, 'true');
-            } catch {
-                // In-memory panel state still works.
-            }
         } else {
             setAutoPickOverride(type, metaId, null);
             setOverrideSettingsState(null);
         }
     }, [type, metaId]);
     const onOverrideChange = React.useCallback((next) => {
-        const saved = setAutoPickOverride(type, metaId, next);
-        setOverrideSettingsState(saved);
+        const normalized = normalizeSettings(next);
+        setAutoPickOverride(type, metaId, normalized);
+        // Keep in-memory custom state even when storage writes fail (common in
+        // the Stremio shell webview). Without the fallback, every editor click
+        // set overrideSettingsState to null and snapped back to Global.
+        setOverrideSettingsState(getAutoPickOverride(type, metaId) || normalized);
     }, [type, metaId]);
     const showInstallAddonsButton = React.useMemo(() => {
         return !profile || profile.auth === null || profile.auth?.user?.isNewUser === true && !video?.upcoming;
@@ -317,9 +301,6 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     }, [countLoadingAddons, autoPickStreams.length, autoPickStateKey]);
     React.useEffect(() => {
         if (autoPickTriggered.current) return;
-        // Don't auto-pick while the user is editing settings — otherwise the
-        // player opens before they can switch to Custom or change priorities.
-        if (autoPickPanelOpen) return;
         // Don't auto-pick when user clicked "More Info" (info=1) or paused it.
         if (queryParams && queryParams.has('info')) return;
         if (queryParams && queryParams.has('autopickPaused')) return;
@@ -453,7 +434,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             cancelled = true;
             controller.abort();
         };
-    }, [autoPickSignature, autoPickReady, countLoadingAddons, autoPickStateKey, autoPickPanelOpen]);
+    }, [autoPickSignature, autoPickReady, countLoadingAddons, autoPickStateKey]);
 
     const handleEpisodePicker = React.useCallback((season, episode) => {
         onEpisodeSearch(season, episode);

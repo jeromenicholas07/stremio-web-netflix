@@ -223,11 +223,17 @@ function getMetaKey(type, metaId) {
 }
 
 function getAutoPickOverrides() {
-    return parseJson(getStorageItem('localStorage', OVERRIDES_KEY), {});
+    const fromLocal = parseJson(getStorageItem('localStorage', OVERRIDES_KEY), null);
+    if (fromLocal && typeof fromLocal === 'object') return fromLocal;
+    return parseJson(getStorageItem('sessionStorage', OVERRIDES_KEY), {});
 }
 
 function setAutoPickOverrides(overrides) {
-    setStorageItem('localStorage', OVERRIDES_KEY, JSON.stringify(overrides));
+    const payload = JSON.stringify(overrides);
+    setStorageItem('localStorage', OVERRIDES_KEY, payload);
+    // Mirror to sessionStorage — the Stremio shell webview sometimes rejects
+    // localStorage writes while sessionStorage still works.
+    setStorageItem('sessionStorage', OVERRIDES_KEY, payload);
 }
 
 function getAutoPickOverride(type, metaId) {
