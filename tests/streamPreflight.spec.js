@@ -162,4 +162,98 @@ describe('streamPreflight', () => {
 
         global.fetch = originalFetch;
     });
+
+    // Build a fetch Response whose body streams `totalBytes` in `chunk`-sized
+    // pieces and exposes NO Content-Length / Content-Range — the shell .exe
+    // case where the proxy returns a chunked 200 after following the RD
+    // redirect. A fresh one is returned per fetch call (bodies are single-use).
+    function streamResponse({ status = 200, contentType = 'video/mp4', totalBytes, chunk = 256 * 1024 } = {}) {
+        const hdr = { 'content-type': contentType };
+        let sent = 0;
+        return {
+            status,
+            headers: { get: (name) => hdr[name.toLowerCase()] ?? null },
+            body: {
+                getReader: () => ({
+                    read: () => {
+                        if (sent >= totalBytes) return Promise.resolve({ done: true, value: undefined });
+                        const n = Math.min(chunk, totalBytes - sent);
+                        sent += n;
+                        return Promise.resolve({ done: false, value: new Uint8Array(n) });
+                    },
+                    cancel: () => Promise.resolve(),
+                }),
+            },
+        };
+    }
+
+    it('measures the chunked stub body when no length headers are present (shell case)', async () => {
+        const originalFetch = global.fetch;
+        global.fetch = jest.fn(() => Promise.resolve(streamResponse({
+            contentType: 'application/octet-stream',
+            totalBytes: 2119075,
+            chunk: 512 * 1024,
+        })));
+
+        const total = await probeContentLength('http://test/proxy', null);
+        expect(total).toBe(2119075);
+        expect(isStubSize(total)).toBe(true);
+        // Ranged probe yields no size → no-Range retry → body measured.
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+
+        global.fetch = originalFetch;
+    });
+
+    it('treats a large no-length body as real and aborts after the cap', async () => {
+        const originalFetch = global.fetch;
+        global.fetch = jest.fn(() => Promise.resolve(streamResponse({
+            contentType: 'video/mp4',
+            totalBytes: 50 * 1024 * 1024,
+            chunk: 1024 * 1024,
+        })));
+
+        const total = await probeContentLength('http://test/proxy', null);
+        expect(total).toBeGreaterThan(STUB_KNOWN_MAX_BYTES);
+        expect(isStubSize(total)).toBe(false);
+
+        global.fetch = originalFetch;
+    });
+
+    it('fails open when a no-length body is a tiny error page', async () => {
+        const originalFetch = global.fetch;
+        global.fetch = jest.fn(() => Promise.resolve(streamResponse({
+            contentType: 'text/html',
+            totalBytes: 148,
+            chunk: 148,
+        })));
+
+        await expect(probeContentLength('http://test/proxy', null)).resolves.toBeNull();
+
+        global.fetch = originalFetch;
+    });
+
+    it('retries without Range when the ranged probe errors (Torrentio resolve 500), then body-measures', async () => {
+        const originalFetch = global.fetch;
+        const err500 = {
+            status: 500,
+            headers: { get: (name) => (name.toLowerCase() === 'content-length' ? '148' : null) },
+        };
+        global.fetch = jest.fn()
+            .mockResolvedValueOnce(err500)
+            .mockResolvedValueOnce(streamResponse({
+                contentType: 'application/octet-stream',
+                totalBytes: 2119075,
+                chunk: 512 * 1024,
+            }));
+
+        const total = await probeContentLength('http://test/proxy', null);
+        expect(total).toBe(2119075);
+        expect(isStubSize(total)).toBe(true);
+        // Ranged probe 500s → plain-GET retry → body measured.
+        expect(global.fetch).toHaveBeenCalledTimes(2);
+        expect(global.fetch.mock.calls[0][1].headers).toEqual({ Range: 'bytes=0-1' });
+        expect(global.fetch.mock.calls[1][1].headers).toEqual({});
+
+        global.fetch = originalFetch;
+    });
 });

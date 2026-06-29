@@ -127,21 +127,66 @@ function isStubSize(contentLength) {
     return contentLength <= STUB_KNOWN_MAX_BYTES;
 }
 
-// Issue a tiny ranged GET through the proxy and read the total byte size from
-// Content-Range (preferred) or Content-Length, then abort the body download.
+// Minimum size we'll treat as a copyright stub. Comfortably above proxy/HTML
+// error pages (≈100–200 bytes) so those fail open (play) instead of being
+// mistaken for the ~2 MB stub.
+const STUB_MIN_BYTES = 512 * 1024; // 512 KB
+// Sentinel returned once a body-measure exceeds the stub ceiling: any value
+// above STUB_KNOWN_MAX_BYTES so isStubSize() reports "not a stub".
+const STUB_LARGE_SENTINEL = STUB_KNOWN_MAX_BYTES + 1;
+
+// Decide what a probed byte count means:
+//   > ceiling                         → real media (return as-is)
+//   in [STUB_MIN, ceiling], or video  → stub-band size (return as-is → blocked)
+//   tiny + not video (error page)     → null (fail open / play)
+function classifyProbedSize(size, contentType) {
+    if (!Number.isFinite(size) || size <= 0) return null;
+    if (size > STUB_KNOWN_MAX_BYTES) return size;
+    if (size >= STUB_MIN_BYTES || /^video\//i.test(contentType || '')) return size;
+    return null;
+}
+
+// Stream the response body counting bytes, aborting the moment we pass the stub
+// ceiling. This sizes a response even when there is NO Content-Length and NO
+// Content-Range — exactly the shell .exe case, where the streaming-server proxy
+// returns the RD copyright stub as a chunked 200 with no length after following
+// the redirect. Bounded: a real multi-GB file is detected as "large" after
+// ~STUB_KNOWN_MAX_BYTES and the download is aborted.
+async function measureBodyCapped(res, controller) {
+    try {
+        if (!res.body || typeof res.body.getReader !== 'function') {
+            // No streaming reader available — read fully (rare path; the stub is
+            // small and a real file would be caught by a length header earlier).
+            const buf = await res.arrayBuffer();
+            return buf.byteLength > STUB_KNOWN_MAX_BYTES ? STUB_LARGE_SENTINEL : buf.byteLength;
+        }
+        const reader = res.body.getReader();
+        let total = 0;
+        for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            total += value ? value.length : 0;
+            if (total > STUB_KNOWN_MAX_BYTES) {
+                try { await reader.cancel(); } catch { /* already closing */ }
+                try { controller.abort(); } catch { /* already aborted */ }
+                return STUB_LARGE_SENTINEL;
+            }
+        }
+        return total;
+    } catch {
+        // Aborted (timeout/external) or read error → unknown size → fail open.
+        return null;
+    }
+}
+
+// Probe a stream's total size to tell a real file from the RD copyright stub.
 //
-// Range-first is both the most reliable and the fastest strategy:
-//   - A `Range: bytes=0-1` request makes the upstream answer 206 +
-//     `Content-Range: bytes 0-1/<total>`, so we learn the FULL size while
-//     transferring only 2 bytes — even for a multi-GB file.
-//   - The launcher CORS proxy forwards Range and exposes Content-Range
-//     (Access-Control-Expose-Headers) + sets Allow-Private-Network, so the
-//     206/Content-Range is readable cross-origin from the shell .exe.
-//
-// Some proxies strip Range and answer 200; we then fall back to Content-Length
-// (with a stub-band heuristic), and as a last resort retry once WITHOUT Range
-// (a plain GET, body aborted after headers) for proxies that only emit a
-// usable size on a non-range request.
+// Strategy, fastest/most-reliable first:
+//   1. Ranged GET (`Range: bytes=0-1`) → read Content-Range total (2-byte body).
+//   2. Same response's Content-Length (some proxies strip Range, answer 200).
+//   3. Retry once as a plain GET (some proxies only emit a size without Range).
+//   4. Body-measure the plain GET with a hard cap — works with NO size headers
+//      at all (the shell's chunked-stub case). Reads at most ~4 MB.
 async function probeContentLength(proxyUrl, signal, options = {}) {
     const useRange = options.useRange !== false;
     const controller = new AbortController();
@@ -159,12 +204,16 @@ async function probeContentLength(proxyUrl, signal, options = {}) {
             signal: controller.signal,
         });
 
-        // Proxy / upstream errors come back as HTML with a tiny Content-Length
-        // (e.g. 148 bytes). Without this guard those get misread as copyright
-        // stubs and good streams are skipped.
         if (res.status !== 200 && res.status !== 206) {
-            log('probe non-success', { status: res.status, contentLength: res.headers.get('content-length') });
+            log('probe non-success', { status: res.status, contentLength: res.headers.get('content-length'), useRange });
             controller.abort();
+            // A `Range` request makes some upstreams error — notably Torrentio's
+            // /resolve/realdebrid/... endpoint, which 302-redirects to the real
+            // RD file and 500s on a ranged GET even though a plain GET (what the
+            // player uses) succeeds. Retry once without Range, then body-measure.
+            if (useRange) {
+                return probeContentLength(proxyUrl, signal, { useRange: false });
+            }
             return null;
         }
 
@@ -175,44 +224,34 @@ async function probeContentLength(proxyUrl, signal, options = {}) {
             const m = contentRange.match(/\/(\d+)\s*$/);
             if (m) total = parseInt(m[1], 10);
         }
-        // Fall back to Content-Length when there is no Content-Range. Some CORS
-        // proxies (notably the launcher's bundled proxy in the shell .exe) do
-        // not forward the Range request header, so the upstream answers 200
-        // with the FULL size instead of 206 + Content-Range. The ~2 MB RD
-        // copyright stub is always in the 0.5–4 MB band regardless of whether
-        // the Content-Type is video/mp4 or application/octet-stream. Tiny HTML
-        // error pages (≈100 bytes) are ignored via the minimum-size floor.
         if (total === null) {
             const contentLength = res.headers.get('content-length');
             if (contentLength) {
-                const parsed = parseInt(contentLength, 10);
-                const STUB_MIN_BYTES = 512 * 1024; // 512 KB — well above error-page sizes
-                if (Number.isFinite(parsed) && parsed > 0) {
-                    if (parsed > STUB_KNOWN_MAX_BYTES) {
-                        total = parsed;
-                    } else if (parsed >= STUB_MIN_BYTES || /^video\//i.test(contentType)) {
-                        total = parsed;
-                    }
-                }
+                total = classifyProbedSize(parseInt(contentLength, 10), contentType);
             }
         }
 
         log('probe response', { status: res.status, contentType, contentRange, contentLength: res.headers.get('content-length'), total, useRange });
 
-        // We only needed the headers; don't pull the body.
-        controller.abort();
+        if (Number.isFinite(total)) {
+            controller.abort();
+            return total;
+        }
 
-        if (Number.isFinite(total)) return total;
-
-        // No usable size from the ranged probe — could be a 206 whose
-        // Content-Range was stripped cross-origin, or a proxy that drops Range
-        // and answers chunked (no Content-Length). Retry once as a plain GET;
-        // the body is aborted right after headers either way.
+        // No size from headers on the ranged probe — retry as a plain GET so we
+        // can read a length header or, failing that, measure the body.
         if (useRange) {
+            controller.abort();
             return probeContentLength(proxyUrl, signal, { useRange: false });
         }
 
-        return null;
+        // Plain GET, still no length header (shell chunked-stub case): measure
+        // the body. This is a NON-ranged request, so the body length equals the
+        // real resource size (capped). Do NOT abort before reading.
+        const measured = await measureBodyCapped(res, controller);
+        const verdict = classifyProbedSize(measured, contentType);
+        log('probe body-measured', { measured, verdict, contentType });
+        return verdict;
     } catch (err) {
         log('probe error', err && err.message);
         return null;
