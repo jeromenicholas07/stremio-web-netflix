@@ -13,6 +13,14 @@ const CONFIG_KEY = 'netflix_ui_autopick_config';
 const OVERRIDES_KEY = 'netflix_ui_autopick_overrides';
 const SESSION_KEY = 'netflix_ui_autopick_session';
 
+// Bump this to force a ONE-TIME reset of every existing install's GLOBAL
+// auto-pick config to the current getDefaultAutoPickSettings(). The stamp is
+// persisted next to the config; when it doesn't match we overwrite the config
+// once and re-stamp, after which the user's later edits stick again. Per-show
+// overrides are intentionally left untouched.
+const DEFAULTS_VERSION_KEY = 'netflix_ui_autopick_defaults_version';
+const CURRENT_DEFAULTS_VERSION = '2026-06-30-rd-torrentio';
+
 // ─── Canonical option catalogs ───
 // Quality buckets in default (highest-first) priority order. `other` is a
 // catch-all for anything we cannot confidently classify.
@@ -208,7 +216,26 @@ function normalizeSettings(input) {
 }
 
 // ─── Global settings ───
+// One-time reset of the stored global config to the current defaults. No-op
+// once the persisted stamp matches CURRENT_DEFAULTS_VERSION, so it runs at most
+// once per defaults bump and user edits made afterwards survive.
+function ensureGlobalDefaultsMigration() {
+    try {
+        if (getStorageItem('localStorage', DEFAULTS_VERSION_KEY) === CURRENT_DEFAULTS_VERSION) {
+            return;
+        }
+        const defaults = getDefaultAutoPickSettings();
+        setStorageItem('localStorage', CONFIG_KEY, JSON.stringify(defaults));
+        setStorageItem('localStorage', LEGACY_KEYS.enabled, String(defaults.enabled));
+        setStorageItem('localStorage', DEFAULTS_VERSION_KEY, CURRENT_DEFAULTS_VERSION);
+    } catch {
+        // Storage unavailable (private mode / tests) — nothing to migrate.
+    }
+}
+
 function getGlobalAutoPickSettings() {
+    ensureGlobalDefaultsMigration();
+
     const stored = getStorageItem('localStorage', CONFIG_KEY);
     if (stored) {
         return normalizeSettings(parseJson(stored, null));
@@ -372,17 +399,6 @@ function getEffectiveSourceKey(stream, settings) {
 function getTopEnabledSourceKey(settings) {
     const top = settings && settings.sources && settings.sources.find((source) => source.enabled);
     return top ? top.key : null;
-}
-
-function getSourcePriorityIndex(settings, sourceKey) {
-    const enabled = settings.sources.filter((source) => source.enabled);
-    const idx = enabled.findIndex((entry) => entry.key === sourceKey);
-    return idx === -1 ? Infinity : idx;
-}
-
-function isSourceLowerPriority(settings, sourceKey, thanSourceKey) {
-    if (!thanSourceKey || !sourceKey) return false;
-    return getSourcePriorityIndex(settings, sourceKey) > getSourcePriorityIndex(settings, thanSourceKey);
 }
 
 function hasStreamsForSource(streams, settings, sourceKey) {

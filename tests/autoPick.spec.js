@@ -82,6 +82,39 @@ describe('autoPick', () => {
         expect(global.sources.filter((s) => s.enabled).map((s) => s.key)).toEqual(['rd_plus', 'rd_download', 'torrentio']);
     });
 
+    it('resets an existing install to the tuned defaults exactly once', () => {
+        // Simulate an old install: auto-pick off with a hand-tuned source set
+        // and no defaults-version stamp.
+        global.localStorage.setItem('netflix_ui_autopick_config', JSON.stringify({
+            enabled: false,
+            englishOnly: false,
+            sources: [{ key: 'alldebrid', enabled: true }],
+            qualities: [{ key: '720p', enabled: true }],
+        }));
+
+        const migrated = autoPick.getGlobalAutoPickSettings();
+        expect(migrated.enabled).toBe(true);
+        expect(migrated.englishOnly).toBe(true);
+        expect(migrated.sources.filter((s) => s.enabled).map((s) => s.key)).toEqual(['rd_plus', 'rd_download', 'torrentio']);
+
+        // The reset is one-time: a later user change must persist, not snap back.
+        autoPick.setGlobalAutoPickSettings({ enabled: false });
+        expect(autoPick.getGlobalAutoPickSettings().enabled).toBe(false);
+    });
+
+    it('leaves per-show overrides untouched during the defaults reset', () => {
+        autoPick.setAutoPickOverride('series', 'tt999', {
+            ...makeSettings(['torrentio']),
+            enabled: true,
+        });
+        // Trigger the global reset.
+        autoPick.getGlobalAutoPickSettings();
+
+        const override = autoPick.getAutoPickOverride('series', 'tt999');
+        expect(override).not.toBe(null);
+        expect(override.sources.find(({ key }) => key === 'torrentio').enabled).toBe(true);
+    });
+
     it('migrates legacy per-show overrides into the ordered model', () => {
         autoPick.setGlobalAutoPickSettings({
             enabled: true,
