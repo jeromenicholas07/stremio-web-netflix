@@ -12,6 +12,7 @@ http.createServer((req, res) => {
             'Access-Control-Allow-Origin': '*',
             'Access-Control-Allow-Methods': '*',
             'Access-Control-Allow-Headers': '*',
+            'Access-Control-Allow-Private-Network': 'true',
             'Access-Control-Max-Age': '86400',
         });
         return res.end();
@@ -26,7 +27,11 @@ http.createServer((req, res) => {
     delete opts.headers['referer'];
 
     const proxy = http.request(opts, (pRes) => {
-        const h = { ...pRes.headers, 'access-control-allow-origin': '*' };
+        const h = {
+            ...pRes.headers,
+            'access-control-allow-origin': '*',
+            'access-control-allow-private-network': 'true',
+        };
         res.writeHead(pRes.statusCode, h);
         pRes.pipe(res);
     });

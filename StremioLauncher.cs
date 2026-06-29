@@ -123,7 +123,7 @@ class StremioLauncher
         // Without it GitHub Pages' max-age=600 pins a stale bundle for up to 10
         // minutes after every deploy (the service worker often does not control
         // navigations inside the Stremio shell webview).
-        const string WEB_UI_CACHE_VERSION = "2026-06-29-autopick-fix";
+        const string WEB_UI_CACHE_VERSION = "2026-06-29-rd-preflight";
         string webuiUrl = "https://jeromenicholas07.github.io/stremio-web-netflix/?v="
             + Uri.EscapeDataString(WEB_UI_CACHE_VERSION)
             + "#/?streamingServerUrl=" + Uri.EscapeDataString("http://127.0.0.1:12470/");
@@ -775,8 +775,12 @@ class StremioLauncher
         if (cors)
         {
             sb.Append("Access-Control-Allow-Origin: *\r\n");
-            sb.Append("Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n");
+            sb.Append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
             sb.Append("Access-Control-Allow-Headers: *\r\n");
+            // Required when the web UI (GitHub Pages, a public origin) fetches
+            // this loopback proxy — Chrome's Private Network Access blocks
+            // https://public → http://127.0.0.1 without this on the preflight.
+            sb.Append("Access-Control-Allow-Private-Network: true\r\n");
         }
         if (contentType != null)
             sb.AppendFormat("Content-Type: {0}\r\n", contentType);
@@ -1066,6 +1070,8 @@ class StremioLauncher
                     // read them. Content-Length is CORS-safelisted, but
                     // Content-Range / Accept-Ranges are not without this.
                     sb.Append("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges, Content-Type\r\n");
+                    // PNA: allow public-origin web UI to reach this loopback proxy.
+                    sb.Append("Access-Control-Allow-Private-Network: true\r\n");
                     if (upstream.ContentType != null)
                         sb.AppendFormat("Content-Type: {0}\r\n", upstream.ContentType);
                     if (upstream.ContentLength >= 0)

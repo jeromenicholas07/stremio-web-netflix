@@ -127,9 +127,21 @@ function isStubSize(contentLength) {
     return contentLength <= STUB_KNOWN_MAX_BYTES;
 }
 
+function shouldUseRangeProbe(fetchBase) {
+    // Cross-origin fetch to the loopback CORS proxy: skip Range so the
+    // response is 200 + full Content-Length (CORS-safelisted) instead of
+    // 206 + Content-Range (often unreadable cross-origin). Also avoids
+    // PNA/CORS preflight complexity for a tiny probe.
+    if (typeof fetchBase === 'string' && /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/?$/i.test(fetchBase)) {
+        return false;
+    }
+    return true;
+}
+
 // Issue a tiny ranged GET through the proxy and read the total byte size from
 // Content-Range (preferred) or Content-Length, then abort the body download.
-async function probeContentLength(proxyUrl, signal) {
+async function probeContentLength(proxyUrl, signal, options = {}) {
+    const useRange = options.useRange !== false && shouldUseRangeProbe(options.fetchBase);
     const controller = new AbortController();
     const onAbort = () => controller.abort();
     if (signal) {
@@ -141,7 +153,7 @@ async function probeContentLength(proxyUrl, signal) {
     try {
         const res = await fetch(proxyUrl, {
             method: 'GET',
-            headers: { Range: 'bytes=0-1' },
+            headers: useRange ? { Range: 'bytes=0-1' } : {},
             signal: controller.signal,
         });
 
@@ -183,12 +195,19 @@ async function probeContentLength(proxyUrl, signal) {
             }
         }
 
-        log('probe response', { status: res.status, contentType, contentRange, contentLength: res.headers.get('content-length'), total });
+        log('probe response', { status: res.status, contentType, contentRange, contentLength: res.headers.get('content-length'), total, useRange });
 
         // We only needed the headers; don't pull the body.
         controller.abort();
 
-        return Number.isFinite(total) ? total : null;
+        if (Number.isFinite(total)) return total;
+
+        // 206 but Content-Range not readable cross-origin — retry without Range.
+        if (useRange && res.status === 206) {
+            return probeContentLength(proxyUrl, signal, { useRange: false, fetchBase: options.fetchBase });
+        }
+
+        return null;
     } catch (err) {
         log('probe error', err && err.message);
         return null;
@@ -228,7 +247,7 @@ async function preflightAutoPickStream({ core, stream, ssBaseUrl, signal } = {})
         const proxyUrl = buildProxyUrl(fetchBase, url, proxyHeaders);
         log('preflighting', { name: stream && stream.name, url, fetchBase });
 
-        const contentLength = await probeContentLength(proxyUrl, signal);
+        const contentLength = await probeContentLength(proxyUrl, signal, { fetchBase });
         if (contentLength === null) return { skipped: true, reason: 'no-size' };
 
         const blocked = isStubSize(contentLength);

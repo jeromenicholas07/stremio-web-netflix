@@ -98,6 +98,28 @@ describe('streamPreflight', () => {
         global.fetch = originalFetch;
     });
 
+    it('probes without Range against loopback CORS proxy (200 + full stub size)', async () => {
+        const originalFetch = global.fetch;
+        const headers = {
+            'content-type': 'application/octet-stream',
+            'content-length': '2119075',
+        };
+        global.fetch = jest.fn().mockResolvedValue({
+            status: 200,
+            headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+        });
+
+        const total = await probeContentLength(
+            'http://127.0.0.1:12470/proxy/test',
+            null,
+            { fetchBase: 'http://127.0.0.1:12470' },
+        );
+        expect(total).toBe(2119075);
+        expect(global.fetch.mock.calls[0][1].headers).toEqual({});
+
+        global.fetch = originalFetch;
+    });
+
     it('ignores a tiny HTML error body served as 200 (does not treat it as a stub)', async () => {
         const originalFetch = global.fetch;
         const headers = {
