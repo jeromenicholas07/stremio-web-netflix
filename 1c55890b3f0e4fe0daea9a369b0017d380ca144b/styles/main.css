@@ -6152,10 +6152,21 @@ kbd {
   align-items: center;
   gap: 0.55rem;
   padding: 0.5rem 0.7rem;
-  cursor: pointer;
 }
-.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-header-guNni:hover {
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-header-guNni .autopick-header-main-uU0fH {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  cursor: pointer;
+  border-radius: 0.4rem;
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-header-guNni .autopick-header-main-uU0fH:hover {
   background-color: rgba(255, 255, 255, 0.04);
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-header-guNni .autopick-header-toggle-kyfXQ {
+  flex: none;
 }
 .streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-header-guNni .autopick-status-dot-OSrLG {
   flex: none;
