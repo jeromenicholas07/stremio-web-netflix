@@ -8,6 +8,7 @@ const traktBridge = require('stremio/services/TraktBridge');
 const {
     getGlobalAutoPickSettings,
     setGlobalAutoPickSettings,
+    normalizeSettings,
 } = require('stremio/common/autoPick');
 
 const TMDB_BASE = 'https://api.themoviedb.org/3';
@@ -17,9 +18,16 @@ function getSetting(key: string, fallback: string): string {
     catch { return fallback; }
 }
 
-function setSetting(key: string, value: string): void {
-    try { localStorage.setItem(key, value); }
-    catch { /* silent */ }
+// Returns whether the value actually persisted. localStorage.setItem can throw
+// (quota) or silently no-op, so we read it back and confirm — that's what makes
+// the "Saved" indicator honest instead of showing on a failed write.
+function setSetting(key: string, value: string): boolean {
+    try {
+        localStorage.setItem(key, value);
+        return localStorage.getItem(key) === value;
+    } catch {
+        return false;
+    }
 }
 
 const TRAILER_SOURCES = [
@@ -123,6 +131,21 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
         setTimeout(() => setSaved(false), 1500);
     }, []);
 
+    // Honest save feedback: only flash "Saved" when the write actually stuck;
+    // otherwise surface why (the localStorage quota is full).
+    const reportSave = useCallback((ok: boolean) => {
+        if (ok) {
+            flashSaved();
+        } else {
+            toast?.show?.({
+                type: 'error',
+                title: 'Not saved',
+                message: 'Browser storage is full — could not save this setting.',
+                timeout: 5000,
+            });
+        }
+    }, [flashSaved, toast]);
+
     // Verify stored token on mount
     useEffect(() => {
         if (traktBridge.isConnected() && authState.phase === 'connected') {
@@ -217,33 +240,34 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     const onTmdbKeyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value.trim();
         setTmdbKey(val);
-        setSetting('tmdb_api_key', val);
-        flashSaved();
-    }, []);
+        reportSave(setSetting('tmdb_api_key', val));
+    }, [reportSave]);
 
     const onTrailerSourceChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
         setTrailerSource(e.target.value);
-        setSetting('netflix_ui_trailer_source', e.target.value);
-        flashSaved();
-    }, []);
+        reportSave(setSetting('netflix_ui_trailer_source', e.target.value));
+    }, [reportSave]);
 
     const onTrailerLangChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
         setTrailerLang(e.target.value);
-        setSetting('netflix_ui_trailer_lang', e.target.value);
-        flashSaved();
-    }, []);
+        reportSave(setSetting('netflix_ui_trailer_lang', e.target.value));
+    }, [reportSave]);
 
     const onRecSourceChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
         setRecSource(e.target.value);
-        setSetting('netflix_ui_rec_source', e.target.value);
-        flashSaved();
-    }, []);
+        reportSave(setSetting('netflix_ui_rec_source', e.target.value));
+    }, [reportSave]);
 
     const onAutoPickChange = useCallback((next: any) => {
         setAutoPick(next);
         setGlobalAutoPickSettings(next);
-        flashSaved();
-    }, []);
+        // Confirm it actually persisted (localStorage quota can silently fail).
+        let persisted = false;
+        try {
+            persisted = JSON.stringify(getGlobalAutoPickSettings()) === JSON.stringify(normalizeSettings(next));
+        } catch { persisted = false; }
+        reportSave(persisted);
+    }, [reportSave]);
 
     // ─── Debug toggle ───
     // Stored in localStorage for the in-app indicator + posted to the launcher's
@@ -253,8 +277,7 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     const onDebugToggle = useCallback(() => {
         const next = !debugEnabled;
         setDebugEnabled(next);
-        setSetting('netflix_ui_debug', String(next));
-        flashSaved();
+        reportSave(setSetting('netflix_ui_debug', String(next)));
         fetch('http://127.0.0.1:12470/_launcher/debug', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -272,7 +295,7 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
                 timeout: 5000,
             });
         });
-    }, [debugEnabled, toast]);
+    }, [debugEnabled, toast, reportSave]);
 
     // ─── Sync Trakt Data ───
     const syncTraktData = useCallback(async () => {
