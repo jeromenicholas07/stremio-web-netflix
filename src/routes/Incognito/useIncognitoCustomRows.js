@@ -20,7 +20,11 @@ const ROWS_KEY = 'incognito_custom_rows';
 const CACHE_PREFIX = 'incognito_custom_row_cache_v2:';
 const FRESH_TTL_MS = 3 * 60 * 60 * 1000;
 const STALE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const MAX_PER_ROW = 300;
+// Bounds per-row localStorage use. A horizontal row only ever shows a few
+// dozen items, and each cached meta is ~3 KB, so 300 made a single row ~900 KB
+// and helped blow the shared localStorage quota. 120 is still far more than is
+// ever scrolled while keeping each row cache well under ~400 KB.
+const MAX_PER_ROW = 120;
 const ROWS_CHANGED_EVENT = 'incognito:custom-rows-changed';
 
 const ADDON_URL_KEY = 'incognito_addon_url';
@@ -40,7 +44,7 @@ function readRows() {
         if (!raw) return [];
         const parsed = JSON.parse(raw);
         if (!Array.isArray(parsed)) return [];
-        return parsed.filter(r => r && typeof r.id === 'string' && typeof r.query === 'string');
+        return parsed.filter((r) => r && typeof r.id === 'string' && typeof r.query === 'string');
     } catch (_e) {
         return [];
     }
@@ -148,7 +152,7 @@ function useIncognitoCustomRows() {
         let cancelled = false;
 
         // Seed state for any newly-added rows.
-        setDataById(prev => {
+        setDataById((prev) => {
             const next = { ...prev };
             for (const r of rows) {
                 if (!next[r.id]) {
@@ -159,7 +163,7 @@ function useIncognitoCustomRows() {
                 }
             }
             // Drop state for removed rows so the map doesn't grow forever.
-            const keep = new Set(rows.map(r => r.id));
+            const keep = new Set(rows.map((r) => r.id));
             for (const key of Object.keys(next)) if (!keep.has(key)) delete next[key];
             return next;
         });
@@ -176,7 +180,7 @@ function useIncognitoCustomRows() {
                     if (cancelled) return;
                     const merged = mergeMetas(cached ? cached.metas : [], metas);
                     writeCache(row.id, merged);
-                    setDataById(prev => ({
+                    setDataById((prev) => ({
                         ...prev,
                         [row.id]: { status: 'ready', metas: merged },
                     }));
@@ -184,7 +188,7 @@ function useIncognitoCustomRows() {
                     if (err.name === 'AbortError' || cancelled) return;
                     // On error, keep showing stale data if we have it;
                     // only flip to 'error' on a true cold miss.
-                    setDataById(prev => ({
+                    setDataById((prev) => ({
                         ...prev,
                         [row.id]: cached
                             ? { status: 'ready', metas: cached.metas }
@@ -199,7 +203,7 @@ function useIncognitoCustomRows() {
 
     // Shape each row as a MetaRow catalog so the main view can render it
     // with the same component it uses for manifest catalogs.
-    const customCatalogs = React.useMemo(() => rows.map(row => {
+    const customCatalogs = React.useMemo(() => rows.map((row) => {
         const data = dataById[row.id] || { status: 'loading', metas: [] };
         return {
             id: `custom:${row.id}`,
@@ -236,7 +240,7 @@ function addCustomRow({ name, query }) {
 
 function updateCustomRow(id, patch) {
     const rows = readRows();
-    const i = rows.findIndex(r => r.id === id);
+    const i = rows.findIndex((r) => r.id === id);
     if (i < 0) return;
     const prev = rows[i];
     const nextRow = { ...prev, ...patch };
@@ -249,7 +253,7 @@ function updateCustomRow(id, patch) {
 }
 
 function removeCustomRow(id) {
-    const next = readRows().filter(r => r.id !== id);
+    const next = readRows().filter((r) => r.id !== id);
     writeRows(next);
     clearCache(id);
 }

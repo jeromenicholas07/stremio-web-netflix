@@ -15,12 +15,12 @@ window.initShellComm = function() {
     // This stub satisfies the shell's load-time check.
 };
 
-// Clean up deprecated localStorage keys — Trakt is now the single source of truth
+// Prune localStorage at startup: drop superseded legacy keys (deprecated
+// watchlist/ratings keys, old Incognito/TMDB cache versions) and budget-evict
+// the largest rebuildable caches so they can't fill the shared ~5 MB quota and
+// break stremio-core's writes or small settings (auto-pick, debug).
 try {
-    localStorage.removeItem('stremio_watchlist');
-    localStorage.removeItem('stremio_not_interested');
-    localStorage.removeItem('stremio_ratings');
-    localStorage.removeItem('stremio_dismissed_names');
+    require('stremio/common/pruneStorage').pruneStorage();
 } catch { /* */ }
 
 const Bowser = require('bowser');
