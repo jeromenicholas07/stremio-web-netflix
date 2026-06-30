@@ -36,19 +36,71 @@ const GENRE_MAP = {
     10765: 'Sci-Fi & Fantasy', 10766: 'Soap', 10767: 'Talk', 10768: 'War & Politics',
 };
 
+// ── IndexedDB-backed blob store ──────────────────────────────────────────
+// The persistent cache lives in IndexedDB (hundreds-of-MB quota), NOT in the
+// shared ~5 MB localStorage that stremio-core needs for its `library`,
+// `streaming_server_urls`, etc. Keeping a multi-MB TMDB blob in localStorage
+// repeatedly blew that quota and broke core's writes. We store the whole cache
+// as a single structured-clone value under one key. Falls back to a
+// size-budgeted localStorage blob only when IndexedDB is unavailable.
+const IDB_NAME = 'tmdb_cache';
+const IDB_STORE = 'kv';
+const IDB_BLOB_KEY = 'persist_v1';
+
+function idbAvailable() {
+    try { return typeof indexedDB !== 'undefined' && indexedDB !== null; } catch { return false; }
+}
+
+function idbOpen() {
+    return new Promise((resolve, reject) => {
+        try {
+            const req = indexedDB.open(IDB_NAME, 1);
+            req.onupgradeneeded = () => {
+                const db = req.result;
+                if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        } catch (e) { reject(e); }
+    });
+}
+
+async function idbGet(key) {
+    const db = await idbOpen();
+    try {
+        return await new Promise((resolve, reject) => {
+            const req = db.transaction(IDB_STORE, 'readonly').objectStore(IDB_STORE).get(key);
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    } finally { db.close(); }
+}
+
+async function idbSet(key, value) {
+    const db = await idbOpen();
+    try {
+        return await new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            tx.objectStore(IDB_STORE).put(value, key);
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+            tx.onabort = () => reject(tx.error);
+        });
+    } finally { db.close(); }
+}
+
 class TMDBService {
     constructor() {
         this._cache = new Map();
         this._imdbCache = new Map(); // tmdbId → imdbId (mirrors persistent cache)
-        this._persist = this._loadPersist();
-        // An older build capped this cache by entry count only, so existing
-        // installs can carry a multi-MB blob that has already blown the shared
-        // localStorage quota (breaking stremio-core's library writes + small
-        // settings). Trim it back under budget immediately on startup so the
-        // rest of the app regains room without waiting for the next row fetch.
-        if (JSON.stringify(this._persist).length > PERSIST_MAX_BYTES) {
-            this._savePersist();
-        }
+        // In-memory cache starts empty and is hydrated asynchronously from
+        // IndexedDB (migrating any legacy localStorage blob). Lookups before
+        // hydration completes simply miss and refetch — correct, just colder.
+        this._persist = {};
+        this._useIdb = idbAvailable();
+        this._persistDirty = false;
+        this._persistFlushTimer = null;
+        this._persistReady = this._hydratePersist();
 
         // ─── Request flow control ────────────────────────────────
         // In-flight deduplication: coalesce concurrent callers for the same
@@ -65,11 +117,6 @@ class TMDBService {
         // Global pause until <ms timestamp>. Set by 429 responses; every
         // outgoing fetch waits past this point before hitting the network.
         this._pauseUntil = 0;
-
-        // Persist writes are O(n) over the whole cache — throttle so a burst
-        // of cacheable lookups doesn't synchronously serialize the cache N times.
-        this._persistDirty = false;
-        this._persistFlushTimer = null;
     }
 
     // ── Concurrency semaphore ──
@@ -96,9 +143,9 @@ class TMDBService {
         }
     }
 
-    // --- Persistent cache (localStorage) for stable lookups ---
+    // --- Persistent cache (IndexedDB, with a localStorage fallback) ---
 
-    _loadPersist() {
+    _loadPersistFromLocalStorage() {
         try {
             const raw = localStorage.getItem(PERSIST_KEY);
             if (!raw) return {};
@@ -109,8 +156,37 @@ class TMDBService {
         }
     }
 
+    // Load the cache from IndexedDB, migrating the legacy localStorage blob once
+    // and then deleting it so its space is returned to stremio-core. Anything
+    // written into this._persist before hydration finishes is preserved.
+    async _hydratePersist() {
+        if (this._useIdb) {
+            try {
+                let blob = await idbGet(IDB_BLOB_KEY);
+                if (!blob || typeof blob !== 'object') {
+                    // First run on IDB — import the legacy localStorage cache.
+                    const legacy = this._loadPersistFromLocalStorage();
+                    if (legacy && Object.keys(legacy).length > 0) {
+                        blob = legacy;
+                        try { await idbSet(IDB_BLOB_KEY, blob); } catch { /* keep going */ }
+                    }
+                }
+                // The legacy localStorage blob is the quota hog — drop it whether
+                // or not it had data, now that IndexedDB owns the cache.
+                try { localStorage.removeItem(PERSIST_KEY); } catch { /* */ }
+                if (blob && typeof blob === 'object') {
+                    this._persist = Object.assign(blob, this._persist);
+                }
+                return;
+            } catch {
+                this._useIdb = false; // IndexedDB unusable — fall back below.
+            }
+        }
+        const ls = this._loadPersistFromLocalStorage();
+        this._persist = Object.assign(ls, this._persist);
+    }
+
     // Drop the oldest entries until the callback reports we're within budget.
-    // Returns the final serialized string so callers can write it directly.
     _evictOldestUntil(withinBudget) {
         let serialized = JSON.stringify(this._persist);
         while (!withinBudget(serialized)) {
@@ -128,7 +204,7 @@ class TMDBService {
     }
 
     _savePersist() {
-        // First pass: cap entry count via LRU.
+        // Cap entry count via LRU regardless of backend.
         const keys = Object.keys(this._persist);
         if (keys.length > PERSIST_MAX_ENTRIES) {
             const sorted = keys
@@ -137,18 +213,30 @@ class TMDBService {
             const toRemove = sorted.slice(0, keys.length - PERSIST_MAX_ENTRIES);
             for (const { k } of toRemove) delete this._persist[k];
         }
-        // Second pass: cap the serialized SIZE. This is what keeps the cache
-        // from crowding out stremio-core's library writes + small settings and
-        // blowing the shared quota — an entry-count cap can't bound bytes.
-        let serialized = this._evictOldestUntil((s) => s.length <= PERSIST_MAX_BYTES);
+
+        if (this._useIdb) {
+            // IndexedDB has a large quota — persist the whole cache as one blob.
+            // On any runtime failure, fall back to the size-budgeted
+            // localStorage path so we never lose the cache entirely.
+            idbSet(IDB_BLOB_KEY, this._persist).catch(() => {
+                this._useIdb = false;
+                this._savePersistToLocalStorage();
+            });
+            return;
+        }
+        this._savePersistToLocalStorage();
+    }
+
+    _savePersistToLocalStorage() {
+        // Cap the serialized SIZE so the cache can't crowd out stremio-core's
+        // writes and blow the shared quota — an entry-count cap can't bound bytes.
+        const serialized = this._evictOldestUntil((s) => s.length <= PERSIST_MAX_BYTES);
         try {
             localStorage.setItem(PERSIST_KEY, serialized);
             return;
         } catch { /* fall through to graceful eviction */ }
 
         // Quota error: drop the oldest 25% and retry once before nuking.
-        // Avoids the previous "nuke everything" behavior that wiped warm
-        // logo/trailer caches the moment a single big row pushed us over.
         try {
             const remaining = Object.keys(this._persist)
                 .map((k) => ({ k, t: this._persist[k].time || 0 }))
