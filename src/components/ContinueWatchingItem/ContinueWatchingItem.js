@@ -50,8 +50,14 @@ const ContinueWatchingItem = ({ _id, notifications, type, name, ...props }) => {
             }
         });
 
-        // Sync to Trakt: mark as watched so it leaves "currently watching"
-        if (traktBridge.isConfigured()) {
+        // Sync to Trakt: mark as watched so it leaves "currently watching".
+        // But NOT for "move to another list" actions: adding to the watchlist or
+        // marking not-interested must not mark the item watched. In particular,
+        // Trakt auto-removes watched items from the watchlist, so marking watched
+        // here would silently undo an "Add to watchlist" — the item vanishes from
+        // Continue Watching but never lands in the watchlist.
+        const marksWatched = actionType !== 'watchlist' && actionType !== 'not-interested';
+        if (marksWatched && traktBridge.isConfigured()) {
             const itemType = (type === 'series' || type === 'tv') ? 'series' : 'movie';
             traktBridge.markWatched(_id, itemType).catch((err) => {
                 console.warn('Trakt CW markWatched failed:', err.message);
