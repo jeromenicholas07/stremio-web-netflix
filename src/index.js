@@ -29,6 +29,13 @@ if (browser?.platform?.type === 'desktop') {
     document.querySelector('meta[name="viewport"]')?.setAttribute('content', '');
 }
 
+// iOS standalone PWAs can report env(safe-area-inset-*) as 0 on notched devices,
+// hiding the top nav under the notch. Apply a screen-size-based fallback before
+// the UI paints. No-op on every non-iOS-standalone context.
+try {
+    require('stremio/common/iosSafeArea')();
+} catch { /* */ }
+
 const React = require('react');
 const ReactDOM = require('react-dom/client');
 const i18n = require('i18next');

@@ -158,7 +158,12 @@
 
 @media only screen and (max-width: @minimum) {
     .horizontal-nav-bar-container {
-        padding: 0 1rem;
+        // Only override the horizontal padding here — using the `padding`
+        // shorthand would reset padding-top back to 0 and clobber the
+        // `padding-top: var(--safe-area-inset-top)` set above, pushing the nav
+        // (search, account) under the notch on phones.
+        padding-left: 1rem;
+        padding-right: 1rem;
 
         .nav-links {
             display: none;
