@@ -1427,6 +1427,56 @@
   mask-image: linear-gradient(90deg, rgba(0, 0, 0, 0) 0%, #000000 10%, #000000 calc(100% - 10%), rgba(0, 0, 0, 0) 100%);
 }
 
+.ios-install-banner-yDref {
+  flex: none;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 1rem;
+  margin: 1rem;
+  padding: 1rem 1.2rem;
+  border-radius: 1rem;
+  background-color: var(--overlay-color, rgba(255, 255, 255, 0.08));
+}
+.ios-install-banner-yDref .share-icon-_IDK6 {
+  flex: none;
+  width: 2rem;
+  height: 2rem;
+  color: var(--primary-foreground-color);
+}
+.ios-install-banner-yDref .text-L3UhT {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.ios-install-banner-yDref .text-L3UhT .title-Y0NZv {
+  font-size: 1.2rem;
+  font-weight: 600;
+  color: var(--primary-foreground-color);
+}
+.ios-install-banner-yDref .text-L3UhT .subtitle-QVvnl {
+  font-size: 1rem;
+  color: var(--secondary-foreground-color, rgba(255, 255, 255, 0.65));
+}
+.ios-install-banner-yDref .dismiss-Q8uzH {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 44px;
+}
+.ios-install-banner-yDref .dismiss-Q8uzH:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+}
+.ios-install-banner-yDref .dismiss-Q8uzH .dismiss-icon-qIrs8 {
+  width: 1.4rem;
+  height: 1.4rem;
+  color: var(--primary-foreground-color);
+}
+
 .text-input-hnLiz {
   user-select: text;
 }
@@ -7987,6 +8037,46 @@ html.active-slider-within-NcgYf{cursor:grabbing}html.active-slider-within-NcgYf 
 .error-ty_iB .playlist-button-tZTCo .label-Z7jSJ {
   flex: 1;
   max-height: 2.4em;
+  font-size: 1.1rem;
+  font-weight: 500;
+  color: var(--primary-foreground-color);
+  text-align: center;
+}
+.error-ty_iB .external-players-krBX0 {
+  flex: none;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding: 0 1.5rem;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.error-ty_iB .external-players-krBX0 .external-player-button-LUMnV {
+  flex: none;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  min-height: 44px;
+  border-radius: 3.5rem;
+  padding: 0 1.6rem;
+  background-color: var(--secondary-accent-color);
+}
+.error-ty_iB .external-players-krBX0 .external-player-button-LUMnV:hover {
+  outline: var(--focus-outline-size) solid var(--secondary-accent-color);
+  background-color: transparent;
+}
+.error-ty_iB .external-players-krBX0 .external-player-button-LUMnV .icon-fIGRf {
+  flex: none;
+  width: 1.4rem;
+  height: 1.4rem;
+  margin-right: 0.7rem;
+  color: var(--primary-foreground-color);
+}
+.error-ty_iB .external-players-krBX0 .external-player-button-LUMnV .label-Z7jSJ {
+  flex: none;
   font-size: 1.1rem;
   font-weight: 500;
   color: var(--primary-foreground-color);
