@@ -19,6 +19,14 @@
 // server, network/CORS error, missing size) returns `skipped` so playback is
 // never blocked by the preflight itself.
 
+const isIOS = require('./isIOS');
+
+// Optional free Cloudflare Worker CORS proxy (see worker/). On iOS there is no
+// local streaming server or launcher to size-probe through, so — when the Worker
+// is configured — the probe routes through its /size endpoint instead. Every
+// other platform is untouched.
+const CORS_PROXY_URL = process.env.CORS_PROXY_URL || null;
+
 // The Torrentio/RD copyright clip is a fixed ~2 MB file. We treat any probed
 // total at or below this ceiling as the stub. A real episode/movie is always
 // far larger, so this single, narrow rule cannot false-positive on a genuine
@@ -306,6 +314,40 @@ async function probeSizeViaLauncher(fetchBase, url, proxyHeaders, signal) {
     }
 }
 
+// iOS path: ask the Cloudflare Worker to size the stream server-side. Like the
+// launcher, the Worker follows the resolve→RD redirect chain the browser can't
+// see and returns { size, contentType }. Returns null on any error (fail open).
+async function probeSizeViaWorker(workerBase, url, proxyHeaders, signal) {
+    const params = new URLSearchParams();
+    params.set('u', url);
+    if (proxyHeaders && proxyHeaders.request) {
+        Object.entries(proxyHeaders.request).forEach(([key, value]) => params.append('h', `${key}:${value}`));
+    }
+    const probeUrl = `${workerBase.replace(/\/+$/, '')}/size?${params.toString()}`;
+
+    const controller = new AbortController();
+    const onAbort = () => controller.abort();
+    if (signal) {
+        if (signal.aborted) controller.abort();
+        else signal.addEventListener('abort', onAbort);
+    }
+    const timer = setTimeout(() => controller.abort(), PREFLIGHT_TIMEOUT_MS + 8000);
+
+    try {
+        const res = await fetch(probeUrl, { method: 'GET', signal: controller.signal });
+        if (!res.ok) return null;
+        const data = await res.json().catch(() => null);
+        if (!data || typeof data.size !== 'number') return null;
+        return { size: data.size, contentType: data.contentType || '' };
+    } catch (err) {
+        log('worker probe error', err && err.message);
+        return null;
+    } finally {
+        clearTimeout(timer);
+        if (signal) signal.removeEventListener('abort', onAbort);
+    }
+}
+
 // Preflight a single auto-pick candidate.
 //
 // Returns one of:
@@ -331,6 +373,19 @@ async function preflightAutoPickStream({ core, stream, ssBaseUrl, signal } = {})
         }
 
         const proxyHeaders = decoded.behaviorHints && decoded.behaviorHints.proxyHeaders;
+
+        // iOS: no local streaming server / launcher exists. When a CORS proxy
+        // Worker is configured, size-probe through it; otherwise fail open. This
+        // branch never runs on desktop/web/shell (isIOS() is false there).
+        if (isIOS() && CORS_PROXY_URL) {
+            const worker = await probeSizeViaWorker(CORS_PROXY_URL, url, proxyHeaders, signal);
+            if (!worker) return { skipped: true, reason: 'worker-unavailable' };
+            const total = classifyProbedSize(worker.size, worker.contentType);
+            if (total === null) return { skipped: true, reason: 'worker-ambiguous' };
+            const blocked = isStubSize(total);
+            log('verdict (worker)', { name: stream && stream.name, blocked, size: worker.size, contentType: worker.contentType });
+            return { blocked, contentLength: total };
+        }
 
         const fetchBase = getFetchBase(ssBaseUrl);
         log('preflighting', { name: stream && stream.name, url, fetchBase });

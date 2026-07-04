@@ -1,0 +1,7 @@
+name = "stremio-ios-cors-proxy"
+main = "index.js"
+compatibility_date = "2024-11-01"
+
+# Optional: extend the /size probe allowlist without editing code.
+# [vars]
+# SIZE_ALLOW_HOSTS = "example-addon.com,another-debrid.net"

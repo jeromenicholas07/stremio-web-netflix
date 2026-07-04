@@ -35,6 +35,10 @@ REPO="jeromenicholas07/stremio-web-netflix"
 REMOTE="fork"
 SOURCE_BRANCH="netflix-redesign"
 PUBLIC_PATH="/stremio-web-netflix/"
+# Free Cloudflare Worker CORS proxy (worker/). Enables Trakt sync + auto-pick
+# copyright preflight on iOS Safari. Public URL, safe to commit. Override by
+# exporting CORS_PROXY_URL before running this script.
+CORS_PROXY_URL="${CORS_PROXY_URL:-https://stremio-ios-cors-proxy.jeromenicholas07.workers.dev}"
 MSG="${1:-Deploy update}"
 
 echo "=== Step 1: Ensure we're on $SOURCE_BRANCH ==="
@@ -45,7 +49,7 @@ pnpm install
 
 echo "=== Step 3: Build with correct PUBLIC_PATH ==="
 # MSYS_NO_PATHCONV prevents Git Bash from mangling the path
-MSYS_NO_PATHCONV=1 PUBLIC_PATH="$PUBLIC_PATH" pnpm build
+MSYS_NO_PATHCONV=1 PUBLIC_PATH="$PUBLIC_PATH" CORS_PROXY_URL="$CORS_PROXY_URL" pnpm build
 
 echo "=== Step 4: Verify build output ==="
 HASH=$(ls build/ | grep -E '^[0-9a-f]{10,}$' | head -1)

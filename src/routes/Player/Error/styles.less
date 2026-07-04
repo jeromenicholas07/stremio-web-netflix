@@ -61,4 +61,51 @@
             text-align: center;
         }
     }
+
+    // iOS branded external-player redirect row. Wraps on narrow iPhone widths and
+    // keeps each pill comfortably above the 44px touch-target minimum.
+    .external-players {
+        flex: none;
+        display: flex;
+        flex-direction: row;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        gap: 1rem;
+        margin-top: 1.5rem;
+        padding: 0 1.5rem;
+        padding-bottom: env(safe-area-inset-bottom);
+
+        .external-player-button {
+            flex: none;
+            display: flex;
+            flex-direction: row;
+            align-items: center;
+            min-height: 44px;
+            border-radius: 3.5rem;
+            padding: 0 1.6rem;
+            background-color: var(--secondary-accent-color);
+
+            &:hover {
+                outline: var(--focus-outline-size) solid var(--secondary-accent-color);
+                background-color: transparent;
+            }
+
+            .icon {
+                flex: none;
+                width: 1.4rem;
+                height: 1.4rem;
+                margin-right: 0.7rem;
+                color: var(--primary-foreground-color);
+            }
+
+            .label {
+                flex: none;
+                font-size: 1.1rem;
+                font-weight: 500;
+                color: var(--primary-foreground-color);
+                text-align: center;
+            }
+        }
+    }
 }

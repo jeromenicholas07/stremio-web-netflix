@@ -6,10 +6,13 @@ const PropTypes = require('prop-types');
 const classNames = require('classnames');
 const { default: Icon } = require('@stremio/stremio-icons/react');
 const { Button } = require('stremio/components');
+const { usePlatform } = require('stremio/common/Platform');
+const { IOS_EXTERNAL_PLAYERS, getExternalMediaUrl } = require('stremio/common/iosExternalPlayers');
 const styles = require('./styles');
 
 const Error = React.forwardRef(({ className, code, message, stream }, ref) => {
     const { t } = useTranslation();
+    const platform = usePlatform();
 
     const [playlist, fileName] = React.useMemo(() => {
         return [
@@ -17,6 +20,13 @@ const Error = React.forwardRef(({ className, code, message, stream }, ref) => {
             stream?.deepLinks?.externalPlayer?.fileName,
         ];
     }, [stream]);
+
+    // iOS: Safari can't decode MKV/HEVC/AC3 inline, so offer one-tap hand-off to
+    // the native player apps (Infuse/VLC/…) via their URL schemes. Desktop keeps
+    // the single generic "open in external player" button below.
+    const iosMediaUrl = React.useMemo(() => {
+        return platform.name === 'ios' ? getExternalMediaUrl(stream?.deepLinks?.externalPlayer) : null;
+    }, [platform.name, stream]);
 
     return (
         <div ref={ref} className={classNames(className, styles['error'])}>
@@ -28,19 +38,36 @@ const Error = React.forwardRef(({ className, code, message, stream }, ref) => {
                     null
             }
             {
-                playlist && fileName ?
-                    <Button
-                        className={styles['playlist-button']}
-                        title={t('PLAYER_OPEN_IN_EXTERNAL')}
-                        href={playlist}
-                        download={fileName}
-                        target={'_blank'}
-                    >
-                        <Icon className={styles['icon']} name={'ic_downloads'} />
-                        <div className={styles['label']}>{t('PLAYER_OPEN_IN_EXTERNAL')}</div>
-                    </Button>
+                iosMediaUrl ?
+                    <div className={styles['external-players']}>
+                        {
+                            IOS_EXTERNAL_PLAYERS.map((player) => (
+                                <Button
+                                    key={player.value}
+                                    className={styles['external-player-button']}
+                                    title={player.label}
+                                    href={player.build(iosMediaUrl)}
+                                >
+                                    <Icon className={styles['icon']} name={player.icon} />
+                                    <div className={styles['label']}>{player.label}</div>
+                                </Button>
+                            ))
+                        }
+                    </div>
                     :
-                    null
+                    playlist && fileName ?
+                        <Button
+                            className={styles['playlist-button']}
+                            title={t('PLAYER_OPEN_IN_EXTERNAL')}
+                            href={playlist}
+                            download={fileName}
+                            target={'_blank'}
+                        >
+                            <Icon className={styles['icon']} name={'ic_downloads'} />
+                            <div className={styles['label']}>{t('PLAYER_OPEN_IN_EXTERNAL')}</div>
+                        </Button>
+                        :
+                        null
             }
         </div>
     );

@@ -5,7 +5,7 @@ const classnames = require('classnames');
 const debounce = require('lodash.debounce');
 const useTranslate = require('stremio/common/useTranslate');
 const { useStreamingServer, useNotifications, withCoreSuspender } = require('stremio/common');
-const { ContinueWatchingItem, EventModal, MainNavBars, MetaItem, MetaRow } = require('stremio/components');
+const { ContinueWatchingItem, EventModal, IosInstallBanner, MainNavBars, MetaItem, MetaRow } = require('stremio/components');
 const HeroBanner = require('stremio/components/HeroBanner');
 const { TrailerProvider, TrailerContext } = require('stremio/common/TrailerContext');
 const useBoard = require('./useBoard');
@@ -509,6 +509,7 @@ const BoardContent = () => {
             <EventModal />
             <MainNavBars className={styles['board-content-container']} route={'board'}>
                 <div ref={scrollContainerRef} className={styles['board-content']} data-scroll-container onScroll={onScroll}>
+                    <IosInstallBanner />
                     <div ref={heroRef}>
                         <HeroBanner items={heroItems} />
                     </div>

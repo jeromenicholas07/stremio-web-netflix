@@ -367,4 +367,48 @@ describe('autoPick', () => {
         expect(failures).toHaveLength(1);
         expect(failures[0].streamKey).toBe('stream-b');
     });
+
+    describe('web-playable preference (iOS)', () => {
+        it('classifies web-playable, unknown, and non-web-playable releases', () => {
+            // H.264 / MP4 → inline-capable
+            expect(autoPick.webPlayableRank(stream({ name: '1080p', description: 'WEB x264 AAC' }))).toBe(0);
+            // MKV / HEVC / HDR / AC3 → not inline-capable
+            expect(autoPick.webPlayableRank(stream({ name: '2160p', description: 'BluRay x265 HDR' }))).toBe(2);
+            expect(autoPick.webPlayableRank(stream({ name: '1080p', description: 'WEB-DL H264 EAC3', player: 'p' }))).toBe(2);
+            expect(autoPick.webPlayableRank(stream({ name: '1080p', description: 'S01E01.mkv' }))).toBe(2);
+            // No codec/container markers → unknown
+            expect(autoPick.webPlayableRank(stream({ name: '1080p', description: 'some release' }))).toBe(1);
+        });
+
+        it('detects the container from behaviorHints.filename', () => {
+            const mkv = { name: '1080p', description: 'clean', behaviorHints: { filename: 'Show.S01E01.mkv' } };
+            expect(autoPick.webPlayableRank(mkv)).toBe(2);
+        });
+
+        it('prefers a web-playable stream over a higher-quality non-web-playable one on iOS', () => {
+            const settings = makeSettings(['rd_plus', 'rd_download', 'torrentio']);
+            const hevc4k = stream({ name: '[RD+] 2160p', description: 'BluRay x265 HDR', player: 'hevc-4k' });
+            const h264_1080 = stream({ name: '[RD download] 1080p', description: 'WEB x264 AAC', player: 'h264-1080' });
+
+            // Default (desktop) ranking prefers the 4K cached stream.
+            expect(autoPick.pickBestStream([hevc4k, h264_1080], settings).deepLinks.player).toBe('hevc-4k');
+            // iOS ranking prefers the inline-playable 1080p H.264 stream.
+            expect(autoPick.pickBestStream([hevc4k, h264_1080], settings, { preferWebPlayable: true }).deepLinks.player).toBe('h264-1080');
+        });
+
+        it('never excludes a non-web-playable stream — it still picks one if that is all there is', () => {
+            const settings = makeSettings(['rd_plus', 'torrentio']);
+            const onlyHevc = stream({ name: '[RD+] 2160p', description: 'x265 HDR', player: 'only-hevc' });
+
+            expect(autoPick.pickBestStream([onlyHevc], settings, { preferWebPlayable: true }).deepLinks.player).toBe('only-hevc');
+        });
+
+        it('keeps the configured priority order among equally web-playable streams', () => {
+            const settings = makeSettings(['rd_plus', 'rd_download', 'torrentio']);
+            const rdPlus = stream({ name: '[RD+] 1080p', description: 'WEB x264 AAC', player: 'rdplus' });
+            const rdDownload = stream({ name: '[RD download] 1080p', description: 'WEB x264 AAC', player: 'rddl' });
+
+            expect(autoPick.pickBestStream([rdDownload, rdPlus], settings, { preferWebPlayable: true }).deepLinks.player).toBe('rdplus');
+        });
+    });
 });

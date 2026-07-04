@@ -344,6 +344,33 @@ function detectQuality(stream) {
     return 'other';
 }
 
+// ─── Web-playable (iOS inline) detection ───
+// iOS Safari can only decode a subset of what debrid serves inline — broadly
+// H.264 video + AAC audio in an MP4 container. MKV containers, HEVC/HDR video,
+// and AC3/EAC3/DTS/TrueHD audio can't play in the browser and must hand off to
+// an external app (Infuse/VLC). This is a best-effort classifier over the
+// release name/description/filename; codecs aren't always tagged, so it returns
+// "unknown" rather than guessing. Used only to *prefer* inline-capable streams
+// on iOS — it never excludes a stream.
+const NOT_WEB_PLAYABLE_RE = /(x265|h\.?265|hevc|\bmkv\b|\bdts\b|truehd|e-?ac-?3|\beac3\b|\bac-?3\b|dolby\s*vision|\bdovi\b|hdr10|\bhdr\b)/i;
+const WEB_PLAYABLE_RE = /(x264|h\.?264|\bavc\b|\bmp4\b|\baac\b)/i;
+
+function streamText(stream) {
+    const filename = stream && stream.behaviorHints && stream.behaviorHints.filename;
+    return `${stream?.name || ''} ${stream?.description || ''} ${filename || ''}`;
+}
+
+// Rank of how likely a stream plays inline in iOS Safari (lower = better):
+//   0 → looks web-playable (H.264/AAC/MP4)
+//   1 → unknown (no codec/container markers)
+//   2 → definitely not web-playable (MKV/HEVC/HDR/AC3/…)
+function webPlayableRank(stream) {
+    const text = streamText(stream);
+    if (NOT_WEB_PLAYABLE_RE.test(text) || isHDR(stream)) return 2;
+    if (WEB_PLAYABLE_RE.test(text)) return 0;
+    return 1;
+}
+
 // ─── Language detection ───
 // Regional-indicator flag emoji come in pairs (e.g. 🇮🇹 = U+1F1EE U+1F1F9).
 // Flags from English-speaking countries are allowed; any other flag marks a
@@ -443,7 +470,9 @@ function isPurchasable(stream) {
 
 // Returns the priority rank of a stream under the given settings, or null when
 // the stream is excluded (purchasable or not part of any enabled bucket).
-function rankStream(stream, settings) {
+// `options.preferWebPlayable` (set on iOS) layers an inline-playability sort key
+// on top of the normal ranking without excluding anything.
+function rankStream(stream, settings, options = {}) {
     if (!stream?.name || isPurchasable(stream)) return null;
     if (settings.englishOnly && detectIsForeign(stream)) return null;
 
@@ -470,7 +499,19 @@ function rankStream(stream, settings) {
     // spaced so each tier dominates the next and seeders (capped at 999) can
     // never flip a quality step.
     const tier = sourceIndex + qualityIndex;
-    return (tier * 1000000) + (qualityIndex * 1000) + (sourceIndex * 10) - getSeeders(stream);
+    const baseRank = (tier * 1000000) + (qualityIndex * 1000) + (sourceIndex * 10) - getSeeders(stream);
+
+    // iOS: prefer streams that can play inline in Safari. This is a DOMINANT sort
+    // key layered above the normal source/quality ranking (which is < 1e12), so
+    // web-playable > unknown > not-web-playable, but ties within a playability
+    // class still respect the user's configured priorities. HEVC/HDR 4K releases
+    // (which can't play inline) sink below H.264/1080p ones — that's how "prefer
+    // 1080p over 2160p on iOS" falls out. A non-web-playable stream is never
+    // excluded; it just ranks last and, if picked, uses the external player.
+    if (options.preferWebPlayable) {
+        return (webPlayableRank(stream) * 1e12) + baseRank;
+    }
+    return baseRank;
 }
 
 function getStreamKey(stream) {
@@ -496,7 +537,7 @@ function getAutoPickCandidates(allStreams, settings, options = {}) {
     const failedStreamKeys = new Set(options.failedStreamKeys || []);
 
     return allStreams
-        .map((stream, index) => ({ stream, index, rank: rankStream(stream, settings) }))
+        .map((stream, index) => ({ stream, index, rank: rankStream(stream, settings, options) }))
         .filter(({ stream, rank }) => rank !== null && !failedStreamKeys.has(getStreamKey(stream)))
         .sort((a, b) => a.rank - b.rank || a.index - b.index)
         .map(({ stream }) => stream);
@@ -682,6 +723,7 @@ module.exports = {
     getPlayableAutoPickSettings,
     detectQuality,
     detectIsForeign,
+    webPlayableRank,
     describeStream,
     getTopEnabledSourceKey,
     hasStreamsForSource,

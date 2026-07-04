@@ -2,12 +2,26 @@
 // Uses Trakt Device Auth: user enters a short code at trakt.tv/activate,
 // app polls until authorized, then stores access_token + refresh_token.
 
+const isIOS = require('../common/isIOS');
+
 // Use local proxy to avoid CORS issues with Trakt API.
 // Webpack dev server proxies /trakt-api/* → https://api.trakt.tv/*
 // For production builds, falls back to direct API (works in Stremio shell which has no CORS).
-const TRAKT_API = typeof window !== 'undefined' && window.location?.hostname === 'localhost'
-    ? '/trakt-api'
-    : 'https://api.trakt.tv';
+//
+// iOS is the exception: a real iOS-Safari PWA enforces CORS, which Trakt's
+// auth/sync endpoints don't satisfy. When a CORS proxy Worker is configured
+// (CORS_PROXY_URL, see worker/) route iOS through its /trakt route. Desktop,
+// desktop-web, and the Stremio shell keep the direct/dev-proxy behavior.
+const CORS_PROXY_URL = process.env.CORS_PROXY_URL || null;
+const TRAKT_API = (() => {
+    if (typeof window !== 'undefined' && window.location?.hostname === 'localhost') {
+        return '/trakt-api';
+    }
+    if (isIOS() && CORS_PROXY_URL) {
+        return `${CORS_PROXY_URL.replace(/\/+$/, '')}/trakt`;
+    }
+    return 'https://api.trakt.tv';
+})();
 const DEFAULT_CLIENT_ID = '67bffdb0ebe7ee9ffda2192bf2a463d7a9f36da83325fd94e04552052ad7372c';
 const DEFAULT_CLIENT_SECRET = '02768d0e1459bd002b5b1a99f70e0b84d68d068823d3acce95b91fb282e8da95';
 

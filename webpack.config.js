@@ -246,6 +246,10 @@ module.exports = (env, argv) => ({
         new webpack.ProgressPlugin(),
         new webpack.EnvironmentPlugin({
             SENTRY_DSN: null,
+            // Optional free Cloudflare Worker CORS proxy (see worker/). Used only
+            // on iOS/remote origins for Trakt sync + auto-pick preflight; null
+            // (default) keeps the previous behavior on every other platform.
+            CORS_PROXY_URL: null,
             ...env,
             SERVICE_WORKER_DISABLED: false,
             DEBUG: argv.mode !== 'production',

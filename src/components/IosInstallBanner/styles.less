@@ -1,0 +1,60 @@
+// Copyright (C) 2017-2026 Smart code 203358507
+
+@import (reference) '~@stremio/stremio-colors/less/stremio-colors.less';
+
+.ios-install-banner {
+    flex: none;
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 1rem;
+    margin: 1rem;
+    padding: 1rem 1.2rem;
+    border-radius: 1rem;
+    background-color: var(--overlay-color, rgba(255, 255, 255, 0.08));
+
+    .share-icon {
+        flex: none;
+        width: 2rem;
+        height: 2rem;
+        color: var(--primary-foreground-color);
+    }
+
+    .text {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 0.2rem;
+
+        .title {
+            font-size: 1.2rem;
+            font-weight: 600;
+            color: var(--primary-foreground-color);
+        }
+
+        .subtitle {
+            font-size: 1rem;
+            color: var(--secondary-foreground-color, rgba(255, 255, 255, 0.65));
+        }
+    }
+
+    .dismiss {
+        flex: none;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 44px;
+        height: 44px;
+        border-radius: 44px;
+
+        &:hover {
+            background-color: rgba(255, 255, 255, 0.1);
+        }
+
+        .dismiss-icon {
+            width: 1.4rem;
+            height: 1.4rem;
+            color: var(--primary-foreground-color);
+        }
+    }
+}

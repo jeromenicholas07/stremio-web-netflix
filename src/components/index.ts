@@ -11,6 +11,7 @@ import DelayedRenderer from './DelayedRenderer';
 import EventModal from './EventModal';
 import HorizontalScroll from './HorizontalScroll';
 import Image from './Image';
+import IosInstallBanner from './IosInstallBanner';
 import LibItem from './LibItem';
 import MainNavBars from './MainNavBars';
 import MetaItem from './MetaItem';
@@ -46,6 +47,7 @@ export {
     EventModal,
     HorizontalScroll,
     Image,
+    IosInstallBanner,
     LibItem,
     MainNavBars,
     MetaItem,

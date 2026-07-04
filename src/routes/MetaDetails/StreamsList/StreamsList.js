@@ -400,6 +400,10 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             while (!cancelled) {
                 const best = pickBestStream(autoPickStreams, settings, {
                     failedStreamKeys: Array.from(failedSet),
+                    // iOS Safari can only play a subset of formats inline; prefer
+                    // web-playable releases so auto-pick avoids kicking out to an
+                    // external player. No-op on every other platform.
+                    preferWebPlayable: platform.name === 'ios',
                 });
                 const blockedCount = blockedKeysRef.current.size;
 
