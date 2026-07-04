@@ -34,13 +34,13 @@ in Safari.
 ## One-time setup (your friend, on the iPhone)
 
 1. Open the site URL in **Safari** → tap **Share** → **Add to Home Screen**. Launch
-   it from the new Home-Screen icon.
-   - The icon opens the app **in Safari (with the address bar), not full-screen**.
-     This is deliberate: a full-screen standalone PWA gets a *smaller* memory budget
-     from iOS and this WASM-heavy app crashes in it a few seconds after launch
-     ("A problem repeatedly occurred"). Opening in the Safari tab context avoids that.
-   - If you already added a crashing full-screen icon, **delete it, then re-add** from
-     Safari after deploying the rebuilt site (the fix ships in the new build).
+   it from the new Home-Screen icon — it opens **full-screen** and respects the
+   notch / home-indicator safe areas.
+   - After deploying a new build, **delete the old icon and re-add** it so iOS
+     picks up the updated page and service worker.
+   - Note: a standalone WASM app this heavy can hit iOS's per-app memory limit on
+     low-memory devices ("A problem repeatedly occurred"). If that happens, the fix
+     is reducing startup memory — modern iOS launches it standalone regardless.
 2. **Leave the streaming server unset** (Settings → Streaming) — it's not used on iOS.
 3. Install a **Real-Debrid** addon (e.g. Torrentio configured with your RD API key).
 4. Install **Infuse** (or VLC) from the App Store — used only for the occasional file

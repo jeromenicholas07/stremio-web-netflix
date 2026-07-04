@@ -6,6 +6,9 @@ const classnames = require('classnames');
 const { default: Icon } = require('@stremio/stremio-icons/react');
 const { Button, Image } = require('stremio/components');
 const { default: useFullscreen } = require('stremio/common/useFullscreen');
+// Direct source import (not the 'stremio/common' barrel) — this file is pulled
+// in eagerly via the components barrel, so the barrel can be mid-init here.
+const { usePlatform } = require('stremio/common/Platform');
 const SearchBar = require('./SearchBar');
 const NavMenu = require('./NavMenu');
 const styles = require('./styles');
@@ -17,6 +20,11 @@ const NAV_LINKS = [
 ];
 
 const HorizontalNavBar = React.memo(({ className, route, query, title, backButton, searchBar, fullscreenButton, navMenu, ...props }) => {
+    const platform = usePlatform();
+    // Hide the Incognito tab on iOS.
+    const navLinks = React.useMemo(() => (
+        platform.name === 'ios' ? NAV_LINKS.filter((link) => link.id !== 'incognito') : NAV_LINKS
+    ), [platform.name]);
     const [scrolled, setScrolled] = React.useState(false);
     const backButtonOnClick = React.useCallback(() => {
         window.history.back();
@@ -64,7 +72,7 @@ const HorizontalNavBar = React.memo(({ className, route, query, title, backButto
             {
                 !backButton ?
                     <div className={styles['nav-links']}>
-                        {NAV_LINKS.map((link) => (
+                        {navLinks.map((link) => (
                             <Button
                                 key={link.id}
                                 className={classnames(styles['nav-link'], { [styles['nav-link-active']]: route === link.id })}

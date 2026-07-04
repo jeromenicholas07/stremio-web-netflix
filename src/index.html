@@ -8,15 +8,15 @@
     <meta http-equiv="Expires" content="0">
     <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, minimum-scale=1, user-scalable=0, user-scalable=no, viewport-fit=cover">
     <!--
-      iOS home-screen launch mode. This heavy WASM app exceeds the *smaller*
-      memory budget iOS gives standalone (full-screen) web apps, so a Home-Screen
-      PWA crashes a few seconds after launch ("A problem repeatedly occurred"),
-      while the same page runs fine in a normal Safari tab. Setting this to "no"
-      makes the Home-Screen icon open in the Safari-tab context that works (at the
-      cost of showing Safari's UI chrome). This tag is iOS-only — Android/desktop
-      ignore it and keep the manifest's `display: standalone` behavior.
+      Run the iOS Home-Screen app full-screen (standalone). On iOS 16.4+ the
+      manifest's `display: standalone` already launches it standalone regardless
+      of this tag, but "yes" is what enables the black-translucent status bar the
+      safe-area CSS is built around — without it, content renders under the notch.
+      (Note: a standalone WASM app this heavy can hit iOS's per-app memory limit
+      on low-memory devices; if that recurs, the fix is reducing startup memory,
+      not this tag, since modern iOS is standalone either way.)
     -->
-    <meta name="apple-mobile-web-app-capable" content="no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <meta name="apple-mobile-web-app-title" content="Stremio">
     <link rel="icon" type="image/x-icon" href="<%= htmlWebpackPlugin.options.faviconsPath %>/favicon.ico">
