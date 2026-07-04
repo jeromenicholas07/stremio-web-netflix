@@ -16,7 +16,10 @@ jobs:
           version: 10
           run_install: false
       - name: Install dependencies
-        run: pnpm install
+        # The Stremio-patched hls.js tarball (transitive via @stremio/stremio-video)
+        # has no integrity field in the lockfile, which a frozen-lockfile CI install
+        # rejects. Match the local/deploy install, which tolerates it.
+        run: pnpm install --no-frozen-lockfile
       - name: Build
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
@@ -120,22 +123,37 @@ jobs:
                  Sort-Object FullName -Descending | Select-Object -First 1
           if (-not $csc) { throw "csc.exe not found" }
 
-          # Reference assemblies for System.IO.Compression (ZipArchive) —
-          # .NET Framework 4.5+ ships these as separate DLLs.
-          $refDir = "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework\v4.5"
-          if (-not (Test-Path $refDir)) {
-            $refDir = Get-ChildItem "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework" -Directory |
-                      Where-Object { Test-Path (Join-Path $_.FullName 'System.IO.Compression.FileSystem.dll') } |
-                      Select-Object -Last 1 -ExpandProperty FullName
+          # Reference assemblies for System.IO.Compression (ZipArchive). The exact
+          # location varies by runner image (a hardcoded v4.5 folder exists but no
+          # longer contains these DLLs on current windows-latest images, which was
+          # causing CS0006). Search for the actual DLLs across the .NETFramework
+          # reference-assembly tree and the Framework64 runtime dir, preferring the
+          # newest match.
+          function Find-Dll($name) {
+            foreach ($root in @(
+              "C:\Program Files (x86)\Reference Assemblies\Microsoft\Framework\.NETFramework",
+              "C:\Windows\Microsoft.NET\Framework64"
+            )) {
+              if (Test-Path $root) {
+                $hit = Get-ChildItem $root -Recurse -Filter $name -ErrorAction SilentlyContinue |
+                       Sort-Object FullName -Descending | Select-Object -First 1
+                if ($hit) { return $hit.FullName }
+              }
+            }
+            return $null
           }
-          if (-not $refDir) { throw "Could not locate .NETFramework reference assemblies for System.IO.Compression" }
+          $compDll = Find-Dll 'System.IO.Compression.dll'
+          $compFsDll = Find-Dll 'System.IO.Compression.FileSystem.dll'
+          if (-not $compDll -or -not $compFsDll) { throw "Could not locate System.IO.Compression assemblies" }
+          Write-Host "Using: $compDll"
+          Write-Host "Using: $compFsDll"
 
           & $csc.FullName `
             /target:exe `
             /out:StremioLauncherFULL.exe `
             /resource:payload.zip,StremioLauncherFULL.payload.zip `
-            /r:"$refDir\System.IO.Compression.dll" `
-            /r:"$refDir\System.IO.Compression.FileSystem.dll" `
+            /r:"$compDll" `
+            /r:"$compFsDll" `
             StremioLauncherFULL.cs
           if ($LASTEXITCODE -ne 0) { throw "StremioLauncherFULL.exe compilation failed" }
 
