@@ -2842,6 +2842,10 @@
   }
 }
 @media only screen and (max-width: 640px) {
+  .meta-row-container-xtlB1 {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 200px;
+  }
   .meta-row-container-xtlB1 .header-container-tR3Ev {
     padding: 0 1rem;
   }
@@ -2853,6 +2857,8 @@
   .meta-row-container-xtlB1 .meta-items-container-qcuUA .meta-item-QFHCh {
     scroll-snap-align: start;
     flex: 0 0 calc(100% / 2.2);
+    content-visibility: auto;
+    contain-intrinsic-size: auto 140px;
   }
   .meta-row-container-xtlB1 .carousel-arrow-uy_Is {
     display: none;
@@ -4667,6 +4673,8 @@ kbd {
   overflow-y: auto;
   overflow-x: hidden;
   scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
 }
 .board-container-DTN_b .board-content-container-ToQTz .board-content-nPWv1 .board-rows-ehcWT {
   position: relative;
