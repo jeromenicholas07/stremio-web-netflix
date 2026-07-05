@@ -45,15 +45,10 @@ html:not(.active-slider-within) {
         transform: rotate(90deg);
         z-index: 100;
         background-color: #000;
-        // Keep content clear of the notch / home indicator. The player is
-        // rotated 90°, so the device's portrait insets map onto rotated edges:
-        //   physical top (notch)          -> this element's LEFT edge
-        //   physical bottom (home bar)     -> this element's RIGHT edge
-        // Padding letterboxes those sides in solid black so nothing important
-        // (video edge, subtitles, controls) sits under the notch.
-        box-sizing: border-box;
-        padding-left: env(safe-area-inset-top, 0px);
-        padding-right: env(safe-area-inset-bottom, 0px);
+        // Full-bleed video, centered content. (Earlier we letterboxed the notch
+        // side, but the asymmetric padding shifted the subtitles off-center and
+        // wasted space — the minor notch intrusion on the video edge is the
+        // lesser evil.)
     }
 
     .layer {

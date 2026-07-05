@@ -533,7 +533,21 @@ const Player = ({ urlParams, queryParams }) => {
                 findTrackById(video.state.extraSubtitlesTracks, savedTrackId) :
                 findTrackByLang(video.state.extraSubtitlesTracks, settings.subtitlesLanguage);
 
-            if (subtitlesTrack && subtitlesTrack.id) {
+            if (platform.isMobile) {
+                // Phones: native <track> subtitles do NOT render on inline iOS
+                // video (they only appear in the OS fullscreen player), so the
+                // app's HTML overlay is the only thing that shows. Prefer the
+                // external overlay track; only fall back to a native track if
+                // that's all the file has.
+                if (extraSubtitlesTrack && extraSubtitlesTrack.id) {
+                    video.setSubtitlesTrack(null);
+                    video.setExtraSubtitlesTrack(extraSubtitlesTrack.id);
+                    defaultSubtitlesSelected.current = true;
+                } else if (subtitlesTrack && subtitlesTrack.id) {
+                    video.setSubtitlesTrack(subtitlesTrack.id);
+                    defaultSubtitlesSelected.current = true;
+                }
+            } else if (subtitlesTrack && subtitlesTrack.id) {
                 video.setSubtitlesTrack(subtitlesTrack.id);
                 defaultSubtitlesSelected.current = true;
             } else if (extraSubtitlesTrack && extraSubtitlesTrack.id) {
@@ -543,24 +557,16 @@ const Player = ({ urlParams, queryParams }) => {
         }
     }, [video.state.subtitlesTracks, video.state.extraSubtitlesTracks, player.streamState]);
 
-    // Double-subtitle guard, resolved per platform so only one renderer is ever
-    // visible:
-    //   Desktop — our styled HTML overlay is the intended renderer, so if an
-    //             external track is active, disable native embedded ::cue tracks.
-    //   Mobile  — the OS-rendered native subtitle is properly centered and
-    //             placed in both portrait and the rotated landscape, while our
-    //             overlay is not; so prefer native and hide the overlay when both
-    //             would show. Re-runs when tracks load async.
+    // Double-subtitle guard: the app's HTML overlay is the reliable renderer
+    // (and the only one that shows on inline iOS video). Whenever an external
+    // overlay track is active, disable native embedded ::cue tracks so a
+    // default-flagged one can't render a second, misplaced subtitle. Idempotent,
+    // re-runs when embedded tracks load asynchronously.
     React.useEffect(() => {
-        if (platform.isMobile) {
-            if (video.state.selectedSubtitlesTrackId !== null &&
-                video.state.selectedExtraSubtitlesTrackId !== null) {
-                video.setExtraSubtitlesTrack(null);
-            }
-        } else if (video.state.selectedExtraSubtitlesTrackId !== null) {
+        if (video.state.selectedExtraSubtitlesTrackId !== null) {
             video.setSubtitlesTrack(null);
         }
-    }, [platform.isMobile, video.state.selectedSubtitlesTrackId, video.state.selectedExtraSubtitlesTrackId, video.state.subtitlesTracks]);
+    }, [video.state.selectedExtraSubtitlesTrackId, video.state.subtitlesTracks]);
 
     // Auto audio track selection
     React.useEffect(() => {
