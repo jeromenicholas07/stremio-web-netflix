@@ -4667,6 +4667,8 @@ kbd {
   overflow-y: auto;
   overflow-x: hidden;
   scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-y: contain;
 }
 .board-container-DTN_b .board-content-container-ToQTz .board-content-nPWv1 .board-rows-ehcWT {
   position: relative;
