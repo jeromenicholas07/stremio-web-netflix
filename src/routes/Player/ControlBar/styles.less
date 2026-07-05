@@ -104,7 +104,10 @@
 
 @media only screen and (max-width: @minimum) {
     .control-bar-container {
-        padding: 0;
+        // Lift the bar off the very bottom edge on phones: clear the home
+        // indicator (safe-area) plus a little breathing room so the buttons
+        // aren't flush against the screen edge.
+        padding: 0 0 calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
 
         .seek-bar {
             margin: 0 1.5rem;

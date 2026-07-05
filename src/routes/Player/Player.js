@@ -107,8 +107,23 @@ const Player = ({ urlParams, queryParams }) => {
     // while the phone is held upright (works even with rotation-lock on).
     const [orientationLocked, setOrientationLocked] = React.useState(false);
     const toggleOrientation = React.useCallback(() => {
-        setOrientationLocked((locked) => !locked);
-    }, []);
+        const next = !orientationLocked;
+        setOrientationLocked(next);
+        // Best-effort true fullscreen so supporting platforms (Android/desktop
+        // PWA) hide the OS status/nav bars for a clean dark screen. iOS Safari
+        // doesn't allow element fullscreen — it silently no-ops, and the
+        // standalone PWA is already chrome-less with a translucent status bar.
+        // Called synchronously in the click handler to keep the user-activation.
+        try {
+            const el = document.documentElement;
+            const p = next ?
+                (el.requestFullscreen || el.webkitRequestFullscreen)?.call(el) :
+                (document.fullscreenElement || document.webkitFullscreenElement) ?
+                    (document.exitFullscreen || document.webkitExitFullscreen)?.call(document) :
+                    null;
+            if (p && typeof p.catch === 'function') p.catch(() => { /* ignore rejection */ });
+        } catch { /* fullscreen unsupported — ignore */ }
+    }, [orientationLocked]);
 
     const isNavigating = React.useRef(false);
 
