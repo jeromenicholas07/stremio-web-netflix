@@ -30,6 +30,22 @@ html:not(.active-slider-within) {
     height: 100%;
     background-color: #000;
 
+    // Force-landscape (iOS/mobile): iOS Safari can't lock screen orientation, so
+    // we rotate the whole player 90° to fill the portrait viewport in landscape.
+    // The element is sized to the swapped viewport dimensions and rotated about
+    // its top-left corner, which is parked at the viewport's right edge so the
+    // rotation sweeps it back across the full screen.
+    &.force-landscape {
+        position: fixed;
+        top: 0;
+        left: 100vw;
+        width: 100vh;
+        height: 100vw;
+        transform-origin: top left;
+        transform: rotate(90deg);
+        z-index: 100;
+    }
+
     .layer {
         position: absolute;
         top: 0;

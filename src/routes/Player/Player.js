@@ -102,6 +102,14 @@ const Player = ({ urlParams, queryParams }) => {
     const defaultAudioTrackSelected = React.useRef(false);
     const [error, setError] = React.useState(null);
 
+    // iOS/mobile "force landscape": iOS Safari has no screen-orientation lock API,
+    // so this rotates the whole player 90° via CSS to fill the screen in landscape
+    // while the phone is held upright (works even with rotation-lock on).
+    const [orientationLocked, setOrientationLocked] = React.useState(false);
+    const toggleOrientation = React.useCallback(() => {
+        setOrientationLocked((locked) => !locked);
+    }, []);
+
     const isNavigating = React.useRef(false);
 
     const pressTimer = React.useRef(null);
@@ -888,7 +896,7 @@ const Player = ({ urlParams, queryParams }) => {
     }, []);
 
     return (
-        <div className={classnames(styles['player-container'], { [styles['overlayHidden']]: overlayHidden })}
+        <div className={classnames(styles['player-container'], { [styles['overlayHidden']]: overlayHidden, [styles['force-landscape']]: orientationLocked })}
             onMouseDown={onContainerMouseDown}
             onMouseMove={onContainerMouseMove}
             onMouseOver={onContainerMouseMove}
@@ -998,6 +1006,8 @@ const Player = ({ urlParams, queryParams }) => {
                 onToggleSpeedMenu={toggleSpeedMenu}
                 onToggleStatisticsMenu={toggleStatisticsMenu}
                 onToggleSideDrawer={toggleSideDrawer}
+                onToggleOrientation={platform.isMobile ? toggleOrientation : undefined}
+                orientationLocked={orientationLocked}
                 onMouseMove={onBarMouseMove}
                 onMouseOver={onBarMouseMove}
                 onTouchEnd={onContainerMouseLeave}

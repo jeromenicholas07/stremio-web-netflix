@@ -6,6 +6,7 @@ const classnames = require('classnames');
 const { useTranslation } = require('react-i18next');
 const { usePlatform, useToast } = require('stremio/common');
 const { useServices } = require('stremio/services');
+const { IOS_EXTERNAL_PLAYERS, getExternalMediaUrl } = require('stremio/common/iosExternalPlayers');
 const Option = require('./Option');
 const styles = require('./styles');
 
@@ -30,6 +31,22 @@ const OptionsMenu = ({ className, stream, playbackDevices, extraSubtitlesTracks,
         const track = extraSubtitlesTracks?.find(({ id }) => id === selectedExtraSubtitlesTrackId);
         return track?.fallbackUrl ?? track?.url ?? null;
     }, [extraSubtitlesTracks, selectedExtraSubtitlesTrackId]);
+
+    // iOS: the direct media URL to hand the currently-playing stream off to a
+    // native player app (Infuse/VLC/…). These apps can also cast (AirPlay /
+    // Chromecast), which is why they double as the "cast" option on iPhone.
+    const iosMediaUrl = React.useMemo(() => (
+        platform.name === 'ios' ? getExternalMediaUrl(stream?.deepLinks?.externalPlayer, stream) : null
+    ), [platform.name, stream]);
+    const onOpenInExternalPlayer = React.useCallback((url) => {
+        // url is passed through the Option's deviceId slot. Custom URL schemes
+        // (infuse://, vlc-x-callback://) must NOT go through platform.openExternal
+        // (it whitelists https hosts) — assign location directly to trigger the
+        // app hand-off.
+        if (typeof url === 'string' && url.length > 0) {
+            window.location.href = url;
+        }
+    }, []);
 
     const onCopyStreamButtonClick = React.useCallback(() => {
         if (streamingUrl || downloadUrl) {
@@ -127,6 +144,21 @@ const OptionsMenu = ({ className, stream, playbackDevices, extraSubtitlesTracks,
                         onClick={onExternalDeviceRequested}
                     />
                 ))
+            }
+            {
+                iosMediaUrl ?
+                    IOS_EXTERNAL_PLAYERS.map((player) => (
+                        <Option
+                            key={player.value}
+                            icon={player.icon}
+                            label={t('PLAYER_PLAY_IN', { device: player.label })}
+                            deviceId={player.build(iosMediaUrl)}
+                            disabled={stream === null}
+                            onClick={onOpenInExternalPlayer}
+                        />
+                    ))
+                    :
+                    null
             }
         </div>
     );
