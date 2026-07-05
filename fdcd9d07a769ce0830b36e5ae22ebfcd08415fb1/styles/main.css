@@ -2842,6 +2842,10 @@
   }
 }
 @media only screen and (max-width: 640px) {
+  .meta-row-container-xtlB1 {
+    content-visibility: auto;
+    contain-intrinsic-size: auto 200px;
+  }
   .meta-row-container-xtlB1 .header-container-tR3Ev {
     padding: 0 1rem;
   }
@@ -2853,6 +2857,8 @@
   .meta-row-container-xtlB1 .meta-items-container-qcuUA .meta-item-QFHCh {
     scroll-snap-align: start;
     flex: 0 0 calc(100% / 2.2);
+    content-visibility: auto;
+    contain-intrinsic-size: auto 140px;
   }
   .meta-row-container-xtlB1 .carousel-arrow-uy_Is {
     display: none;
@@ -9054,6 +9060,16 @@ html:not(.active-slider-within-NcgYf) .player-container-wIELK.overlayHidden-gyjI
   width: 100%;
   height: 100%;
   background-color: #000;
+}
+.player-container-wIELK.force-landscape-zsyst {
+  position: fixed;
+  top: 0;
+  left: 100vw;
+  width: 100vh;
+  height: 100vw;
+  transform-origin: top left;
+  transform: rotate(90deg);
+  z-index: 100;
 }
 .player-container-wIELK .layer-qalDW {
   position: absolute;
