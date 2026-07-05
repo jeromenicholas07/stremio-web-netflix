@@ -19,11 +19,16 @@ const IOS_EXTERNAL_PLAYERS = [
     { value: 'vidhub', label: 'VidHub', icon: 'play', build: (url) => `open-vidhub://x-callback-url/open?url=${enc(url)}` },
 ];
 
-// The best media URL to hand to an external app: the direct/proxied streaming
-// URL when present, else the .m3u playlist the core generates.
-function getExternalMediaUrl(externalPlayer) {
-    if (!externalPlayer) return null;
-    return externalPlayer.streaming || externalPlayer.playlist || null;
+// The best media URL to hand to an external app. On iOS we deliberately run with
+// NO streaming server, so the core's server-generated deep links
+// (externalPlayer.streaming / .playlist) are null — the real playable URL is the
+// stream's own direct HTTP(S) URL (e.g. a Real-Debrid link). Prefer the server
+// links when they exist (desktop/self-hosted), otherwise fall back to the direct
+// stream URL so the hand-off row still works serverless.
+function getExternalMediaUrl(externalPlayer, stream) {
+    return (externalPlayer && (externalPlayer.streaming || externalPlayer.playlist)) ||
+        (stream && (stream.url || stream.externalUrl)) ||
+        null;
 }
 
 module.exports = { IOS_EXTERNAL_PLAYERS, getExternalMediaUrl };

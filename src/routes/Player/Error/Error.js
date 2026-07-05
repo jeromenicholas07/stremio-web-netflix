@@ -25,7 +25,7 @@ const Error = React.forwardRef(({ className, code, message, stream }, ref) => {
     // the native player apps (Infuse/VLC/…) via their URL schemes. Desktop keeps
     // the single generic "open in external player" button below.
     const iosMediaUrl = React.useMemo(() => {
-        return platform.name === 'ios' ? getExternalMediaUrl(stream?.deepLinks?.externalPlayer) : null;
+        return platform.name === 'ios' ? getExternalMediaUrl(stream?.deepLinks?.externalPlayer, stream) : null;
     }, [platform.name, stream]);
 
     return (
