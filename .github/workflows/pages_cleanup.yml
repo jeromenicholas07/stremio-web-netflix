@@ -1,8 +1,12 @@
 name: GitHub Pages Cleanup
 
+# The weekly schedule is intentionally removed. This fork deploys the FULL site
+# (commit-hash asset dirs plus favicons/fonts/images/screenshots/scripts/styles/
+# binaries) to the gh-pages ROOT — not per-branch preview subdirectories. The
+# branch-based cleanup below therefore treated every site directory as a stale
+# branch preview and deleted the whole site every Sunday, white-screening it.
+# Left as manual-only, and the delete step now hard-protects the site assets.
 on:
-  schedule:
-    - cron: '0 0 * * 0'
   workflow_dispatch:
 
 permissions:
@@ -25,6 +29,18 @@ jobs:
 
           find . -mindepth 1 -maxdepth 2 -type d -not -path '*/\.*' | while read -r dir; do
               path="${dir#./}"
+
+              # Hard-protect the site assets. The full site lives at the gh-pages
+              # root, so never delete the fixed asset dirs or any commit-hash dir
+              # (or anything nested under them).
+              top="${path%%/*}"
+              case "$top" in
+                  favicons|fonts|images|screenshots|scripts|styles|binaries|.well-known)
+                      continue ;;
+              esac
+              if [[ "$top" =~ ^[0-9a-f]{7,}$ ]]; then
+                  continue
+              fi
 
               if [[ " ${branches[*]} " =~ " $path " ]]; then
                   continue
