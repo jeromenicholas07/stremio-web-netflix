@@ -19,7 +19,7 @@ const NAV_LINKS = [
     { id: 'incognito', label: 'Incognito', href: '#/incognito', icon: 'eye-off-outline' },
 ];
 
-const HorizontalNavBar = React.memo(({ className, route, query, title, backButton, searchBar, fullscreenButton, navMenu, ...props }) => {
+const HorizontalNavBar = React.memo(({ className, route, query, title, backButton, backButtonHref, searchBar, fullscreenButton, navMenu, ...props }) => {
     const platform = usePlatform();
     // Hide the Incognito tab on iOS.
     const navLinks = React.useMemo(() => (
@@ -27,8 +27,16 @@ const HorizontalNavBar = React.memo(({ className, route, query, title, backButto
     ), [platform.name]);
     const [scrolled, setScrolled] = React.useState(false);
     const backButtonOnClick = React.useCallback(() => {
+        // When a fixed target is given (e.g. detail pages on mobile go straight
+        // to Home), navigate there — history.back() is unreliable after
+        // replace()-based auto-pick redirects and can leave the app in a
+        // confusing state. Otherwise fall back to normal history navigation.
+        if (typeof backButtonHref === 'string' && backButtonHref.length > 0) {
+            window.location.hash = backButtonHref;
+            return;
+        }
         window.history.back();
-    }, []);
+    }, [backButtonHref]);
     const [fullscreen, requestFullscreen, exitFullscreen] = useFullscreen();
     const renderNavMenuLabel = React.useCallback(({ ref, className, onClick, children }) => (
         <Button ref={ref} className={classnames(className, styles['button-container'], styles['menu-button-container'])} tabIndex={-1} onClick={onClick}>
@@ -125,6 +133,7 @@ HorizontalNavBar.propTypes = {
     query: PropTypes.string,
     title: PropTypes.string,
     backButton: PropTypes.bool,
+    backButtonHref: PropTypes.string,
     searchBar: PropTypes.bool,
     fullscreenButton: PropTypes.bool,
     navMenu: PropTypes.bool

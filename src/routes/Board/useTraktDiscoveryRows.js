@@ -6,6 +6,12 @@
 const React = require('react');
 const traktBridge = require('stremio/services/TraktBridge');
 const tmdbService = require('stremio/services/TMDBService');
+// Mobile: the Trakt-sourced discovery rows (Trending/Popular/Recommended/…) are
+// dropped on phones. They are the heaviest thing on the board (Trakt API +
+// per-item TMDB enrichment) and the biggest contributor to the iOS memory
+// crash, so this hook no-ops there — the home falls back to Continue Watching
+// plus the lightweight core addon catalogs.
+const { isMobile } = require('stremio/common/Platform/device');
 
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 const FETCH_LIMIT = 50;
@@ -141,6 +147,7 @@ function useTraktDiscoveryRows() {
     const buildCounterRef = React.useRef(0);
 
     React.useEffect(() => {
+        if (isMobile) return;
         let cancelled = false;
 
         const run = async () => {

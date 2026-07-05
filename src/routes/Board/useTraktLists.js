@@ -5,6 +5,9 @@
 const React = require('react');
 const traktBridge = require('stremio/services/TraktBridge');
 const tmdbService = require('stremio/services/TMDBService');
+// Mobile (iOS/Android): the personal Trakt list rows are intentionally dropped
+// to keep the home page light and stable, so this hook no-ops there.
+const { isMobile } = require('stremio/common/Platform/device');
 
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 
@@ -96,6 +99,7 @@ function useTraktLists() {
     const buildCounterRef = React.useRef(0);
 
     React.useEffect(() => {
+        if (isMobile) return;
         let cancelled = false;
 
         const buildItems = async () => {

@@ -4,6 +4,8 @@
 const React = require('react');
 const traktBridge = require('stremio/services/TraktBridge');
 const tmdbService = require('stremio/services/TMDBService');
+// Mobile: the Watched-Not-Rated row is dropped for a lighter home page.
+const { isMobile } = require('stremio/common/Platform/device');
 
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 
@@ -12,6 +14,7 @@ function useWatchedNotRated() {
     const buildCounterRef = React.useRef(0);
 
     React.useEffect(() => {
+        if (isMobile) return;
         let cancelled = false;
 
         const buildItems = async () => {

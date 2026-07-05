@@ -7,6 +7,9 @@ const classnames = require('classnames');
 const { useServices } = require('stremio/services');
 const { withCoreSuspender } = require('stremio/common');
 const { VerticalNavBar, HorizontalNavBar, DelayedRenderer, Image, MetaPreview, ModalDialog } = require('stremio/components');
+// Mobile: the back button on the details page goes straight Home instead of
+// history.back(), which is unreliable here (auto-pick redirects via replace()).
+const { isMobile } = require('stremio/common/Platform/device');
 const StreamsList = require('./StreamsList');
 const VideosList = require('./VideosList');
 const useMetaDetails = require('./useMetaDetails');
@@ -116,6 +119,7 @@ const MetaDetails = ({ urlParams, queryParams }) => {
             <HorizontalNavBar
                 className={styles['nav-bar']}
                 backButton={true}
+                backButtonHref={isMobile ? '#/' : undefined}
                 fullscreenButton={true}
                 navMenu={true}
             />
@@ -237,6 +241,7 @@ const MetaDetailsFallback = () => (
         <HorizontalNavBar
             className={styles['nav-bar']}
             backButton={true}
+            backButtonHref={isMobile ? '#/' : undefined}
             fullscreenButton={true}
             navMenu={true}
         />

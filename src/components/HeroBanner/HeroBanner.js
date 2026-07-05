@@ -10,6 +10,9 @@ const YouTubePlayer = require('stremio/components/YouTubePlayer');
 const { TrailerContext } = require('stremio/common/TrailerContext');
 const tmdbService = require('stremio/services/TMDBService');
 const { CARD_AR, detectLetterboxing, fetchVideoAR } = require('stremio/common/videoFit');
+// Mobile: the hero's autoplaying YouTube trailer is a large memory user on the
+// iOS PWA — keep the hero a static image carousel on phones.
+const { isMobile } = require('stremio/common/Platform/device');
 const styles = require('./styles');
 
 const TRAILER_DELAY = 2500;
@@ -108,6 +111,10 @@ const HeroBanner = React.memo(({ items }) => {
     const [trailerYtId, setTrailerYtId] = React.useState(null);
     React.useEffect(() => {
         if (!item) { setTrailerYtId(null); return; }
+
+        // Mobile: never resolve/play a hero trailer — leaves trailerYtId null so
+        // the carousel just rotates static images (light on memory).
+        if (isMobile) { setTrailerYtId(null); return; }
 
         // If the item already has a resolved trailerYtId (from promoted MetaItem), use it directly
         if (item.trailerYtId) {

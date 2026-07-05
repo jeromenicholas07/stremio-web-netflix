@@ -12,6 +12,11 @@ const { TrailerContext } = require('stremio/common/TrailerContext');
 const { useServices } = require('stremio/services');
 const tmdbService = require('stremio/services/TMDBService');
 const traktBridge = require('stremio/services/TraktBridge');
+// Mobile (iOS/Android): phones have no hover, and the per-card trailer / TMDB
+// logo / canvas letterbox machinery is the main memory hog that crashes the iOS
+// PWA. On mobile a card is just a poster that links to details — all that heavy
+// work is short-circuited below.
+const { isMobile } = require('stremio/common/Platform/device');
 const styles = require('./styles');
 
 // Emit toast events so a top-level listener can display them via the ToastProvider.
@@ -504,8 +509,10 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     const [trailerYtId, setTrailerYtId] = React.useState(null);
 
     React.useEffect(() => {
-        // Skip trailer fetch entirely for Continue Watching items
-        if (isCWItem) { setTrailerYtId(null); return; }
+        // Skip trailer fetch entirely for Continue Watching items, and on mobile
+        // (no hover → no trailer; also stops the noembed + letterbox effects,
+        // which key off trailerYtId).
+        if (isCWItem || isMobile) { setTrailerYtId(null); return; }
         let cancelled = false;
         const fetchTrailer = async () => {
             const source = tmdbService.getTrailerSource();
@@ -572,6 +579,9 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
         const cached = tmdbService.getCachedLogoUrl(itemId, type);
         setLogoUrl(cached || null);
         if (cached) return;
+        // Mobile: never issue the TMDB resolve/logo network calls (2 per card ×
+        // dozens of cards). Fall back to the plain text title instead.
+        if (isMobile) return;
         let cancelled = false;
         (async () => {
             try {
@@ -585,6 +595,9 @@ const MetaItem = React.memo(({ className, type, name, poster, posterShape, backg
     }, [itemId, type]);
 
     const onMouseEnter = React.useCallback(() => {
+        // Mobile: no hover UI at all — iOS Safari can synthesize a mouseenter on
+        // tap, which would otherwise pop the hover-info/options overlay.
+        if (isMobile) return;
         // Measure poster dims BEFORE hover scale is applied
         if (posterRef.current) {
             originalDimsRef.current = {
