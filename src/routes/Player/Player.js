@@ -519,14 +519,32 @@ const Player = ({ urlParams, queryParams }) => {
                 findTrackByLang(video.state.extraSubtitlesTracks, settings.subtitlesLanguage);
 
             if (subtitlesTrack && subtitlesTrack.id) {
+                // Embedded chosen — make sure no external overlay is also active.
+                video.setExtraSubtitlesTrack(null);
                 video.setSubtitlesTrack(subtitlesTrack.id);
                 defaultSubtitlesSelected.current = true;
             } else if (extraSubtitlesTrack && extraSubtitlesTrack.id) {
+                // External chosen — disable native embedded tracks so the browser
+                // doesn't render a second (default-flagged) subtitle via ::cue.
+                video.setSubtitlesTrack(null);
                 video.setExtraSubtitlesTrack(extraSubtitlesTrack.id);
                 defaultSubtitlesSelected.current = true;
             }
         }
     }, [video.state.subtitlesTracks, video.state.extraSubtitlesTracks, player.streamState]);
+
+    // Guard against double subtitles: while an EXTERNAL subtitle overlay is
+    // active, keep every native embedded text track disabled. iOS Safari auto-
+    // shows a default-flagged embedded track via native ::cue rendering —
+    // positioned by the browser, not our overlay — which appears as a second,
+    // misplaced subtitle. Disabling native tracks is idempotent (a no-op once
+    // they're all off, so no render loop), and this re-runs when embedded tracks
+    // load asynchronously so a late-arriving default track is caught too.
+    React.useEffect(() => {
+        if (video.state.selectedExtraSubtitlesTrackId !== null) {
+            video.setSubtitlesTrack(null);
+        }
+    }, [video.state.selectedExtraSubtitlesTrackId, video.state.subtitlesTracks]);
 
     // Auto audio track selection
     React.useEffect(() => {
