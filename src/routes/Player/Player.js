@@ -534,32 +534,33 @@ const Player = ({ urlParams, queryParams }) => {
                 findTrackByLang(video.state.extraSubtitlesTracks, settings.subtitlesLanguage);
 
             if (subtitlesTrack && subtitlesTrack.id) {
-                // Embedded chosen — make sure no external overlay is also active.
-                video.setExtraSubtitlesTrack(null);
                 video.setSubtitlesTrack(subtitlesTrack.id);
                 defaultSubtitlesSelected.current = true;
             } else if (extraSubtitlesTrack && extraSubtitlesTrack.id) {
-                // External chosen — disable native embedded tracks so the browser
-                // doesn't render a second (default-flagged) subtitle via ::cue.
-                video.setSubtitlesTrack(null);
                 video.setExtraSubtitlesTrack(extraSubtitlesTrack.id);
                 defaultSubtitlesSelected.current = true;
             }
         }
     }, [video.state.subtitlesTracks, video.state.extraSubtitlesTracks, player.streamState]);
 
-    // Guard against double subtitles: while an EXTERNAL subtitle overlay is
-    // active, keep every native embedded text track disabled. iOS Safari auto-
-    // shows a default-flagged embedded track via native ::cue rendering —
-    // positioned by the browser, not our overlay — which appears as a second,
-    // misplaced subtitle. Disabling native tracks is idempotent (a no-op once
-    // they're all off, so no render loop), and this re-runs when embedded tracks
-    // load asynchronously so a late-arriving default track is caught too.
+    // Double-subtitle guard, resolved per platform so only one renderer is ever
+    // visible:
+    //   Desktop — our styled HTML overlay is the intended renderer, so if an
+    //             external track is active, disable native embedded ::cue tracks.
+    //   Mobile  — the OS-rendered native subtitle is properly centered and
+    //             placed in both portrait and the rotated landscape, while our
+    //             overlay is not; so prefer native and hide the overlay when both
+    //             would show. Re-runs when tracks load async.
     React.useEffect(() => {
-        if (video.state.selectedExtraSubtitlesTrackId !== null) {
+        if (platform.isMobile) {
+            if (video.state.selectedSubtitlesTrackId !== null &&
+                video.state.selectedExtraSubtitlesTrackId !== null) {
+                video.setExtraSubtitlesTrack(null);
+            }
+        } else if (video.state.selectedExtraSubtitlesTrackId !== null) {
             video.setSubtitlesTrack(null);
         }
-    }, [video.state.selectedExtraSubtitlesTrackId, video.state.subtitlesTracks]);
+    }, [platform.isMobile, video.state.selectedSubtitlesTrackId, video.state.selectedExtraSubtitlesTrackId, video.state.subtitlesTracks]);
 
     // Auto audio track selection
     React.useEffect(() => {

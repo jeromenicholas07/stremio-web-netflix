@@ -14,14 +14,13 @@
 }
 
 @media only screen and (max-width: @minimum) {
-    // The subtitle overlay (a div the video layer appends, anchored at the very
-    // bottom of the frame) sits flush against the screen edge on phones, which
-    // reads as "wrongly placed" and collides with the control bar / home
-    // indicator. Lift it with padding-bottom — this composes with the overlay's
-    // inline `bottom` offset so it stays correct in both portrait and the
-    // rotated force-landscape mode, and doesn't fight the subtitle-offset setting.
+    // Fallback only: on phones the native OS subtitle is preferred (centered and
+    // correctly placed by the browser). This external HTML overlay is used only
+    // when a file has no embedded track; give it a small lift off the very bottom
+    // edge so it isn't flush against the screen, kept minimal so it isn't "too
+    // much" in the rotated landscape view.
     .video-container .video > div {
-        padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 2rem);
+        padding-bottom: 1rem;
         box-sizing: border-box;
     }
 }
