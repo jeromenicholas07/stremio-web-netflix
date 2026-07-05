@@ -8217,7 +8217,7 @@ html.active-slider-within-NcgYf{cursor:grabbing}html.active-slider-within-NcgYf 
 }
 @media only screen and (max-width: 640px) {
   .control-bar-container-xsWA7 {
-    padding: 0 0 calc(env(safe-area-inset-bottom, 0px) + 0.75rem);
+    padding: 0 0 0.5rem;
   }
   .control-bar-container-xsWA7 .seek-bar-I7WeY {
     margin: 0 1.5rem;
@@ -9182,6 +9182,12 @@ html:not(.active-slider-within-NcgYf) .player-container-wIELK.overlayHidden-gyjI
 }
 .video-container-v9_vA .video-tkpQm * {
   font-size: inherit;
+}
+@media only screen and (max-width: 640px) {
+  .video-container-v9_vA .video-tkpQm > div {
+    padding-bottom: 1rem;
+    box-sizing: border-box;
+  }
 }
 
 .indicator-container-wgAZn {
