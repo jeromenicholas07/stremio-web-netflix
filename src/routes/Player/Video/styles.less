@@ -1,5 +1,7 @@
 // Copyright (C) 2017-2023 Smart code 203358507
 
+@import (reference) '~stremio/common/screen-sizes.less';
+
 .video-container {
     .video {
         width: 100%;
@@ -8,5 +10,18 @@
         * {
             font-size: inherit;
         }
+    }
+}
+
+@media only screen and (max-width: @minimum) {
+    // The subtitle overlay (a div the video layer appends, anchored at the very
+    // bottom of the frame) sits flush against the screen edge on phones, which
+    // reads as "wrongly placed" and collides with the control bar / home
+    // indicator. Lift it with padding-bottom — this composes with the overlay's
+    // inline `bottom` offset so it stays correct in both portrait and the
+    // rotated force-landscape mode, and doesn't fight the subtitle-offset setting.
+    .video-container .video > div {
+        padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 2rem);
+        box-sizing: border-box;
     }
 }
