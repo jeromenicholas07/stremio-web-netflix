@@ -9071,9 +9071,6 @@ html:not(.active-slider-within-NcgYf) .player-container-wIELK.overlayHidden-gyjI
   transform: rotate(90deg);
   z-index: 100;
   background-color: #000;
-  box-sizing: border-box;
-  padding-left: env(safe-area-inset-top, 0px);
-  padding-right: env(safe-area-inset-bottom, 0px);
 }
 .player-container-wIELK .layer-qalDW {
   position: absolute;
@@ -9185,7 +9182,7 @@ html:not(.active-slider-within-NcgYf) .player-container-wIELK.overlayHidden-gyjI
 }
 @media only screen and (max-width: 640px) {
   .video-container-v9_vA .video-tkpQm > div {
-    padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 2rem);
+    padding-bottom: 1rem;
     box-sizing: border-box;
   }
 }
