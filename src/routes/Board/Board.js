@@ -4,6 +4,7 @@ const React = require('react');
 const classnames = require('classnames');
 const debounce = require('lodash.debounce');
 const useTranslate = require('stremio/common/useTranslate');
+const { isMobile } = require('stremio/common/Platform/device');
 const { useStreamingServer, useNotifications, withCoreSuspender } = require('stremio/common');
 const { ContinueWatchingItem, EventModal, IosInstallBanner, MainNavBars, MetaItem, MetaRow } = require('stremio/components');
 const HeroBanner = require('stremio/components/HeroBanner');
@@ -424,7 +425,11 @@ const BoardContent = () => {
     // Pre-compute all filtered+deduped rows in a single useMemo pass.
     // Each row is filtered by combinedDismissedSet, deduped against earlier rows,
     // and capped at MAX_ROW_ITEMS so we always show a consistent count.
-    const MAX_ROW_ITEMS = 20;
+    // Fewer cards per row on phones — every card is a decoded poster, and the
+    // iOS PWA has a hard memory ceiling. Also bounds how many total rows mount
+    // (MAX_MOBILE_ROWS) so a long discovery list can't accumulate unbounded DOM.
+    const MAX_ROW_ITEMS = isMobile ? 12 : 20;
+    const MAX_MOBILE_ROWS = 10;
     const dedupedRows = React.useMemo(() => {
         const seenNames = new Set();
         const result = { traktDisc: [], tmdbDisc: [], recs: [], content: [] };
@@ -499,6 +504,18 @@ const BoardContent = () => {
                 catalog: { ...catalog, content: { ...catalog.content, content: items } },
                 source: addonName,
             });
+        }
+
+        // Mobile: hard-cap the total number of rows (Continue Watching is always
+        // kept separately above). Fill the budget by priority — TMDB discovery
+        // first, then recommendations, then addon catalogs — so the most useful
+        // rows survive and the rest are dropped.
+        if (isMobile) {
+            result.tmdbDisc = result.tmdbDisc.slice(0, MAX_MOBILE_ROWS);
+            const afterDisc = Math.max(0, MAX_MOBILE_ROWS - result.tmdbDisc.length);
+            result.recs = result.recs.slice(0, afterDisc);
+            const afterRecs = Math.max(0, afterDisc - result.recs.length);
+            result.content = result.content.slice(0, afterRecs);
         }
 
         return result;
