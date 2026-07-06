@@ -1,7 +1,5 @@
 // Copyright (C) 2017-2023 Smart code 203358507
 
-@import (reference) '~stremio/common/screen-sizes.less';
-
 .video-container {
     .video {
         width: 100%;
@@ -10,17 +8,5 @@
         * {
             font-size: inherit;
         }
-    }
-}
-
-@media only screen and (max-width: @minimum) {
-    // Fallback only: on phones the native OS subtitle is preferred (centered and
-    // correctly placed by the browser). This external HTML overlay is used only
-    // when a file has no embedded track; give it a small lift off the very bottom
-    // edge so it isn't flush against the screen, kept minimal so it isn't "too
-    // much" in the rotated landscape view.
-    .video-container .video > div {
-        padding-bottom: 1rem;
-        box-sizing: border-box;
     }
 }

@@ -111,19 +111,10 @@ const SubtitlesMenu = React.memo((props) => {
                 props.onExtraSubtitlesTrackSelected(null);
             }
         } else if (track.embedded) {
-            // Selecting an embedded track must turn OFF any external track,
-            // otherwise both render at once (double subtitles).
-            if (typeof props.onExtraSubtitlesTrackSelected === 'function') {
-                props.onExtraSubtitlesTrackSelected(null);
-            }
             if (typeof props.onSubtitlesTrackSelected === 'function') {
                 props.onSubtitlesTrackSelected(track.id);
             }
         } else {
-            // ...and vice versa: selecting an external track turns off embedded.
-            if (typeof props.onSubtitlesTrackSelected === 'function') {
-                props.onSubtitlesTrackSelected(null);
-            }
             if (typeof props.onExtraSubtitlesTrackSelected === 'function') {
                 props.onExtraSubtitlesTrackSelected(track.id);
             }
@@ -131,17 +122,10 @@ const SubtitlesMenu = React.memo((props) => {
     }, [props.subtitlesTracks, props.extraSubtitlesTracks, props.onSubtitlesTrackSelected, props.onExtraSubtitlesTrackSelected]);
     const subtitlesTrackOnClick = React.useCallback((event) => {
         if (event.currentTarget.dataset.embedded === 'true') {
-            // Mutually exclusive with external subtitles — clear the other side.
-            if (typeof props.onExtraSubtitlesTrackSelected === 'function') {
-                props.onExtraSubtitlesTrackSelected(null);
-            }
             if (typeof props.onSubtitlesTrackSelected === 'function') {
                 props.onSubtitlesTrackSelected(event.currentTarget.dataset.id);
             }
         } else {
-            if (typeof props.onSubtitlesTrackSelected === 'function') {
-                props.onSubtitlesTrackSelected(null);
-            }
             if (typeof props.onExtraSubtitlesTrackSelected === 'function') {
                 props.onExtraSubtitlesTrackSelected(event.currentTarget.dataset.id);
             }
