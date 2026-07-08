@@ -9180,12 +9180,6 @@ html:not(.active-slider-within-NcgYf) .player-container-wIELK.overlayHidden-gyjI
 .video-container-v9_vA .video-tkpQm * {
   font-size: inherit;
 }
-@media only screen and (max-width: 640px) {
-  .video-container-v9_vA .video-tkpQm > div {
-    padding-bottom: 1rem;
-    box-sizing: border-box;
-  }
-}
 
 .indicator-container-wgAZn {
   position: absolute;
