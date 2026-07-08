@@ -92,7 +92,9 @@ function toStremioItemBase(item) {
         releaseInfo: item.year ? String(item.year) : '',
         _tmdbId: item.tmdbId,
         deepLinks: {
-            metaDetailsStreams: `#/metadetails/${item.mediaType}/${id}`,
+            metaDetailsStreams: item.mediaType === 'movie' ?
+                `#/metadetails/movie/${id}/${id}` :
+                `#/metadetails/${item.mediaType}/${id}`,
             metaDetailsVideos: `#/metadetails/${item.mediaType}/${id}`,
         },
     };

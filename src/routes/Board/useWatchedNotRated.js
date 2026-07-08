@@ -69,7 +69,9 @@ function useWatchedNotRated() {
                     posterShape: 'landscape',
                     releaseInfo: item.year ? String(item.year) : '',
                     deepLinks: {
-                        metaDetailsStreams: `#/metadetails/${stremioType}/${item.id}`,
+                        metaDetailsStreams: stremioType === 'movie' ?
+                            `#/metadetails/movie/${item.id}/${item.id}` :
+                            `#/metadetails/${stremioType}/${item.id}`,
                         metaDetailsVideos: `#/metadetails/${stremioType}/${item.id}`,
                     },
                     watchedAt: item.watchedAt,

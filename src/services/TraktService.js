@@ -154,7 +154,9 @@ class TraktService {
                 : [],
             deepLinks: imdbId ? {
                 metaDetailsVideos: `#/metadetails/${stremioType}/${imdbId}`,
-                metaDetailsStreams: `#/metadetails/${stremioType}/${imdbId}`,
+                metaDetailsStreams: stremioType === 'movie' ?
+                    `#/metadetails/movie/${imdbId}/${imdbId}` :
+                    `#/metadetails/${stremioType}/${imdbId}`,
                 player: null,
             } : {
                 metaDetailsVideos: null,

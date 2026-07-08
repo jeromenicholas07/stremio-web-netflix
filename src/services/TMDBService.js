@@ -549,9 +549,15 @@ class TMDBService {
             if (imdbId) {
                 item._tmdbId = item.id; // preserve original TMDB ID
                 item.id = imdbId;
+                // A movie's streams page needs the videoId segment (which equals
+                // the meta id for movies): #/metadetails/movie/tt../tt.. — without
+                // it the meta page opens with no streams. Series go to the videos
+                // (episodes) list instead, so no videoId.
                 item.deepLinks = {
                     metaDetailsVideos: `#/metadetails/${item.type}/${imdbId}`,
-                    metaDetailsStreams: `#/metadetails/${item.type}/${imdbId}`,
+                    metaDetailsStreams: item.type === 'movie' ?
+                        `#/metadetails/movie/${imdbId}/${imdbId}` :
+                        `#/metadetails/${item.type}/${imdbId}`,
                     player: null,
                 };
             }
@@ -580,7 +586,9 @@ class TMDBService {
             links: (tmdbItem.genre_ids || []).map((id) => ({ category: 'Genres', name: GENRE_MAP[id] || '' })).filter((l) => l.name),
             deepLinks: {
                 metaDetailsVideos: `#/metadetails/${stremioType}/tmdb:${tmdbId}`,
-                metaDetailsStreams: `#/metadetails/${stremioType}/tmdb:${tmdbId}`,
+                metaDetailsStreams: isMovie ?
+                    `#/metadetails/movie/tmdb:${tmdbId}/tmdb:${tmdbId}` :
+                    `#/metadetails/${stremioType}/tmdb:${tmdbId}`,
                 player: null,
             },
         };
