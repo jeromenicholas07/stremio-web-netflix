@@ -54,7 +54,6 @@ const Player = ({ urlParams, queryParams }) => {
     const streamingServer = useStreamingServer();
     const statistics = useStatistics(player, streamingServer);
     const video = useVideo();
-    useAudioOutputRecovery(video.containerRef);
     const routeFocused = useRouteFocused();
     const platform = usePlatform();
     const toast = useToast();
@@ -432,7 +431,10 @@ const Player = ({ urlParams, queryParams }) => {
         video.addLocalSubtitles(filename, buffer);
     });
 
-    React.useEffect(() => {
+    // `timeOverride` (ms) resumes where playback currently is instead of where
+    // the library says it left off — used to rebuild the stream in place, e.g.
+    // when the audio output device changed underneath us.
+    const loadStream = React.useCallback((timeOverride) => {
         setError(null);
         video.unload();
 
@@ -453,13 +455,16 @@ const Player = ({ urlParams, queryParams }) => {
                         []
                 },
                 autoplay: true,
-                time: player.libraryItem !== null &&
+                time: timeOverride !== null && timeOverride !== undefined && isFinite(timeOverride) ?
+                    timeOverride
+                    :
+                    player.libraryItem !== null &&
                     player.selected.streamRequest !== null &&
                     player.selected.streamRequest.path !== null &&
                     player.libraryItem.state.video_id === player.selected.streamRequest.path.id ?
-                    player.libraryItem.state.timeOffset
-                    :
-                    0,
+                        player.libraryItem.state.timeOffset
+                        :
+                        0,
                 forceTranscoding: forceTranscoding || casting,
                 maxAudioChannels: settings.surroundSound ? 32 : 2,
                 hardwareDecoding: settings.hardwareDecoding,
@@ -473,7 +478,19 @@ const Player = ({ urlParams, queryParams }) => {
                 shellTransport: services.shell.active ? services.shell.transport : null,
             });
         }
+    }, [player, streamingServer, forceTranscoding, casting, settings, platform, services]);
+
+    React.useEffect(() => {
+        loadStream();
     }, [streamingServer.baseUrl, player.selected, player.stream, forceTranscoding, casting]);
+
+    useAudioOutputRecovery({
+        shell: services.shell,
+        stream: video.state.stream,
+        paused: video.state.paused,
+        time: video.state.time,
+        reload: loadStream,
+    });
     React.useEffect(() => {
         if (video.state.stream !== null) {
             const tracks = player.subtitles.map((subtitles) => ({
