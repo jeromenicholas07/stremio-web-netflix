@@ -7,15 +7,16 @@
 //
 // The repair is to rebuild the stream at the position it is already at — the
 // same thing you get by backing out and replaying, minus losing your place.
-// In-place repairs were tried first and are not dependable: on the Shell,
-// playback runs through mpv, where re-selecting the track or re-setting
-// `audio-device` at runtime does not bring the output back
-// (https://github.com/mpv-player/mpv/issues/11192). A fresh load does.
+// In-place repair is not an option on the Shell, where playback runs through
+// mpv: mpv does not bring its audio output back when a device reappears, and
+// re-selecting the track or re-setting `audio-device` at runtime does not help
+// (https://github.com/mpv-player/mpv/issues/11192).
 //
-// Detection is doubled up because the two backends see different things:
-// Chromium fires `devicechange` on navigator.mediaDevices, and mpv reports its
-// own `audio-device-list`. Either is enough on its own; in the Shell both are
-// available and they do not always agree on when a device came back.
+// The repair is exposed as a function so it can be triggered by hand, because
+// the automatic triggers are the unreliable part. Chromium's `devicechange` is
+// not implemented on every WebView the Shell ships with, and mpv only reports
+// `audio-device-list` changes when its audio output driver supports hotplug.
+// Neither can be relied on, so neither is the only way to get the fix.
 
 const React = require('react');
 
@@ -23,8 +24,6 @@ const React = require('react');
 // and on again should cost one reload, not two.
 const DEVICE_CHANGE_DEBOUNCE = 1500;
 // A reload costs a re-buffer, so cap how often device noise can trigger one.
-// Some systems emit `devicechange` for things that are not a device coming or
-// going; without this a chatty machine could stutter through a whole film.
 const MIN_RELOAD_INTERVAL = 15 * 1000;
 
 const useAudioOutputRecovery = ({ shell, stream, paused, time, reload }) => {
@@ -38,6 +37,20 @@ const useAudioOutputRecovery = ({ shell, stream, paused, time, reload }) => {
     pausedRef.current = paused;
     timeRef.current = time;
     reloadRef.current = reload;
+
+    // Asked for explicitly, so it skips the pause deferral and the rate limit —
+    // if someone reaches for this, the audio is already broken.
+    const recoverNow = React.useCallback(() => {
+        if (stream === null) {
+            return false;
+        }
+
+        pendingRef.current = false;
+        lastReloadRef.current = Date.now();
+        console.warn('AudioOutputRecovery: manual reload at', timeRef.current);
+        reloadRef.current(timeRef.current);
+        return true;
+    }, [stream]);
 
     const recover = React.useCallback(() => {
         if (stream === null) {
@@ -74,7 +87,19 @@ const useAudioOutputRecovery = ({ shell, stream, paused, time, reload }) => {
     }, [paused, recover]);
 
     React.useEffect(() => {
-        const transport = shell && shell.active ? shell.transport : null;
+        // `active` flips as soon as the transport is constructed, but on the Qt
+        // WebChannel build `send` is only wired up once the handshake response
+        // arrives — so it can genuinely be missing here.
+        const shellTransport = shell && shell.active ? shell.transport : null;
+        const transport = shellTransport !== null && typeof shellTransport.send === 'function' &&
+            typeof shellTransport.on === 'function' ?
+            shellTransport
+            :
+            null;
+
+        if (shellTransport !== null && transport === null) {
+            console.warn('AudioOutputRecovery: shell transport not ready, mpv device events unavailable');
+        }
 
         const schedule = () => {
             clearTimeout(timeoutRef.current);
@@ -88,7 +113,9 @@ const useAudioOutputRecovery = ({ shell, stream, paused, time, reload }) => {
 
         const onMpvPropChange = (args) => {
             if (args && args.name === 'audio-device-list') {
-                console.warn('AudioOutputRecovery: mpv audio-device-list changed');
+                // Logged in full: if the automatic path ever misbehaves, this
+                // says whether mpv saw the device leave and come back at all.
+                console.warn('AudioOutputRecovery: mpv audio-device-list', JSON.stringify(args.data));
                 schedule();
             }
         };
@@ -100,8 +127,9 @@ const useAudioOutputRecovery = ({ shell, stream, paused, time, reload }) => {
 
         if (transport !== null) {
             transport.on('mpv-prop-change', onMpvPropChange);
-            // ShellVideo issues its own observe calls each time it loads, so
-            // ours is re-issued per stream for the same reason.
+            // Observing is also what makes mpv start monitoring for hotplug at
+            // all, and it has to be re-issued per stream because ShellVideo
+            // re-issues its own observes each time it loads.
             transport.send('mpv-observe-prop', 'audio-device-list');
         }
 
@@ -112,11 +140,13 @@ const useAudioOutputRecovery = ({ shell, stream, paused, time, reload }) => {
                 mediaDevices.removeEventListener('devicechange', onDeviceChange);
             }
 
-            if (transport !== null) {
+            if (transport !== null && typeof transport.off === 'function') {
                 transport.off('mpv-prop-change', onMpvPropChange);
             }
         };
     }, [shell && shell.active, stream, recover]);
+
+    return recoverNow;
 };
 
 module.exports = useAudioOutputRecovery;

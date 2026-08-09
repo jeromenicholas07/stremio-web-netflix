@@ -10,16 +10,18 @@ const { IOS_EXTERNAL_PLAYERS, getExternalMediaUrl } = require('stremio/common/io
 const Option = require('./Option');
 const styles = require('./styles');
 
-const OptionsMenu = ({ className, stream, playbackDevices, extraSubtitlesTracks, selectedExtraSubtitlesTrackId }) => {
+const OptionsMenu = ({ className, stream, playbackDevices, extraSubtitlesTracks, selectedExtraSubtitlesTrackId, onReloadAudio }) => {
     const { t } = useTranslation();
     const { core } = useServices();
     const platform = usePlatform();
     const toast = useToast();
     const [streamingUrl, downloadUrl] = React.useMemo(() => {
-        return stream !== null ?
-            stream.deepLinks &&
-            stream.deepLinks.externalPlayer &&
-            [stream.deepLinks.externalPlayer.streaming, stream.deepLinks.externalPlayer.download]
+        // `stream` is undefined (not null) when nothing is selected, and the
+        // deepLinks chain is optional — either used to throw here, taking the
+        // whole menu down with it.
+        const externalPlayer = stream?.deepLinks?.externalPlayer;
+        return externalPlayer ?
+            [externalPlayer.streaming, externalPlayer.download]
             :
             [null, null];
     }, [stream]);
@@ -101,6 +103,17 @@ const OptionsMenu = ({ className, stream, playbackDevices, extraSubtitlesTracks,
     return (
         <div className={classnames(className, styles['options-menu-container'])} onMouseDown={onMouseDown}>
             {
+                typeof onReloadAudio === 'function' ?
+                    <Option
+                        icon={'volume-high'}
+                        label={'Reload audio (Shift+A)'}
+                        disabled={stream === null}
+                        onClick={onReloadAudio}
+                    />
+                    :
+                    null
+            }
+            {
                 streamingUrl || downloadUrl ?
                     <Option
                         icon={'link'}
@@ -170,6 +183,7 @@ OptionsMenu.propTypes = {
     playbackDevices: PropTypes.array,
     extraSubtitlesTracks: PropTypes.array,
     selectedExtraSubtitlesTrackId: PropTypes.string,
+    onReloadAudio: PropTypes.func,
 };
 
 module.exports = OptionsMenu;

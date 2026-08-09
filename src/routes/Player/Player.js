@@ -484,13 +484,24 @@ const Player = ({ urlParams, queryParams }) => {
         loadStream();
     }, [streamingServer.baseUrl, player.selected, player.stream, forceTranscoding, casting]);
 
-    useAudioOutputRecovery({
+    const recoverAudioOutput = useAudioOutputRecovery({
         shell: services.shell,
         stream: video.state.stream,
         paused: video.state.paused,
         time: video.state.time,
         reload: loadStream,
     });
+
+    const onReloadAudioRequested = React.useCallback(() => {
+        if (recoverAudioOutput()) {
+            toast.show({
+                type: 'success',
+                title: 'Reloading audio',
+                message: 'Resuming from where you left off',
+                timeout: 3000,
+            });
+        }
+    }, [recoverAudioOutput]);
     React.useEffect(() => {
         if (video.state.stream !== null) {
             const tracks = player.subtitles.map((subtitles) => ({
@@ -830,6 +841,13 @@ const Player = ({ urlParams, queryParams }) => {
 
     React.useLayoutEffect(() => {
         const onKeyDown = (e) => {
+            // Shift+A rebuilds the stream in place when the audio output died
+            // with the Bluetooth speaker that went away.
+            if (e.code === 'KeyA' && e.shiftKey && !e.repeat) {
+                onReloadAudioRequested();
+                return;
+            }
+
             if (e.code !== 'Space' || e.repeat) return;
 
             longPress.current = false;
@@ -901,7 +919,7 @@ const Player = ({ urlParams, queryParams }) => {
             window.removeEventListener('mousedown', onMouseDownHold);
             window.removeEventListener('mouseup', onMouseUp);
         };
-    }, [routeFocused, menusOpen, video.state.volume]);
+    }, [routeFocused, menusOpen, video.state.volume, onReloadAudioRequested]);
 
     React.useEffect(() => {
         video.events.on('error', onError);
@@ -992,6 +1010,7 @@ const Player = ({ urlParams, queryParams }) => {
                     playbackDevices={playbackDevices}
                     extraSubtitlesTracks={video.state.extraSubtitlesTracks}
                     selectedExtraSubtitlesTrackId={video.state.selectedExtraSubtitlesTrackId}
+                    onReloadAudio={onReloadAudioRequested}
                 />
             </ContextMenu>
             <HorizontalNavBar
@@ -1140,6 +1159,7 @@ const Player = ({ urlParams, queryParams }) => {
                         playbackDevices={playbackDevices}
                         extraSubtitlesTracks={video.state.extraSubtitlesTracks}
                         selectedExtraSubtitlesTrackId={video.state.selectedExtraSubtitlesTrackId}
+                        onReloadAudio={onReloadAudioRequested}
                     />
                     :
                     null
