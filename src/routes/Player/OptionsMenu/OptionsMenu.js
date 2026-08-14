@@ -106,7 +106,7 @@ const OptionsMenu = ({ className, stream, playbackDevices, extraSubtitlesTracks,
                 typeof onReloadAudio === 'function' ?
                     <Option
                         icon={'volume-high'}
-                        label={'Reload audio (Shift+A)'}
+                        label={'Reload audio (B)'}
                         disabled={stream === null}
                         onClick={onReloadAudio}
                     />

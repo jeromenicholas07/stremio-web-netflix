@@ -725,6 +725,12 @@ const Player = ({ urlParams, queryParams }) => {
         navigator.mediaSession.setActionHandler('nexttrack', nexVideoCallback);
     }, [player.nextVideo, onPlayRequested, onPauseRequested, onNextVideoRequested]);
 
+    // 'B' rather than anything near 'A': the matcher ignores modifiers a combo
+    // does not name, so every A-based combo also opens the audio track menu.
+    onShortcut('reloadAudio', () => {
+        onReloadAudioRequested();
+    });
+
     onShortcut('playPause', () => {
         if (!menusOpen && !nextVideoPopupOpen && video.state.paused !== null) {
             if (video.state.paused) {
@@ -841,13 +847,6 @@ const Player = ({ urlParams, queryParams }) => {
 
     React.useLayoutEffect(() => {
         const onKeyDown = (e) => {
-            // Shift+A rebuilds the stream in place when the audio output died
-            // with the Bluetooth speaker that went away.
-            if (e.code === 'KeyA' && e.shiftKey && !e.repeat) {
-                onReloadAudioRequested();
-                return;
-            }
-
             if (e.code !== 'Space' || e.repeat) return;
 
             longPress.current = false;
@@ -919,7 +918,7 @@ const Player = ({ urlParams, queryParams }) => {
             window.removeEventListener('mousedown', onMouseDownHold);
             window.removeEventListener('mouseup', onMouseUp);
         };
-    }, [routeFocused, menusOpen, video.state.volume, onReloadAudioRequested]);
+    }, [routeFocused, menusOpen, video.state.volume]);
 
     React.useEffect(() => {
         video.events.on('error', onError);
