@@ -49,7 +49,7 @@ const noop = () => undefined;
 // The recovery state machine, kept free of React and of the clock so it can be
 // driven directly by tests. `send` writes an mpv property, `isStreamLoaded`
 // distinguishes a device failure from ordinary teardown.
-const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log = noop }) => {
+const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log = noop, onAudioLost = noop }) => {
     // Last track mpv had selected, which is what we put back.
     let lastGoodAid = null;
     // Only ever true because mpv told us it dropped the track. Retrying is
@@ -111,8 +111,10 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
 
         // mpv dropped the track without being asked. That is the failure.
         if (isStreamLoaded() && isSelected(lastGoodAid)) {
+            // Once per outage, not once per retry — the retries are silent.
             if (!audioDown) {
                 log('AudioRecovery: mpv deselected the audio track, output device likely gone');
+                onAudioLost();
             }
 
             audioDown = true;
@@ -148,9 +150,11 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
     };
 };
 
-const useAudioTrackRecovery = ({ shell, stream }) => {
+const useAudioTrackRecovery = ({ shell, stream, onAudioLost }) => {
     const streamRef = React.useRef(stream);
+    const onAudioLostRef = React.useRef(onAudioLost);
     streamRef.current = stream;
+    onAudioLostRef.current = onAudioLost;
 
     React.useEffect(() => {
         // Shell only — there is no mpv behind the browser/PWA player.
@@ -163,6 +167,11 @@ const useAudioTrackRecovery = ({ shell, stream }) => {
             send: (event, args) => transport.send(event, args),
             isStreamLoaded: () => streamRef.current !== null,
             log: console.warn,
+            onAudioLost: () => {
+                if (typeof onAudioLostRef.current === 'function') {
+                    onAudioLostRef.current();
+                }
+            },
         });
 
         const onMpvPropChange = (args) => {

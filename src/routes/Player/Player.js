@@ -54,10 +54,26 @@ const Player = ({ urlParams, queryParams }) => {
     const streamingServer = useStreamingServer();
     const statistics = useStatistics(player, streamingServer);
     const video = useVideo();
-    useAudioTrackRecovery({ shell: services.shell, stream: video.state.stream });
     const routeFocused = useRouteFocused();
     const platform = usePlatform();
     const toast = useToast();
+
+    // Only the failure is surfaced — recovery retries stay silent, and coming
+    // back is something you hear.
+    const onAudioOutputLost = React.useCallback(() => {
+        toast.show({
+            type: 'error',
+            title: 'Audio output lost',
+            message: 'Restoring as soon as the device is back',
+            timeout: 5000,
+        });
+    }, []);
+
+    useAudioTrackRecovery({
+        shell: services.shell,
+        stream: video.state.stream,
+        onAudioLost: onAudioOutputLost,
+    });
 
     const [seeking, setSeeking] = React.useState(false);
 

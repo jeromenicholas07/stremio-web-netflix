@@ -50,11 +50,12 @@ function createClock() {
 function setup({ streamLoaded = true } = {}) {
     const clock = createClock();
     const sent = [];
-    const state = { streamLoaded };
+    const state = { streamLoaded, lostCount: 0 };
     const recovery = createAudioTrackRecovery({
         send: (event, args) => sent.push([event, args]),
         isStreamLoaded: () => state.streamLoaded,
         timers: clock.timers,
+        onAudioLost: () => { state.lostCount += 1; },
     });
     // Writes of `aid` that the recovery makes.
     const aidWrites = () => sent.filter(([e, a]) => e === 'mpv-set-prop' && a[0] === 'aid').map(([, a]) => a[1]);
@@ -157,6 +158,42 @@ describe('audio track recovery', () => {
         recovery.onPropChange('audio-device-list', [{ name: 'wasapi/speaker' }]);
         clock.advance(300);
         expect(aidWrites().length).toBe(2);
+    });
+
+    it('reports the outage once, not once per retry', () => {
+        const { clock, recovery, state } = setup();
+        recovery.onPropChange('aid', 1);
+        clock.advance(SETTLE + 100);
+
+        recovery.onPropChange('aid', false);
+        clock.advance(TEARDOWN_GRACE);
+        expect(state.lostCount).toBe(1);
+
+        // Several failed attempts must not each raise it again.
+        for (let i = 0; i < 4; i++) {
+            recovery.onPropChange('aid', false);
+            clock.advance(RETRY_DELAYS[Math.min(i, RETRY_DELAYS.length - 1)]);
+        }
+
+        expect(state.lostCount).toBe(1);
+
+        // A fresh outage after a healthy spell does report again.
+        recovery.onPropChange('aid', 1);
+        clock.advance(SETTLE + 100);
+        recovery.onPropChange('aid', false);
+        clock.advance(TEARDOWN_GRACE);
+        expect(state.lostCount).toBe(2);
+    });
+
+    it('stays quiet on teardown', () => {
+        const { clock, recovery, state } = setup();
+        recovery.onPropChange('aid', 1);
+        clock.advance(SETTLE + 100);
+
+        state.streamLoaded = false;
+        recovery.onPropChange('aid', false);
+        clock.advance(60000);
+        expect(state.lostCount).toBe(0);
     });
 
     it('stops everything once disposed', () => {
