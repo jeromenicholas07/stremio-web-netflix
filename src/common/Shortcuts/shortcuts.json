@@ -105,11 +105,6 @@
                 "combos": [["D"]]
             },
             {
-                "name": "reloadAudio",
-                "label": "Reload audio",
-                "combos": [["B"]]
-            },
-            {
                 "name": "playNext",
                 "label": "SETTINGS_SHORTCUT_PLAY_NEXT",
                 "combos": [["Shift", "N"]]

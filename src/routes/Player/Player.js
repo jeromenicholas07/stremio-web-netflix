@@ -25,7 +25,6 @@ const { default: SideDrawer } = require('./SideDrawer');
 const usePlayer = require('./usePlayer');
 const useStatistics = require('./useStatistics');
 const useVideo = require('./useVideo');
-const useAudioOutputRecovery = require('./useAudioOutputRecovery');
 const useWhisperSync = require('./useWhisperSync');
 const styles = require('./styles');
 const Video = require('./Video');
@@ -431,10 +430,7 @@ const Player = ({ urlParams, queryParams }) => {
         video.addLocalSubtitles(filename, buffer);
     });
 
-    // `timeOverride` (ms) resumes where playback currently is instead of where
-    // the library says it left off — used to rebuild the stream in place, e.g.
-    // when the audio output device changed underneath us.
-    const loadStream = React.useCallback((timeOverride) => {
+    React.useEffect(() => {
         setError(null);
         video.unload();
 
@@ -455,16 +451,13 @@ const Player = ({ urlParams, queryParams }) => {
                         []
                 },
                 autoplay: true,
-                time: timeOverride !== null && timeOverride !== undefined && isFinite(timeOverride) ?
-                    timeOverride
-                    :
-                    player.libraryItem !== null &&
+                time: player.libraryItem !== null &&
                     player.selected.streamRequest !== null &&
                     player.selected.streamRequest.path !== null &&
                     player.libraryItem.state.video_id === player.selected.streamRequest.path.id ?
-                        player.libraryItem.state.timeOffset
-                        :
-                        0,
+                    player.libraryItem.state.timeOffset
+                    :
+                    0,
                 forceTranscoding: forceTranscoding || casting,
                 maxAudioChannels: settings.surroundSound ? 32 : 2,
                 hardwareDecoding: settings.hardwareDecoding,
@@ -478,30 +471,7 @@ const Player = ({ urlParams, queryParams }) => {
                 shellTransport: services.shell.active ? services.shell.transport : null,
             });
         }
-    }, [player, streamingServer, forceTranscoding, casting, settings, platform, services]);
-
-    React.useEffect(() => {
-        loadStream();
     }, [streamingServer.baseUrl, player.selected, player.stream, forceTranscoding, casting]);
-
-    const recoverAudioOutput = useAudioOutputRecovery({
-        shell: services.shell,
-        stream: video.state.stream,
-        paused: video.state.paused,
-        time: video.state.time,
-        reload: loadStream,
-    });
-
-    const onReloadAudioRequested = React.useCallback(() => {
-        if (recoverAudioOutput()) {
-            toast.show({
-                type: 'success',
-                title: 'Reloading audio',
-                message: 'Resuming from where you left off',
-                timeout: 3000,
-            });
-        }
-    }, [recoverAudioOutput]);
     React.useEffect(() => {
         if (video.state.stream !== null) {
             const tracks = player.subtitles.map((subtitles) => ({
@@ -724,12 +694,6 @@ const Player = ({ urlParams, queryParams }) => {
         const nexVideoCallback = player.nextVideo ? onNextVideoRequested : null;
         navigator.mediaSession.setActionHandler('nexttrack', nexVideoCallback);
     }, [player.nextVideo, onPlayRequested, onPauseRequested, onNextVideoRequested]);
-
-    // 'B' rather than anything near 'A': the matcher ignores modifiers a combo
-    // does not name, so every A-based combo also opens the audio track menu.
-    onShortcut('reloadAudio', () => {
-        onReloadAudioRequested();
-    });
 
     onShortcut('playPause', () => {
         if (!menusOpen && !nextVideoPopupOpen && video.state.paused !== null) {
@@ -1009,7 +973,6 @@ const Player = ({ urlParams, queryParams }) => {
                     playbackDevices={playbackDevices}
                     extraSubtitlesTracks={video.state.extraSubtitlesTracks}
                     selectedExtraSubtitlesTrackId={video.state.selectedExtraSubtitlesTrackId}
-                    onReloadAudio={onReloadAudioRequested}
                 />
             </ContextMenu>
             <HorizontalNavBar
@@ -1158,7 +1121,6 @@ const Player = ({ urlParams, queryParams }) => {
                         playbackDevices={playbackDevices}
                         extraSubtitlesTracks={video.state.extraSubtitlesTracks}
                         selectedExtraSubtitlesTrackId={video.state.selectedExtraSubtitlesTrackId}
-                        onReloadAudio={onReloadAudioRequested}
                     />
                     :
                     null
