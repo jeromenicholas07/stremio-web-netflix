@@ -25,7 +25,6 @@ const { default: SideDrawer } = require('./SideDrawer');
 const usePlayer = require('./usePlayer');
 const useStatistics = require('./useStatistics');
 const useVideo = require('./useVideo');
-const useAudioTrackRecovery = require('./useAudioTrackRecovery');
 const useWhisperSync = require('./useWhisperSync');
 const styles = require('./styles');
 const Video = require('./Video');
@@ -57,23 +56,6 @@ const Player = ({ urlParams, queryParams }) => {
     const routeFocused = useRouteFocused();
     const platform = usePlatform();
     const toast = useToast();
-
-    // Only the failure is surfaced — recovery retries stay silent, and coming
-    // back is something you hear.
-    const onAudioOutputLost = React.useCallback(() => {
-        toast.show({
-            type: 'error',
-            title: 'Audio output lost',
-            message: 'Restoring as soon as the device is back',
-            timeout: 5000,
-        });
-    }, []);
-
-    useAudioTrackRecovery({
-        shell: services.shell,
-        stream: video.state.stream,
-        onAudioLost: onAudioOutputLost,
-    });
 
     const [seeking, setSeeking] = React.useState(false);
 
