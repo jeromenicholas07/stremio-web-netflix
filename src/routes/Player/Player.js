@@ -25,6 +25,7 @@ const { default: SideDrawer } = require('./SideDrawer');
 const usePlayer = require('./usePlayer');
 const useStatistics = require('./useStatistics');
 const useVideo = require('./useVideo');
+const useAudioProbe = require('./useAudioProbe');
 const useWhisperSync = require('./useWhisperSync');
 const styles = require('./styles');
 const Video = require('./Video');
@@ -53,6 +54,7 @@ const Player = ({ urlParams, queryParams }) => {
     const streamingServer = useStreamingServer();
     const statistics = useStatistics(player, streamingServer);
     const video = useVideo();
+    useAudioProbe({ shell: services.shell });
     const routeFocused = useRouteFocused();
     const platform = usePlatform();
     const toast = useToast();
