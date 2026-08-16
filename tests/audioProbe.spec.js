@@ -55,6 +55,54 @@ describe('audio probe', () => {
         expect(t.sent.map(([, name]) => name)).toEqual(OBSERVE);
     });
 
+    // At Player mount there is no mpv instance yet, so the first observe is
+    // dropped — that is why the first trace reported nothing for these.
+    it('can re-issue the observes once a stream is loaded', () => {
+        const t = createTransport();
+        const probe = createAudioProbe({ transport: t.transport });
+        t.sent.length = 0;
+        probe.observeAgain();
+        expect(t.sent.map(([event]) => event).every((e) => e === 'mpv-observe-prop')).toBe(true);
+        expect(t.sent.map(([, name]) => name)).toEqual(OBSERVE);
+    });
+
+    it('collapses repeated identical values', () => {
+        const t = createTransport();
+        const probe = createAudioProbe({ transport: t.transport });
+
+        t.emit('mpv-prop-change', { name: 'aid', data: 1 });
+        t.emit('mpv-prop-change', { name: 'aid', data: 1 });
+        t.emit('mpv-prop-change', { name: 'aid', data: 1 });
+        expect(probe.entries.filter((e) => e.name === 'aid').length).toBe(1);
+
+        t.emit('mpv-prop-change', { name: 'aid', data: false });
+        expect(probe.entries.filter((e) => e.name === 'aid').length).toBe(2);
+    });
+
+    it('reduces track-list to what is selected', () => {
+        const t = createTransport();
+        const probe = createAudioProbe({ transport: t.transport });
+        const bulky = [
+            { id: 1, type: 'video', selected: true, codec: 'hevc', metadata: { BPS: '1200756' }, 'demux-w': 1912 },
+            { id: 2, type: 'audio', selected: true, codec: 'eac3', lang: 'eng', metadata: { BPS: '224000' } },
+        ];
+
+        t.emit('mpv-prop-change', { name: 'track-list', data: bulky });
+        const entry = probe.entries.find((e) => e.name === 'track-list');
+        expect(entry.value).toContain('"type":"audio"');
+        expect(entry.value).toContain('"selected":true');
+        expect(entry.value).not.toContain('BPS');
+        expect(entry.value).not.toContain('truncated');
+    });
+
+    it('records user markers so the trace can be correlated', () => {
+        const t = createTransport();
+        const probe = createAudioProbe({ transport: t.transport });
+        probe.mark('speaker off');
+        const entry = probe.entries.find((e) => e.kind === 'mark');
+        expect(entry.value).toBe('speaker off');
+    });
+
     it('records the props that matter and ignores the noisy ones', () => {
         const t = createTransport();
         const probe = createAudioProbe({ transport: t.transport });

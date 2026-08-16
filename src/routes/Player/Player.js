@@ -54,7 +54,7 @@ const Player = ({ urlParams, queryParams }) => {
     const streamingServer = useStreamingServer();
     const statistics = useStatistics(player, streamingServer);
     const video = useVideo();
-    useAudioProbe({ shell: services.shell });
+    useAudioProbe({ shell: services.shell, stream: video.state.stream });
     const routeFocused = useRouteFocused();
     const platform = usePlatform();
     const toast = useToast();
