@@ -144,15 +144,26 @@ const createAudioProbe = ({ transport, now = Date.now, log = noop, timers = glob
     transport.on('mpv-event-ended', onEnded);
     observe('mount');
 
-    // The ONLY thing here that writes to mpv, and it runs solely when called by
-    // hand from the console. Nothing triggers it — no timer, no property, no
-    // event — because an automatic version of this is what previously threw the
-    // player back to the streams list.
-    //
-    // A plain `aid = 1` write does nothing: the trace shows mpv keeps reporting
-    // aid as 1 even while the track is deselected, so setting it to the value it
-    // already holds is a no-op. Dropping to `no` first is what forces
-    // mp_switch_track and rebuilds the audio chain on the current device.
+    // Everything below writes to mpv, and runs solely when called by hand from
+    // the console. Nothing triggers any of it — no timer, no property, no event
+    // — because an automatic version is what previously threw the player back
+    // to the streams list.
+
+    // Raw property write, for working out what mpv actually accepts. The first
+    // toggle attempt produced no `aid` change at all, so either the write never
+    // reached mpv or the value was rejected; this is how those are told apart.
+    // `__mpvSet('pause', true)` is the clean control: if playback does not
+    // pause, no write of ours is getting through and the value is irrelevant.
+    const set = (name, value) => {
+        push('set', name, describe(value));
+        transport.send('mpv-set-prop', [name, value]);
+        return 'sent ' + name + ' = ' + describe(value) + ' (watch the trace for a matching prop line)';
+    };
+
+    // A plain `aid = 1` write does nothing: mpv keeps reporting aid as 1 even
+    // while the track is deselected, so setting it to the value it already
+    // holds is a no-op. Dropping it first is what would force mp_switch_track
+    // and rebuild the audio chain on whatever device exists now.
     const fix = (overrideId) => {
         const id = overrideId !== undefined && overrideId !== null ? overrideId : audioTrackId;
         if (id === null || id === undefined) {
@@ -160,19 +171,23 @@ const createAudioProbe = ({ transport, now = Date.now, log = noop, timers = glob
             return 'no audio track known; try __audioFix(1)';
         }
 
-        push('fix', 'aid', 'no');
-        transport.send('mpv-set-prop', ['aid', 'no']);
+        // Boolean false rather than the string 'no': false is how mpv reports a
+        // deselected track over this transport, and the string form produced no
+        // property change at all.
+        push('fix', 'aid', 'false');
+        transport.send('mpv-set-prop', ['aid', false]);
         timers.setTimeout(() => {
             push('fix', 'aid', String(id));
             transport.send('mpv-set-prop', ['aid', id]);
         }, FIX_TOGGLE_DELAY);
 
-        return 'toggling aid: no -> ' + id + ' (watch for track-list selected:true)';
+        return 'toggling aid: false -> ' + id + ' (watch for track-list selected:true)';
     };
 
     return {
         entries,
         fix,
+        set,
         // Re-issued once a stream is loaded: at mount there is no mpv instance
         // yet and the request is dropped on the floor.
         observeAgain: () => observe('stream loaded'),
@@ -201,6 +216,7 @@ const useAudioProbe = ({ shell, stream }) => {
         window.__audioProbeDump = probe.dump;
         window.__audioProbeMark = probe.mark;
         window.__audioFix = probe.fix;
+        window.__mpvSet = probe.set;
 
         return () => {
             probe.dispose();
@@ -209,6 +225,7 @@ const useAudioProbe = ({ shell, stream }) => {
                 delete window.__audioProbeDump;
                 delete window.__audioProbeMark;
                 delete window.__audioFix;
+                delete window.__mpvSet;
             }
         };
     }, [shell && shell.active]);

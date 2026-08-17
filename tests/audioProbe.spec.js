@@ -113,7 +113,7 @@ describe('audio probe', () => {
 
     describe('manual fix', () => {
         // A plain `aid = 1` is a no-op: mpv keeps reporting aid as 1 while the
-        // track is deselected. The drop to `no` is the whole point.
+        // track is deselected. Dropping it to false first is the whole point.
         it('toggles aid off and back to the track that was playing', () => {
             const t = createTransport();
             const clock = createClock();
@@ -131,10 +131,10 @@ describe('audio probe', () => {
 
             t.sent.length = 0;
             probe.fix();
-            expect(t.sent).toEqual([['mpv-set-prop', ['aid', 'no']]]);
+            expect(t.sent).toEqual([['mpv-set-prop', ['aid', false]]]);
             clock.runAll();
             expect(t.sent).toEqual([
-                ['mpv-set-prop', ['aid', 'no']],
+                ['mpv-set-prop', ['aid', false]],
                 ['mpv-set-prop', ['aid', 2]],
             ]);
         });
@@ -161,9 +161,17 @@ describe('audio probe', () => {
             probe.fix(3);
             clock.runAll();
             expect(t.sent).toEqual([
-                ['mpv-set-prop', ['aid', 'no']],
+                ['mpv-set-prop', ['aid', false]],
                 ['mpv-set-prop', ['aid', 3]],
             ]);
+        });
+
+        it('sends a raw property write verbatim', () => {
+            const t = createTransport();
+            const probe = createAudioProbe({ transport: t.transport, timers: createClock().timers });
+            t.sent.length = 0;
+            probe.set('pause', true);
+            expect(t.sent).toEqual([['mpv-set-prop', ['pause', true]]]);
         });
 
         it('refuses rather than guessing when no track has been seen', () => {
