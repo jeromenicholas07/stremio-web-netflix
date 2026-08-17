@@ -79,9 +79,16 @@ const describe = (data) => {
     }
 };
 
-const createAudioProbe = ({ transport, now = Date.now, log = noop }) => {
+// mpv needs a moment between dropping the track and taking it back before the
+// audio chain is rebuilt.
+const FIX_TOGGLE_DELAY = 300;
+
+const createAudioProbe = ({ transport, now = Date.now, log = noop, timers = global }) => {
     const started = now();
     const entries = [];
+    // Learned from track-list so the toggle puts back the track that was
+    // actually playing rather than assuming id 1.
+    let audioTrackId = null;
     // mpv re-reports plenty of properties with an unchanged value; the first
     // trace was mostly duplicates.
     const lastSeen = {};
@@ -103,7 +110,23 @@ const createAudioProbe = ({ transport, now = Date.now, log = noop }) => {
     };
 
     const onMpvPropChange = (args) => {
-        if (args && typeof args.name === 'string' && WATCH.indexOf(args.name) !== -1) {
+        if (!args || typeof args.name !== 'string') {
+            return;
+        }
+
+        if (args.name === 'track-list' && Array.isArray(args.data)) {
+            const audio = args.data.filter((track) => track && track.type === 'audio');
+            const selected = audio.filter((track) => track.selected)[0];
+            // Remember the last track mpv actually had selected; once it is
+            // deselected the entry is still listed, just with selected false.
+            if (selected) {
+                audioTrackId = selected.id;
+            } else if (audioTrackId === null && audio.length > 0) {
+                audioTrackId = audio[0].id;
+            }
+        }
+
+        if (WATCH.indexOf(args.name) !== -1) {
             record('prop', args.name, args.data);
         }
     };
@@ -121,8 +144,35 @@ const createAudioProbe = ({ transport, now = Date.now, log = noop }) => {
     transport.on('mpv-event-ended', onEnded);
     observe('mount');
 
+    // The ONLY thing here that writes to mpv, and it runs solely when called by
+    // hand from the console. Nothing triggers it — no timer, no property, no
+    // event — because an automatic version of this is what previously threw the
+    // player back to the streams list.
+    //
+    // A plain `aid = 1` write does nothing: the trace shows mpv keeps reporting
+    // aid as 1 even while the track is deselected, so setting it to the value it
+    // already holds is a no-op. Dropping to `no` first is what forces
+    // mp_switch_track and rebuilds the audio chain on the current device.
+    const fix = (overrideId) => {
+        const id = overrideId !== undefined && overrideId !== null ? overrideId : audioTrackId;
+        if (id === null || id === undefined) {
+            push('fix', 'aborted', 'no audio track seen yet — pass one explicitly, e.g. __audioFix(1)');
+            return 'no audio track known; try __audioFix(1)';
+        }
+
+        push('fix', 'aid', 'no');
+        transport.send('mpv-set-prop', ['aid', 'no']);
+        timers.setTimeout(() => {
+            push('fix', 'aid', String(id));
+            transport.send('mpv-set-prop', ['aid', id]);
+        }, FIX_TOGGLE_DELAY);
+
+        return 'toggling aid: no -> ' + id + ' (watch for track-list selected:true)';
+    };
+
     return {
         entries,
+        fix,
         // Re-issued once a stream is loaded: at mount there is no mpv instance
         // yet and the request is dropped on the floor.
         observeAgain: () => observe('stream loaded'),
@@ -150,6 +200,7 @@ const useAudioProbe = ({ shell, stream }) => {
         probeRef.current = probe;
         window.__audioProbeDump = probe.dump;
         window.__audioProbeMark = probe.mark;
+        window.__audioFix = probe.fix;
 
         return () => {
             probe.dispose();
@@ -157,6 +208,7 @@ const useAudioProbe = ({ shell, stream }) => {
             if (window.__audioProbeDump === probe.dump) {
                 delete window.__audioProbeDump;
                 delete window.__audioProbeMark;
+                delete window.__audioFix;
             }
         };
     }, [shell && shell.active]);

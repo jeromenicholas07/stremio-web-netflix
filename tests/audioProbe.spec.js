@@ -30,8 +30,24 @@ function createTransport() {
     };
 }
 
+// Deterministic clock so the toggle's delayed second write can be stepped.
+function createClock() {
+    let nextId = 1;
+    const pending = new Map();
+    return {
+        timers: {
+            setTimeout: (fn) => { const id = nextId++; pending.set(id, fn); return id; },
+            clearTimeout: (id) => pending.delete(id),
+        },
+        runAll() {
+            for (const [id, fn] of Array.from(pending)) { pending.delete(id); fn(); }
+        },
+    };
+}
+
 describe('audio probe', () => {
-    // The whole point of this build: it must not be able to disturb playback.
+    // The probe itself must not be able to disturb playback. Only the
+    // hand-invoked fix() writes, and only when explicitly called.
     it('never sends anything except observe requests', () => {
         const t = createTransport();
         const probe = createAudioProbe({ transport: t.transport });
@@ -93,6 +109,74 @@ describe('audio probe', () => {
         expect(entry.value).toContain('"selected":true');
         expect(entry.value).not.toContain('BPS');
         expect(entry.value).not.toContain('truncated');
+    });
+
+    describe('manual fix', () => {
+        // A plain `aid = 1` is a no-op: mpv keeps reporting aid as 1 while the
+        // track is deselected. The drop to `no` is the whole point.
+        it('toggles aid off and back to the track that was playing', () => {
+            const t = createTransport();
+            const clock = createClock();
+            const probe = createAudioProbe({ transport: t.transport, timers: clock.timers });
+
+            t.emit('mpv-prop-change', { name: 'track-list', data: [
+                { id: 1, type: 'video', selected: true },
+                { id: 2, type: 'audio', selected: true, codec: 'aac' },
+            ] });
+            // Device dies: mpv deselects the audio track but leaves aid alone.
+            t.emit('mpv-prop-change', { name: 'track-list', data: [
+                { id: 1, type: 'video', selected: true },
+                { id: 2, type: 'audio', selected: false, codec: 'aac' },
+            ] });
+
+            t.sent.length = 0;
+            probe.fix();
+            expect(t.sent).toEqual([['mpv-set-prop', ['aid', 'no']]]);
+            clock.runAll();
+            expect(t.sent).toEqual([
+                ['mpv-set-prop', ['aid', 'no']],
+                ['mpv-set-prop', ['aid', 2]],
+            ]);
+        });
+
+        it('does nothing at all until it is called', () => {
+            const t = createTransport();
+            const clock = createClock();
+            createAudioProbe({ transport: t.transport, timers: clock.timers });
+
+            t.emit('mpv-prop-change', { name: 'track-list', data: [{ id: 2, type: 'audio', selected: false }] });
+            t.emit('mpv-prop-change', { name: 'aid', data: 1 });
+            t.emit('mpv-event-ended', { reason: 'error' });
+            clock.runAll();
+
+            expect(t.sent.every(([event]) => event === 'mpv-observe-prop')).toBe(true);
+        });
+
+        it('accepts an explicit track id', () => {
+            const t = createTransport();
+            const clock = createClock();
+            const probe = createAudioProbe({ transport: t.transport, timers: clock.timers });
+
+            t.sent.length = 0;
+            probe.fix(3);
+            clock.runAll();
+            expect(t.sent).toEqual([
+                ['mpv-set-prop', ['aid', 'no']],
+                ['mpv-set-prop', ['aid', 3]],
+            ]);
+        });
+
+        it('refuses rather than guessing when no track has been seen', () => {
+            const t = createTransport();
+            const clock = createClock();
+            const probe = createAudioProbe({ transport: t.transport, timers: clock.timers });
+
+            t.sent.length = 0;
+            const result = probe.fix();
+            clock.runAll();
+            expect(t.sent).toEqual([]);
+            expect(result).toContain('__audioFix(1)');
+        });
     });
 
     it('records user markers so the trace can be correlated', () => {
