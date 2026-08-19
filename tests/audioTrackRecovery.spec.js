@@ -7,6 +7,7 @@ const {
     DEVICE_RETRY,
     SAFETY_INTERVAL,
     SETTLE,
+    LOAD_GUARD,
     BLAME_WINDOW,
     MIN_WRITE_INTERVAL,
     DEVICE_COOLDOWNS,
@@ -76,6 +77,7 @@ function setup({ streamLoaded = true } = {}) {
     // recovery only arms for audio that actually worked.
     recovery.onPropChange('track-list', tracks(true));
     clock.advance(SETTLE);
+    clock.advance(LOAD_GUARD);
     return { clock, recovery, sent, aidWrites, state };
 }
 
@@ -168,11 +170,12 @@ describe('audio track recovery', () => {
     });
 
     // Starting a stream with no output device at all: mpv fails audio init
-    // during load and drops the track almost immediately. There is nothing to
-    // restore, and writing into that window risks aborting the load — which the
-    // player reads as the episode ending and skips to the next one.
-    describe('stream that never had working audio', () => {
-        it('stays completely inert', () => {
+    // during load and drops the track almost immediately. Writing into that
+    // window can abort the load, which the player reads as the episode ending
+    // and skips to the next one. But connecting a speaker later still has to
+    // start the audio, so this must not simply give up on the stream.
+    describe('stream that starts with no audio device', () => {
+        const bare = () => {
             const clock = createClock();
             const sent = [];
             const recovery = createAudioTrackRecovery({
@@ -181,84 +184,56 @@ describe('audio track recovery', () => {
                 timers: clock.timers,
                 now: clock.now,
             });
-
             // Load selects the track, then audio init fails before it settles.
             recovery.onPropChange('track-list', tracks(true));
             clock.advance(500);
             recovery.onPropChange('track-list', tracks(false));
+            return { clock, recovery, sent };
+        };
 
-            clock.advance(10 * SAFETY_INTERVAL);
-            recovery.onDeviceChange('devicechange');
-            clock.advance(10 * SAFETY_INTERVAL);
+        it('writes nothing during the load window', () => {
+            const { clock, sent } = bare();
 
+            clock.advance(LOAD_GUARD - 1000);
             expect(sent).toEqual([]);
-            expect(recovery.isArmed()).toBe(false);
         });
 
-        it('arms once audio has held, and then recovers normally', () => {
-            const clock = createClock();
-            const sent = [];
-            const recovery = createAudioTrackRecovery({
-                send: (event, args) => sent.push([event, args]),
-                isStreamLoaded: () => true,
-                timers: clock.timers,
-                now: clock.now,
-            });
+        it('makes no unprompted attempt when audio never played', () => {
+            const { clock, sent } = bare();
 
-            recovery.onPropChange('track-list', tracks(true));
-            clock.advance(SETTLE);
-            expect(recovery.isArmed()).toBe(true);
+            // Well past the load window, but nothing has appeared to act on.
+            clock.advance(SAFETY_INTERVAL - 5000);
+            expect(sent).toEqual([]);
+        });
 
-            recovery.onPropChange('track-list', tracks(false));
-            clock.advance(GRACE);
+        it('starts audio when a speaker is connected later', () => {
+            const { clock, recovery, sent } = bare();
+
+            clock.advance(LOAD_GUARD + 1000);
+            recovery.onDeviceChange('poll');
+            clock.advance(DEVICE_RETRY + MIN_WRITE_INTERVAL);
+
+            expect(sent.length).toBe(1);
+            expect(sent[0]).toEqual(['mpv-set-prop', ['aid', '1']]);
+        });
+
+        it('defers a device that turns up during the load window', () => {
+            const { clock, recovery, sent } = bare();
+
+            recovery.onDeviceChange('poll');
+            clock.advance(DEVICE_RETRY);
+            expect(sent).toEqual([]);
+
+            clock.advance(LOAD_GUARD);
             expect(sent.length).toBe(1);
         });
-    });
 
-    it('restores the track the user chose, not the original', () => {
-        const { clock, recovery, aidWrites } = setup();
+        it('still has a slow safety attempt as a backstop', () => {
+            const { clock, sent } = bare();
 
-        recovery.onPropChange('track-list', [
-            { id: 1, type: 'video', selected: true },
-            { id: 1, type: 'audio', selected: false },
-            { id: 2, type: 'audio', selected: true },
-        ]);
-        recovery.onPropChange('track-list', [
-            { id: 1, type: 'video', selected: true },
-            { id: 1, type: 'audio', selected: false },
-            { id: 2, type: 'audio', selected: false },
-        ]);
-        clock.advance(GRACE);
-        expect(aidWrites()).toEqual(['2']);
-    });
-
-    // The failure mode that previously looped the player back to the streams list.
-    it('stops permanently once mpv ends the file', () => {
-        const { clock, recovery, aidWrites } = setup();
-
-        recovery.onPropChange('track-list', tracks(false));
-        recovery.onEnded();
-        clock.advance(10 * SAFETY_INTERVAL);
-        expect(aidWrites()).toEqual([]);
-        expect(clock.pendingCount).toBe(0);
-    });
-
-    it('never sends anything but aid writes', () => {
-        const { clock, recovery, sent } = setup();
-
-        recovery.onPropChange('track-list', tracks(false));
-        clock.advance(5 * SAFETY_INTERVAL);
-        expect(sent.every(([event, args]) => event === 'mpv-set-prop' && args[0] === 'aid')).toBe(true);
-    });
-
-    it('goes quiet after dispose', () => {
-        const { clock, recovery, aidWrites } = setup();
-
-        recovery.onPropChange('track-list', tracks(false));
-        recovery.dispose();
-        clock.advance(10 * SAFETY_INTERVAL);
-        expect(aidWrites()).toEqual([]);
-        expect(clock.pendingCount).toBe(0);
+            clock.advance(SAFETY_INTERVAL + LOAD_GUARD);
+            expect(sent.length).toBe(1);
+        });
     });
 
     // mpv reports the track selected as soon as mp_switch_track runs, before

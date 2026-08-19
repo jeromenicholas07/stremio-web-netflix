@@ -69,6 +69,10 @@ const SAFETY_INTERVAL = 60000;
 // span a ~1.5s loop of demuxer re-syncs. So a re-selected track only counts as
 // recovered once it has held for this long without being dropped again.
 const SETTLE = 3000;
+// No writes this soon after a stream first reports its tracks. mpv is still
+// bringing the file up and a write can abort the load — which the shell reports
+// as the video ending, and the player turns into the next episode.
+const LOAD_GUARD = 5000;
 // Absolute floor between any two writes, whatever asked for them. Each write
 // makes mpv re-sync the demuxer and visibly buffers the stream, so this stops
 // triggers of different kinds from landing on top of each other. Device storms
@@ -89,14 +93,19 @@ let sessionDisabled = false;
 
 const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log = noop, now = Date.now }) => {
     let audioTrackId = null;
-    // Recovery only ever restores audio that was genuinely working. If a stream
-    // starts with no output device at all, mpv fails audio init during load and
-    // there is nothing to restore — writing `aid` into that window risks
-    // aborting the load, and the shell reports most EndFile reasons as the
-    // video ending, which the player turns into the next episode.
+    // Whether audio has actually played on this stream. It does not gate
+    // recovery — plugging a speaker in halfway through a film has to start the
+    // audio too — it only decides whether we make an UNPROMPTED attempt. When a
+    // stream starts with no output device, mpv fails audio init during load and
+    // writing `aid` into that window can abort the load; the shell reports most
+    // EndFile reasons as the video ending, which the player turns into the next
+    // episode. So with no working audio we wait for a device to actually turn
+    // up rather than poking at it.
     let everHealthy = false;
-    let lastWriteAt = 0;
-    let lastDeviceWriteAt = 0;
+    // When the current stream first reported tracks, for the load-window guard.
+    let firstTracksAt = null;
+    let lastWriteAt = null;
+    let lastDeviceWriteAt = null;
     let deviceAttempt = 0;
     let pendingIsDevice = false;
     let down = false;
@@ -115,7 +124,7 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
     // the last one — it defers the attempt rather than dropping it, so a device
     // arriving during the quiet window is still acted on, just not instantly.
     const schedule = (delay, fromDevice) => {
-        const sinceWrite = lastWriteAt === 0 ? Infinity : now() - lastWriteAt;
+        const sinceWrite = lastWriteAt === null ? Infinity : now() - lastWriteAt;
         const floor = sinceWrite >= MIN_WRITE_INTERVAL ? 0 : MIN_WRITE_INTERVAL - sinceWrite;
         pendingIsDevice = !!fromDevice;
         timers.clearTimeout(retryTimeout);
@@ -125,6 +134,13 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
     function reselect() {
         retryTimeout = null;
         if (stopped || sessionDisabled || !down || audioTrackId === null || !isStreamLoaded()) {
+            return;
+        }
+
+        // Still inside the load window — hold off rather than risk aborting it.
+        const sinceTracks = firstTracksAt === null ? Infinity : now() - firstTracksAt;
+        if (sinceTracks < LOAD_GUARD) {
+            schedule(LOAD_GUARD - sinceTracks, pendingIsDevice);
             return;
         }
 
@@ -147,7 +163,13 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
     const onTrackList = (list) => {
         const audio = audioTracks(list);
         if (audio.length === 0) {
+            // Load or teardown — the next stream starts its own load window.
+            firstTracksAt = null;
             return;
+        }
+
+        if (firstTracksAt === null) {
+            firstTracksAt = now();
         }
 
         const selected = audio.filter((track) => track.selected)[0];
@@ -159,7 +181,7 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
                     settleTimeout = null;
                     down = false;
                     deviceAttempt = 0;
-                    lastDeviceWriteAt = 0;
+                    lastDeviceWriteAt = null;
                     timers.clearTimeout(retryTimeout);
                     retryTimeout = null;
                     log('AudioRecovery: audio restored');
@@ -182,13 +204,26 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
         timers.clearTimeout(settleTimeout);
         settleTimeout = null;
 
-        // Only a failure if audio was actually working and we are not tearing
-        // the stream down. Already being down means an attempt is pending; do
-        // not re-arm on top of it.
-        if (!stopped && !sessionDisabled && !down && everHealthy && isStreamLoaded()) {
+        // Remember which track to select even if it never played, so a speaker
+        // connected later can still be picked up.
+        if (audioTrackId === null) {
+            audioTrackId = audio[0].id;
+        }
+
+        // Already being down means an attempt is pending; do not re-arm on top.
+        if (!stopped && !sessionDisabled && !down && isStreamLoaded()) {
             down = true;
-            log('AudioRecovery: mpv dropped the audio track, output device gone');
-            schedule(GRACE);
+            if (everHealthy) {
+                // Audio was playing a moment ago, so try straight away — that
+                // alone restores sound if another output is available.
+                log('AudioRecovery: mpv dropped the audio track, output device gone');
+                schedule(GRACE);
+            } else {
+                // Never played. Do not poke at a loading stream; wait for a
+                // device to appear, with the slow safety net as a backstop.
+                log('AudioRecovery: no audio output — waiting for a device');
+                schedule(SAFETY_INTERVAL);
+            }
         }
     };
 
@@ -208,27 +243,27 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
             const at = now();
             // A lull means whatever was churning has settled; treat what comes
             // next as a fresh arrival rather than more of the same burst.
-            if (lastDeviceWriteAt !== 0 && at - lastDeviceWriteAt > DEVICE_BURST_RESET) {
+            if (lastDeviceWriteAt !== null && at - lastDeviceWriteAt > DEVICE_BURST_RESET) {
                 deviceAttempt = 0;
-                lastDeviceWriteAt = 0;
+                lastDeviceWriteAt = null;
             }
 
             const cooldown = DEVICE_COOLDOWNS[Math.min(deviceAttempt, DEVICE_COOLDOWNS.length - 1)];
-            const since = lastDeviceWriteAt === 0 ? Infinity : at - lastDeviceWriteAt;
+            const since = lastDeviceWriteAt === null ? Infinity : at - lastDeviceWriteAt;
             const delay = since >= cooldown ? DEVICE_RETRY : cooldown - since;
             log('AudioRecovery: audio device change (' + why + '), retrying in', delay + 'ms');
             schedule(delay, true);
         },
         isDown: () => down,
         // Exposed so the device watcher only runs when it could matter.
-        isArmed: () => everHealthy && !stopped && !sessionDisabled,
+        isArmed: () => !stopped && !sessionDisabled,
         // Never fight a file that is ending — that is how a previous attempt
         // put the player into a loop back to the streams list.
         onEnded: () => {
             // The shell reports every EndFile reason through this, and the
             // player turns it into "go to the next episode". If it lands right
             // after a write of ours, we caused it — stand down for good.
-            if (lastWriteAt !== 0 && now() - lastWriteAt < BLAME_WINDOW) {
+            if (lastWriteAt !== null && now() - lastWriteAt < BLAME_WINDOW) {
                 sessionDisabled = true;
                 log('AudioRecovery: mpv ended the file right after a write — disabling recovery for this session');
             }
@@ -381,6 +416,7 @@ module.exports.GRACE = GRACE;
 module.exports.DEVICE_RETRY = DEVICE_RETRY;
 module.exports.SAFETY_INTERVAL = SAFETY_INTERVAL;
 module.exports.SETTLE = SETTLE;
+module.exports.LOAD_GUARD = LOAD_GUARD;
 module.exports.BLAME_WINDOW = BLAME_WINDOW;
 module.exports.MIN_WRITE_INTERVAL = MIN_WRITE_INTERVAL;
 module.exports.DEVICE_COOLDOWNS = DEVICE_COOLDOWNS;
