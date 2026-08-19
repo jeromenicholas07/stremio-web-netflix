@@ -54,6 +54,11 @@ const DEVICE_RETRY = 250;
 const SAFETY_INTERVAL = 60000;
 // A restored track only counts as healthy once it has held this long.
 const SETTLE = 3000;
+// Hard floor between any two writes, whatever asked for them. Each write makes
+// mpv re-sync the demuxer and visibly buffers the stream, and a Bluetooth device
+// that is off or reconnecting can emit `devicechange` repeatedly — without this
+// that storm turns straight into continuous stuttering.
+const MIN_WRITE_INTERVAL = 20000;
 // If mpv ends the file this soon after a write of ours, assume we caused it and
 // never try again this session. Recovery is a convenience; skipping an episode
 // is not something to risk twice.
@@ -82,9 +87,14 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
         settleTimeout = null;
     };
 
+    // Never lets a trigger produce a write sooner than MIN_WRITE_INTERVAL after
+    // the last one — it defers the attempt rather than dropping it, so a device
+    // arriving during the quiet window is still acted on, just not instantly.
     const schedule = (delay) => {
+        const sinceWrite = lastWriteAt === 0 ? Infinity : now() - lastWriteAt;
+        const floor = sinceWrite >= MIN_WRITE_INTERVAL ? 0 : MIN_WRITE_INTERVAL - sinceWrite;
         timers.clearTimeout(retryTimeout);
-        retryTimeout = timers.setTimeout(reselect, delay);
+        retryTimeout = timers.setTimeout(reselect, Math.max(delay, floor));
     };
 
     function reselect() {
@@ -232,5 +242,6 @@ module.exports.DEVICE_RETRY = DEVICE_RETRY;
 module.exports.SAFETY_INTERVAL = SAFETY_INTERVAL;
 module.exports.SETTLE = SETTLE;
 module.exports.BLAME_WINDOW = BLAME_WINDOW;
+module.exports.MIN_WRITE_INTERVAL = MIN_WRITE_INTERVAL;
 // Test seam: the session kill switch is module state by design.
 module.exports.__resetSessionDisabled = () => { sessionDisabled = false; };

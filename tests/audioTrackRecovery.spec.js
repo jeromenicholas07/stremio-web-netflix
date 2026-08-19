@@ -8,6 +8,7 @@ const {
     SAFETY_INTERVAL,
     SETTLE,
     BLAME_WINDOW,
+    MIN_WRITE_INTERVAL,
 } = recoveryModule;
 
 // The session kill switch is module state by design; each test starts clean.
@@ -207,6 +208,52 @@ describe('audio track recovery', () => {
         expect(clock.pendingCount).toBe(0);
     });
 
+    // A Bluetooth device that is off or reconnecting can emit devicechange
+    // repeatedly. Each write buffers the stream, so a storm must not stutter it.
+    describe('write throttle', () => {
+        it('holds a hard floor between writes however many events arrive', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            expect(aidWrites().length).toBe(1);
+
+            // 30 device events over 10 seconds.
+            for (let i = 0; i < 30; i++) {
+                recovery.onDeviceChange('devicechange');
+                clock.advance(333);
+            }
+
+            expect(aidWrites().length).toBe(1);
+        });
+
+        it('still acts on a device that arrives during the quiet window', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            expect(aidWrites().length).toBe(1);
+
+            // Deferred, not dropped.
+            recovery.onDeviceChange('devicechange');
+            clock.advance(MIN_WRITE_INTERVAL);
+            expect(aidWrites().length).toBe(2);
+        });
+
+        it('does not delay a device arriving after a long quiet spell', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            clock.advance(5 * MIN_WRITE_INTERVAL);
+            const before = aidWrites().length;
+
+            recovery.onDeviceChange('devicechange');
+            clock.advance(DEVICE_RETRY);
+            expect(aidWrites().length).toBe(before + 1);
+        });
+    });
+
     describe('device arrival', () => {
         it('recovers promptly instead of waiting for the safety attempt', () => {
             const { clock, recovery, aidWrites } = setup();
@@ -215,10 +262,15 @@ describe('audio track recovery', () => {
             clock.advance(GRACE);
             expect(aidWrites().length).toBe(1);
 
+            // The speaker is off for a while, as it would be in practice, so
+            // the write floor has long since elapsed when it comes back.
+            clock.advance(MIN_WRITE_INTERVAL);
             recovery.onDeviceChange('devicechange');
             clock.advance(DEVICE_RETRY);
             expect(aidWrites().length).toBe(2);
             expect(aidWrites()[1]).toBe('1');
+            // ...and well before the safety attempt would have come round.
+            expect(GRACE + MIN_WRITE_INTERVAL + DEVICE_RETRY).toBeLessThan(SAFETY_INTERVAL);
         });
 
         it('is ignored while audio is healthy', () => {
@@ -250,7 +302,7 @@ describe('audio track recovery', () => {
             expect(recovery.isDown()).toBe(false);
         });
 
-        it('collapses a burst of events into one attempt', () => {
+        it('collapses a burst of events into a single deferred attempt', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
@@ -261,16 +313,21 @@ describe('audio track recovery', () => {
             recovery.onDeviceChange('devicechange');
             recovery.onDeviceChange('devicechange');
             clock.advance(DEVICE_RETRY);
+            // Held back by the write floor rather than hitching immediately.
+            expect(aidWrites().length).toBe(before);
+
+            clock.advance(MIN_WRITE_INTERVAL);
             expect(aidWrites().length).toBe(before + 1);
         });
 
-        it('handles a second outage from a clean slate', () => {
+        it('handles a second outage once the write floor has passed', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
             clock.advance(GRACE);
             recovery.onPropChange('track-list', tracks(true));
             clock.advance(SETTLE + 100);
+            clock.advance(MIN_WRITE_INTERVAL);
 
             const before = aidWrites().length;
             recovery.onPropChange('track-list', tracks(false));
