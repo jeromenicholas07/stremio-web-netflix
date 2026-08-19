@@ -72,8 +72,10 @@ function setup({ streamLoaded = true } = {}) {
         .filter(([event, args]) => event === 'mpv-set-prop' && args[0] === 'aid')
         .map(([, args]) => args[1]);
 
-    // Healthy playback: mpv reports the audio track selected.
+    // Healthy playback: mpv reports the audio track selected, and it holds —
+    // recovery only arms for audio that actually worked.
     recovery.onPropChange('track-list', tracks(true));
+    clock.advance(SETTLE);
     return { clock, recovery, sent, aidWrites, state };
 }
 
@@ -163,6 +165,54 @@ describe('audio track recovery', () => {
         recovery.onPropChange('track-list', tracks(false));
         clock.advance(10 * SAFETY_INTERVAL);
         expect(sent).toEqual([]);
+    });
+
+    // Starting a stream with no output device at all: mpv fails audio init
+    // during load and drops the track almost immediately. There is nothing to
+    // restore, and writing into that window risks aborting the load — which the
+    // player reads as the episode ending and skips to the next one.
+    describe('stream that never had working audio', () => {
+        it('stays completely inert', () => {
+            const clock = createClock();
+            const sent = [];
+            const recovery = createAudioTrackRecovery({
+                send: (event, args) => sent.push([event, args]),
+                isStreamLoaded: () => true,
+                timers: clock.timers,
+                now: clock.now,
+            });
+
+            // Load selects the track, then audio init fails before it settles.
+            recovery.onPropChange('track-list', tracks(true));
+            clock.advance(500);
+            recovery.onPropChange('track-list', tracks(false));
+
+            clock.advance(10 * SAFETY_INTERVAL);
+            recovery.onDeviceChange('devicechange');
+            clock.advance(10 * SAFETY_INTERVAL);
+
+            expect(sent).toEqual([]);
+            expect(recovery.isArmed()).toBe(false);
+        });
+
+        it('arms once audio has held, and then recovers normally', () => {
+            const clock = createClock();
+            const sent = [];
+            const recovery = createAudioTrackRecovery({
+                send: (event, args) => sent.push([event, args]),
+                isStreamLoaded: () => true,
+                timers: clock.timers,
+                now: clock.now,
+            });
+
+            recovery.onPropChange('track-list', tracks(true));
+            clock.advance(SETTLE);
+            expect(recovery.isArmed()).toBe(true);
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            expect(sent.length).toBe(1);
+        });
     });
 
     it('restores the track the user chose, not the original', () => {

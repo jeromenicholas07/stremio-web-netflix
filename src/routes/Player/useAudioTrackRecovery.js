@@ -56,6 +56,9 @@ const DEVICE_RETRY = 250;
 const DEVICE_COOLDOWNS = [0, 3000, 10000, 20000];
 // No device events for this long means the next one starts a fresh burst.
 const DEVICE_BURST_RESET = 30000;
+// How often to look for the output device coming back. This is a browser-side
+// check only — it sends nothing to mpv, so it cannot buffer the stream.
+const DEVICE_POLL_INTERVAL = 1000;
 // Safety net for `devicechange` never arriving. Each attempt costs a visible
 // buffering hitch, so this stays rare on purpose — the device event is the
 // real trigger, this only stops a silent film if that event never comes.
@@ -86,6 +89,12 @@ let sessionDisabled = false;
 
 const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log = noop, now = Date.now }) => {
     let audioTrackId = null;
+    // Recovery only ever restores audio that was genuinely working. If a stream
+    // starts with no output device at all, mpv fails audio init during load and
+    // there is nothing to restore — writing `aid` into that window risks
+    // aborting the load, and the shell reports most EndFile reasons as the
+    // video ending, which the player turns into the next episode.
+    let everHealthy = false;
     let lastWriteAt = 0;
     let lastDeviceWriteAt = 0;
     let deviceAttempt = 0;
@@ -155,6 +164,13 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
                     retryTimeout = null;
                     log('AudioRecovery: audio restored');
                 }, SETTLE);
+            } else if (!down && !everHealthy && settleTimeout === null) {
+                // First time we have seen a selected track: confirm it holds
+                // before arming recovery at all.
+                settleTimeout = timers.setTimeout(() => {
+                    settleTimeout = null;
+                    everHealthy = true;
+                }, SETTLE);
             }
 
             return;
@@ -166,10 +182,10 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
         timers.clearTimeout(settleTimeout);
         settleTimeout = null;
 
-        // Only a failure if mpv had one selected before and we are not tearing
+        // Only a failure if audio was actually working and we are not tearing
         // the stream down. Already being down means an attempt is pending; do
         // not re-arm on top of it.
-        if (!stopped && !sessionDisabled && !down && audioTrackId !== null && isStreamLoaded()) {
+        if (!stopped && !sessionDisabled && !down && everHealthy && isStreamLoaded()) {
             down = true;
             log('AudioRecovery: mpv dropped the audio track, output device gone');
             schedule(GRACE);
@@ -204,6 +220,8 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
             schedule(delay, true);
         },
         isDown: () => down,
+        // Exposed so the device watcher only runs when it could matter.
+        isArmed: () => everHealthy && !stopped && !sessionDisabled,
         // Never fight a file that is ending — that is how a previous attempt
         // put the player into a loop back to the streams list.
         onEnded: () => {
@@ -262,11 +280,89 @@ const useAudioTrackRecovery = ({ shell, stream }) => {
             mediaDevices.addEventListener('devicechange', onDeviceChange);
         }
 
+        // `devicechange` does not appear to fire in this WebView, so poll for
+        // the output changing instead. Everything sampled here is a browser
+        // call — it never touches mpv, so unlike the safety attempt it cannot
+        // buffer the stream, and it can run once a second safely.
+        //
+        // Several signals because none is reliable alone: without microphone
+        // permission Chromium collapses audio outputs to one anonymous entry,
+        // but an AudioContext still exposes the current device's sample rate,
+        // latency and channel count, and a Bluetooth speaker becoming the
+        // default moves those noticeably.
+        let audioContext = null;
+        let fingerprint = null;
+
+        const releaseContext = () => {
+            if (audioContext !== null) {
+                try {
+                    audioContext.close();
+                } catch {
+                    // Already closed, or closing is unsupported — nothing to do.
+                }
+
+                audioContext = null;
+            }
+        };
+
+        const sampleDevices = () => {
+            const parts = [];
+            try {
+                if (audioContext === null && typeof window.AudioContext === 'function') {
+                    audioContext = new window.AudioContext();
+                }
+
+                if (audioContext !== null) {
+                    parts.push('rate=' + audioContext.sampleRate);
+                    parts.push('base=' + Number(audioContext.baseLatency || 0).toFixed(4));
+                    parts.push('out=' + Number(audioContext.outputLatency || 0).toFixed(4));
+                    parts.push('ch=' + (audioContext.destination ? audioContext.destination.maxChannelCount : -1));
+                }
+            } catch {
+                parts.push('ctx=unavailable');
+            }
+
+            if (!mediaDevices || typeof mediaDevices.enumerateDevices !== 'function') {
+                return Promise.resolve(parts.join(' '));
+            }
+
+            return mediaDevices.enumerateDevices().then((devices) => {
+                const outputs = devices.filter((device) => device.kind === 'audiooutput');
+                parts.push('outs=' + outputs.length);
+                parts.push(outputs.map((device) => device.deviceId + '/' + device.label).join('|'));
+                return parts.join(' ');
+            }).catch(() => parts.join(' ') + ' enum=denied');
+        };
+
+        const devicePoll = setInterval(() => {
+            if (!recovery.isArmed() || !recovery.isDown()) {
+                fingerprint = null;
+                releaseContext();
+                return;
+            }
+
+            sampleDevices().then((next) => {
+                if (fingerprint === null) {
+                    fingerprint = next;
+                    console.warn('AudioRecovery: watching output devices —', next);
+                    return;
+                }
+
+                if (next !== fingerprint) {
+                    console.warn('AudioRecovery: output device changed —', next);
+                    fingerprint = next;
+                    recovery.onDeviceChange('poll');
+                }
+            });
+        }, DEVICE_POLL_INTERVAL);
+
         transport.on('mpv-prop-change', onMpvPropChange);
         transport.on('mpv-event-ended', onEnded);
 
         return () => {
             recovery.dispose();
+            clearInterval(devicePoll);
+            releaseContext();
             if (hasDeviceEvents) {
                 mediaDevices.removeEventListener('devicechange', onDeviceChange);
             }
