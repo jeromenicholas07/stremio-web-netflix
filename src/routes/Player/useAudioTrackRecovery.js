@@ -48,17 +48,25 @@ const GRACE = 1500;
 // A device actually arriving is worth acting on at once. This only debounces
 // the burst of events a single connect produces.
 const DEVICE_RETRY = 250;
+// Cooldown after each device-triggered write, growing so a device that keeps
+// announcing itself cannot stutter the stream. The first entry is 0: the first
+// event after a quiet spell fires straight away, which is the whole point —
+// that is the one that means "the speaker is back". Later entries cover the
+// case where the endpoint is not ready the instant Windows announces it.
+const DEVICE_COOLDOWNS = [0, 3000, 10000, 20000];
+// No device events for this long means the next one starts a fresh burst.
+const DEVICE_BURST_RESET = 30000;
 // Safety net for `devicechange` never arriving. Each attempt costs a visible
 // buffering hitch, so this stays rare on purpose — the device event is the
 // real trigger, this only stops a silent film if that event never comes.
 const SAFETY_INTERVAL = 60000;
 // A restored track only counts as healthy once it has held this long.
 const SETTLE = 3000;
-// Hard floor between any two writes, whatever asked for them. Each write makes
-// mpv re-sync the demuxer and visibly buffers the stream, and a Bluetooth device
-// that is off or reconnecting can emit `devicechange` repeatedly — without this
-// that storm turns straight into continuous stuttering.
-const MIN_WRITE_INTERVAL = 20000;
+// Absolute floor between any two writes, whatever asked for them. Each write
+// makes mpv re-sync the demuxer and visibly buffers the stream, so this stops
+// triggers of different kinds from landing on top of each other. Device storms
+// are handled by DEVICE_COOLDOWNS rather than by this.
+const MIN_WRITE_INTERVAL = 2000;
 // If mpv ends the file this soon after a write of ours, assume we caused it and
 // never try again this session. Recovery is a convenience; skipping an episode
 // is not something to risk twice.
@@ -75,6 +83,9 @@ let sessionDisabled = false;
 const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log = noop, now = Date.now }) => {
     let audioTrackId = null;
     let lastWriteAt = 0;
+    let lastDeviceWriteAt = 0;
+    let deviceAttempt = 0;
+    let pendingIsDevice = false;
     let down = false;
     let stopped = false;
     let retryTimeout = null;
@@ -90,9 +101,10 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
     // Never lets a trigger produce a write sooner than MIN_WRITE_INTERVAL after
     // the last one — it defers the attempt rather than dropping it, so a device
     // arriving during the quiet window is still acted on, just not instantly.
-    const schedule = (delay) => {
+    const schedule = (delay, fromDevice) => {
         const sinceWrite = lastWriteAt === 0 ? Infinity : now() - lastWriteAt;
         const floor = sinceWrite >= MIN_WRITE_INTERVAL ? 0 : MIN_WRITE_INTERVAL - sinceWrite;
+        pendingIsDevice = !!fromDevice;
         timers.clearTimeout(retryTimeout);
         retryTimeout = timers.setTimeout(reselect, Math.max(delay, floor));
     };
@@ -106,6 +118,12 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
         log('AudioRecovery: re-selecting audio track', audioTrackId);
         // One write, and a string. Never `no` first — see the header.
         lastWriteAt = now();
+        if (pendingIsDevice) {
+            lastDeviceWriteAt = lastWriteAt;
+            deviceAttempt += 1;
+        }
+
+        pendingIsDevice = false;
         send('mpv-set-prop', ['aid', String(audioTrackId)]);
 
         // Success is confirmed by track-list, not assumed. Until then, sit on
@@ -124,6 +142,8 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
             audioTrackId = selected.id;
             if (down) {
                 down = false;
+                deviceAttempt = 0;
+                lastDeviceWriteAt = 0;
                 clearTimers();
                 log('AudioRecovery: audio restored');
                 settleTimeout = timers.setTimeout(() => {
@@ -156,8 +176,19 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
                 return;
             }
 
-            log('AudioRecovery: audio device change (' + why + '), retrying now');
-            schedule(DEVICE_RETRY);
+            const at = now();
+            // A lull means whatever was churning has settled; treat what comes
+            // next as a fresh arrival rather than more of the same burst.
+            if (lastDeviceWriteAt !== 0 && at - lastDeviceWriteAt > DEVICE_BURST_RESET) {
+                deviceAttempt = 0;
+                lastDeviceWriteAt = 0;
+            }
+
+            const cooldown = DEVICE_COOLDOWNS[Math.min(deviceAttempt, DEVICE_COOLDOWNS.length - 1)];
+            const since = lastDeviceWriteAt === 0 ? Infinity : at - lastDeviceWriteAt;
+            const delay = since >= cooldown ? DEVICE_RETRY : cooldown - since;
+            log('AudioRecovery: audio device change (' + why + '), retrying in', delay + 'ms');
+            schedule(delay, true);
         },
         isDown: () => down,
         // Never fight a file that is ending — that is how a previous attempt
@@ -243,5 +274,7 @@ module.exports.SAFETY_INTERVAL = SAFETY_INTERVAL;
 module.exports.SETTLE = SETTLE;
 module.exports.BLAME_WINDOW = BLAME_WINDOW;
 module.exports.MIN_WRITE_INTERVAL = MIN_WRITE_INTERVAL;
+module.exports.DEVICE_COOLDOWNS = DEVICE_COOLDOWNS;
+module.exports.DEVICE_BURST_RESET = DEVICE_BURST_RESET;
 // Test seam: the session kill switch is module state by design.
 module.exports.__resetSessionDisabled = () => { sessionDisabled = false; };

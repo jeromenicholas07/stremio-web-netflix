@@ -9,6 +9,8 @@ const {
     SETTLE,
     BLAME_WINDOW,
     MIN_WRITE_INTERVAL,
+    DEVICE_COOLDOWNS,
+    DEVICE_BURST_RESET,
 } = recoveryModule;
 
 // The session kill switch is module state by design; each test starts clean.
@@ -209,43 +211,91 @@ describe('audio track recovery', () => {
     });
 
     // A Bluetooth device that is off or reconnecting can emit devicechange
-    // repeatedly. Each write buffers the stream, so a storm must not stutter it.
+    // repeatedly. Each write buffers the stream, so a storm must not stutter it —
+    // but the first event after a lull is the speaker coming back, and that one
+    // has to be acted on at once.
     describe('write throttle', () => {
-        it('holds a hard floor between writes however many events arrive', () => {
+        it('acts on the first device event immediately', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
             clock.advance(GRACE);
-            expect(aidWrites().length).toBe(1);
+            const before = aidWrites().length;
 
-            // 30 device events over 10 seconds.
-            for (let i = 0; i < 30; i++) {
+            // Long outage, so a safety attempt has been and gone.
+            clock.advance(SAFETY_INTERVAL + 5000);
+            const afterSafety = aidWrites().length;
+            expect(afterSafety).toBeGreaterThan(before);
+
+            // Speaker returns. This must not wait on the safety attempt's clock.
+            recovery.onDeviceChange('devicechange');
+            clock.advance(DEVICE_RETRY + MIN_WRITE_INTERVAL);
+            expect(aidWrites().length).toBe(afterSafety + 1);
+        });
+
+        it('recovers well under a second once the device is back', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            // A long outage, landing clear of the last safety attempt.
+            clock.advance(5 * SAFETY_INTERVAL);
+            clock.advance(MIN_WRITE_INTERVAL + 1000);
+            const before = aidWrites().length;
+
+            recovery.onDeviceChange('devicechange');
+            clock.advance(DEVICE_RETRY);
+            expect(aidWrites().length).toBe(before + 1);
+            expect(DEVICE_RETRY).toBeLessThan(1000);
+        });
+
+        // The one case that is not sub-second: a device event landing on top of
+        // a safety attempt. Bounded by the absolute floor, not the ladder.
+        it('is capped by the absolute floor at worst, not seconds of waiting', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            const before = aidWrites().length;
+
+            recovery.onDeviceChange('devicechange');
+            clock.advance(MIN_WRITE_INTERVAL + DEVICE_RETRY);
+            expect(aidWrites().length).toBe(before + 1);
+            expect(MIN_WRITE_INTERVAL).toBeLessThanOrEqual(2000);
+        });
+
+        it('backs off a device that keeps announcing itself', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            const before = aidWrites().length;
+
+            // 60 events over 20 seconds from a device stuck reconnecting.
+            for (let i = 0; i < 60; i++) {
                 recovery.onDeviceChange('devicechange');
                 clock.advance(333);
             }
 
-            expect(aidWrites().length).toBe(1);
+            // Bounded by the cooldown ladder, not one write per event.
+            const writes = aidWrites().length - before;
+            expect(writes).toBeGreaterThan(0);
+            expect(writes).toBeLessThanOrEqual(DEVICE_COOLDOWNS.length);
         });
 
-        it('still acts on a device that arrives during the quiet window', () => {
+        it('treats an event after a long lull as a fresh arrival', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
             clock.advance(GRACE);
-            expect(aidWrites().length).toBe(1);
 
-            // Deferred, not dropped.
-            recovery.onDeviceChange('devicechange');
-            clock.advance(MIN_WRITE_INTERVAL);
-            expect(aidWrites().length).toBe(2);
-        });
+            // Burn through the ladder.
+            for (let i = 0; i < 4; i++) {
+                recovery.onDeviceChange('devicechange');
+                clock.advance(DEVICE_COOLDOWNS[DEVICE_COOLDOWNS.length - 1] + 1000);
+            }
 
-        it('does not delay a device arriving after a long quiet spell', () => {
-            const { clock, recovery, aidWrites } = setup();
-
-            recovery.onPropChange('track-list', tracks(false));
-            clock.advance(GRACE);
-            clock.advance(5 * MIN_WRITE_INTERVAL);
+            clock.advance(DEVICE_BURST_RESET + 1000);
             const before = aidWrites().length;
 
             recovery.onDeviceChange('devicechange');
@@ -262,8 +312,6 @@ describe('audio track recovery', () => {
             clock.advance(GRACE);
             expect(aidWrites().length).toBe(1);
 
-            // The speaker is off for a while, as it would be in practice, so
-            // the write floor has long since elapsed when it comes back.
             clock.advance(MIN_WRITE_INTERVAL);
             recovery.onDeviceChange('devicechange');
             clock.advance(DEVICE_RETRY);
@@ -302,7 +350,7 @@ describe('audio track recovery', () => {
             expect(recovery.isDown()).toBe(false);
         });
 
-        it('collapses a burst of events into a single deferred attempt', () => {
+        it('collapses a burst of events into a single attempt', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
@@ -312,11 +360,8 @@ describe('audio track recovery', () => {
             recovery.onDeviceChange('devicechange');
             recovery.onDeviceChange('devicechange');
             recovery.onDeviceChange('devicechange');
-            clock.advance(DEVICE_RETRY);
-            // Held back by the write floor rather than hitching immediately.
-            expect(aidWrites().length).toBe(before);
-
-            clock.advance(MIN_WRITE_INTERVAL);
+            // One write for the burst, not one per event.
+            clock.advance(DEVICE_RETRY + MIN_WRITE_INTERVAL);
             expect(aidWrites().length).toBe(before + 1);
         });
 
