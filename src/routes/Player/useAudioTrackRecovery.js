@@ -34,9 +34,16 @@ const React = require('react');
 // is no signal for the device returning — audio-device-list is not on
 // stremio-shell-ng's property allowlist, so we are blind to the hardware and
 // have to poll. Settles to one attempt per 15s.
-const RETRY_DELAYS = [2000, 3000, 5000, 8000, 15000];
+const RETRY_DELAYS = [2000, 3000, 3000, 4000];
+// Past this many attempts (~2 minutes) the speaker is probably off for the
+// evening, so stop asking so often.
+const SLOW_AFTER = 30;
+const SLOW_DELAY = 15000;
 // mpv needs a moment between dropping the track and taking it back.
 const TOGGLE_DELAY = 300;
+// A device actually arriving is worth acting on straight away; this only debounces
+// the burst of events a single connect produces.
+const DEVICE_RETRY = 250;
 // track-list also empties during teardown; waiting lets the stream prop catch
 // up so ordinary unloads are not mistaken for a device failure.
 const GRACE = 1500;
@@ -90,7 +97,9 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
 
         // Success is confirmed by track-list, not assumed. If it does not come
         // back, this carries us to the next attempt.
-        schedule(RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)]);
+        schedule(attempt > SLOW_AFTER
+            ? SLOW_DELAY
+            : RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)]);
     }
 
     const onTrackList = (list) => {
@@ -130,6 +139,17 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
                 onTrackList(data);
             }
         },
+        // An audio output appeared. Only meaningful while the track is down —
+        // it short-circuits the back-off instead of waiting out the next tier.
+        onDeviceChange: (why) => {
+            if (stopped || !down) {
+                return;
+            }
+
+            log('AudioRecovery: audio device change (' + why + '), retrying now');
+            schedule(DEVICE_RETRY);
+        },
+        isDown: () => down,
         // Never fight a file that is ending — that is how a previous attempt
         // put the player into a loop back to the streams list.
         onEnded: () => {
@@ -169,11 +189,26 @@ const useAudioTrackRecovery = ({ shell, stream }) => {
 
         const onEnded = () => recovery.onEnded();
 
+        // The Shell renders in WebView2, which is Chromium, so the media device
+        // APIs are available even though mpv's own device list is not reachable
+        // over the IPC. This is what gets recovery down to about a second
+        // instead of waiting out the mpv-side back-off.
+        const mediaDevices = navigator.mediaDevices;
+        const onDeviceChange = () => recovery.onDeviceChange('devicechange');
+        const hasDeviceEvents = !!mediaDevices && typeof mediaDevices.addEventListener === 'function';
+        if (hasDeviceEvents) {
+            mediaDevices.addEventListener('devicechange', onDeviceChange);
+        }
+
         transport.on('mpv-prop-change', onMpvPropChange);
         transport.on('mpv-event-ended', onEnded);
 
         return () => {
             recovery.dispose();
+            if (hasDeviceEvents) {
+                mediaDevices.removeEventListener('devicechange', onDeviceChange);
+            }
+
             if (typeof transport.off === 'function') {
                 transport.off('mpv-prop-change', onMpvPropChange);
                 transport.off('mpv-event-ended', onEnded);
@@ -186,5 +221,8 @@ module.exports = useAudioTrackRecovery;
 module.exports.createAudioTrackRecovery = createAudioTrackRecovery;
 module.exports.RETRY_DELAYS = RETRY_DELAYS;
 module.exports.TOGGLE_DELAY = TOGGLE_DELAY;
+module.exports.DEVICE_RETRY = DEVICE_RETRY;
+module.exports.SLOW_AFTER = SLOW_AFTER;
+module.exports.SLOW_DELAY = SLOW_DELAY;
 module.exports.GRACE = GRACE;
 module.exports.SETTLE = SETTLE;

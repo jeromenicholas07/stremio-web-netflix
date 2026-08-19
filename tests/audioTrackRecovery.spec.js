@@ -4,6 +4,9 @@ const {
     createAudioTrackRecovery,
     RETRY_DELAYS,
     TOGGLE_DELAY,
+    DEVICE_RETRY,
+    SLOW_AFTER,
+    SLOW_DELAY,
     GRACE,
     SETTLE,
 } = require('../src/routes/Player/useAudioTrackRecovery');
@@ -191,6 +194,94 @@ describe('audio track recovery', () => {
         expect(aidWrites().length).toBe(before + 2);
         clock.advance(RETRY_DELAYS[0] + TOGGLE_DELAY);
         expect(aidWrites().length).toBe(before + 4);
+    });
+
+    describe('device arrival', () => {
+        it('short-circuits the back-off instead of waiting out the next tier', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE + TOGGLE_DELAY);
+            expect(aidWrites().length).toBe(2);
+
+            // Back-off would not fire again for seconds; the speaker arriving
+            // must not have to wait for it.
+            recovery.onDeviceChange('devicechange');
+            clock.advance(DEVICE_RETRY + TOGGLE_DELAY);
+            expect(aidWrites().length).toBe(4);
+            expect(aidWrites().slice(-2)).toEqual(['no', '1']);
+        });
+
+        it('is ignored while audio is healthy', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onDeviceChange('devicechange');
+            clock.advance(60000);
+            expect(aidWrites()).toEqual([]);
+        });
+
+        it('is ignored once mpv has ended the file', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            recovery.onEnded();
+            recovery.onDeviceChange('devicechange');
+            clock.advance(60000);
+            expect(aidWrites()).toEqual([]);
+        });
+
+        it('reports down only while the track is dropped', () => {
+            const { clock, recovery } = setup();
+
+            expect(recovery.isDown()).toBe(false);
+            recovery.onPropChange('track-list', tracks(false));
+            expect(recovery.isDown()).toBe(true);
+            clock.advance(GRACE + TOGGLE_DELAY);
+            recovery.onPropChange('track-list', tracks(true));
+            expect(recovery.isDown()).toBe(false);
+        });
+
+        it('collapses a burst of events into one attempt', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE + TOGGLE_DELAY);
+            const before = aidWrites().length;
+
+            recovery.onDeviceChange('devicechange');
+            recovery.onDeviceChange('devicechange');
+            recovery.onDeviceChange('enumerate');
+            clock.advance(DEVICE_RETRY + TOGGLE_DELAY);
+            expect(aidWrites().length).toBe(before + 2);
+        });
+    });
+
+    it('backs off to the slow cadence once the device is clearly gone for good', () => {
+        const { clock, recovery, aidWrites } = setup();
+
+        // The delay armed immediately after attempt n.
+        const delayAfter = (attempt) => (attempt > SLOW_AFTER
+            ? SLOW_DELAY
+            : RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)]);
+
+        recovery.onPropChange('track-list', tracks(false));
+        clock.advance(GRACE);          // attempt 1 writes 'no'
+        clock.advance(TOGGLE_DELAY);   // ...then the id
+
+        // Step attempt by attempt so the timer phase stays known.
+        for (let attempt = 1; attempt <= SLOW_AFTER; attempt++) {
+            clock.advance(delayAfter(attempt) - TOGGLE_DELAY);
+            clock.advance(TOGGLE_DELAY);
+        }
+
+        // Now past the responsive window: the next wait must be the slow one.
+        const before = aidWrites().length;
+        clock.advance(RETRY_DELAYS[RETRY_DELAYS.length - 1]);
+        expect(aidWrites().length).toBe(before);
+
+        clock.advance(SLOW_DELAY - RETRY_DELAYS[RETRY_DELAYS.length - 1] - TOGGLE_DELAY);
+        clock.advance(TOGGLE_DELAY);
+        expect(aidWrites().length).toBe(before + 2);
     });
 
     it('goes quiet after dispose', () => {
