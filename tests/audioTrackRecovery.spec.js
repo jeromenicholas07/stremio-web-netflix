@@ -2,16 +2,14 @@
 
 const {
     createAudioTrackRecovery,
-    RETRY_DELAYS,
     TOGGLE_DELAY,
-    DEVICE_RETRY,
-    SLOW_AFTER,
-    SLOW_DELAY,
     GRACE,
+    DEVICE_RETRY,
+    SAFETY_INTERVAL,
     SETTLE,
 } = require('../src/routes/Player/useAudioTrackRecovery');
 
-// Deterministic clock so the toggle and the back-off can be stepped exactly.
+// Deterministic clock so the toggle and the schedule can be stepped exactly.
 function createClock() {
     let now = 0;
     let nextId = 1;
@@ -87,6 +85,33 @@ describe('audio track recovery', () => {
         expect(aidWrites().every((value) => typeof value === 'string')).toBe(true);
     });
 
+    // Each attempt makes mpv re-sync the demuxer, which visibly buffers a
+    // network stream. Retrying on a short timer made the video hitch nonstop
+    // while the speaker was off, so waiting is the whole point.
+    it('does not keep hitting mpv while the device stays away', () => {
+        const { clock, recovery, aidWrites } = setup();
+
+        recovery.onPropChange('track-list', tracks(false));
+        clock.advance(GRACE + TOGGLE_DELAY);
+        expect(aidWrites().length).toBe(2);
+
+        // Nearly a full minute of the device being gone: still just one attempt.
+        clock.advance(SAFETY_INTERVAL - 5000);
+        expect(aidWrites().length).toBe(2);
+    });
+
+    it('falls back to a slow safety attempt if no device event ever arrives', () => {
+        const { clock, recovery, aidWrites } = setup();
+
+        recovery.onPropChange('track-list', tracks(false));
+        clock.advance(GRACE + TOGGLE_DELAY);
+        expect(aidWrites().length).toBe(2);
+
+        clock.advance(SAFETY_INTERVAL);
+        expect(aidWrites().length).toBe(4);
+        expect(aidWrites().slice(-2)).toEqual(['no', '1']);
+    });
+
     it('stops once mpv reports the track selected again', () => {
         const { clock, recovery, aidWrites } = setup();
 
@@ -95,25 +120,8 @@ describe('audio track recovery', () => {
         expect(aidWrites()).toEqual(['no', '1']);
 
         recovery.onPropChange('track-list', tracks(true));
-        clock.advance(120000);
+        clock.advance(10 * SAFETY_INTERVAL);
         expect(aidWrites()).toEqual(['no', '1']);
-        expect(clock.pendingCount).toBe(0);
-    });
-
-    it('keeps retrying while the device is still away, backing off', () => {
-        const { clock, recovery, aidWrites } = setup();
-
-        recovery.onPropChange('track-list', tracks(false));
-        clock.advance(GRACE + TOGGLE_DELAY);
-        expect(aidWrites().length).toBe(2);
-
-        for (let i = 0; i < 4; i++) {
-            clock.advance(RETRY_DELAYS[Math.min(i, RETRY_DELAYS.length - 1)]);
-            clock.advance(TOGGLE_DELAY);
-        }
-
-        expect(aidWrites().length).toBe(10);
-        expect(aidWrites().filter((value) => value === 'no').length).toBe(5);
     });
 
     it('does nothing while the stream is being torn down', () => {
@@ -121,7 +129,7 @@ describe('audio track recovery', () => {
 
         state.streamLoaded = false;
         recovery.onPropChange('track-list', tracks(false));
-        clock.advance(120000);
+        clock.advance(10 * SAFETY_INTERVAL);
         expect(aidWrites()).toEqual([]);
     });
 
@@ -135,7 +143,7 @@ describe('audio track recovery', () => {
         });
 
         recovery.onPropChange('track-list', tracks(false));
-        clock.advance(120000);
+        clock.advance(10 * SAFETY_INTERVAL);
         expect(sent).toEqual([]);
     });
 
@@ -162,7 +170,7 @@ describe('audio track recovery', () => {
 
         recovery.onPropChange('track-list', tracks(false));
         recovery.onEnded();
-        clock.advance(120000);
+        clock.advance(10 * SAFETY_INTERVAL);
         expect(aidWrites()).toEqual([]);
         expect(clock.pendingCount).toBe(0);
     });
@@ -171,41 +179,28 @@ describe('audio track recovery', () => {
         const { clock, recovery, sent } = setup();
 
         recovery.onPropChange('track-list', tracks(false));
-        clock.advance(60000);
+        clock.advance(5 * SAFETY_INTERVAL);
         expect(sent.every(([event, args]) => event === 'mpv-set-prop' && args[0] === 'aid')).toBe(true);
     });
 
-    it('resets the back-off after a healthy spell', () => {
+    it('goes quiet after dispose', () => {
         const { clock, recovery, aidWrites } = setup();
 
         recovery.onPropChange('track-list', tracks(false));
-        clock.advance(GRACE + TOGGLE_DELAY);
-        for (let i = 0; i < 4; i++) {
-            clock.advance(RETRY_DELAYS[Math.min(i, RETRY_DELAYS.length - 1)] + TOGGLE_DELAY);
-        }
-
-        recovery.onPropChange('track-list', tracks(true));
-        clock.advance(SETTLE + 100);
-        const before = aidWrites().length;
-
-        // A later outage must start responsive again, not at the 15s cap.
-        recovery.onPropChange('track-list', tracks(false));
-        clock.advance(GRACE + TOGGLE_DELAY);
-        expect(aidWrites().length).toBe(before + 2);
-        clock.advance(RETRY_DELAYS[0] + TOGGLE_DELAY);
-        expect(aidWrites().length).toBe(before + 4);
+        recovery.dispose();
+        clock.advance(10 * SAFETY_INTERVAL);
+        expect(aidWrites()).toEqual([]);
+        expect(clock.pendingCount).toBe(0);
     });
 
     describe('device arrival', () => {
-        it('short-circuits the back-off instead of waiting out the next tier', () => {
+        it('recovers promptly instead of waiting for the safety attempt', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
             clock.advance(GRACE + TOGGLE_DELAY);
             expect(aidWrites().length).toBe(2);
 
-            // Back-off would not fire again for seconds; the speaker arriving
-            // must not have to wait for it.
             recovery.onDeviceChange('devicechange');
             clock.advance(DEVICE_RETRY + TOGGLE_DELAY);
             expect(aidWrites().length).toBe(4);
@@ -216,7 +211,7 @@ describe('audio track recovery', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onDeviceChange('devicechange');
-            clock.advance(60000);
+            clock.advance(10 * SAFETY_INTERVAL);
             expect(aidWrites()).toEqual([]);
         });
 
@@ -226,7 +221,7 @@ describe('audio track recovery', () => {
             recovery.onPropChange('track-list', tracks(false));
             recovery.onEnded();
             recovery.onDeviceChange('devicechange');
-            clock.advance(60000);
+            clock.advance(10 * SAFETY_INTERVAL);
             expect(aidWrites()).toEqual([]);
         });
 
@@ -250,47 +245,23 @@ describe('audio track recovery', () => {
 
             recovery.onDeviceChange('devicechange');
             recovery.onDeviceChange('devicechange');
-            recovery.onDeviceChange('enumerate');
+            recovery.onDeviceChange('devicechange');
             clock.advance(DEVICE_RETRY + TOGGLE_DELAY);
             expect(aidWrites().length).toBe(before + 2);
         });
-    });
 
-    it('backs off to the slow cadence once the device is clearly gone for good', () => {
-        const { clock, recovery, aidWrites } = setup();
+        it('handles a second outage from a clean slate', () => {
+            const { clock, recovery, aidWrites } = setup();
 
-        // The delay armed immediately after attempt n.
-        const delayAfter = (attempt) => (attempt > SLOW_AFTER
-            ? SLOW_DELAY
-            : RETRY_DELAYS[Math.min(attempt - 1, RETRY_DELAYS.length - 1)]);
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE + TOGGLE_DELAY);
+            recovery.onPropChange('track-list', tracks(true));
+            clock.advance(SETTLE + 100);
 
-        recovery.onPropChange('track-list', tracks(false));
-        clock.advance(GRACE);          // attempt 1 writes 'no'
-        clock.advance(TOGGLE_DELAY);   // ...then the id
-
-        // Step attempt by attempt so the timer phase stays known.
-        for (let attempt = 1; attempt <= SLOW_AFTER; attempt++) {
-            clock.advance(delayAfter(attempt) - TOGGLE_DELAY);
-            clock.advance(TOGGLE_DELAY);
-        }
-
-        // Now past the responsive window: the next wait must be the slow one.
-        const before = aidWrites().length;
-        clock.advance(RETRY_DELAYS[RETRY_DELAYS.length - 1]);
-        expect(aidWrites().length).toBe(before);
-
-        clock.advance(SLOW_DELAY - RETRY_DELAYS[RETRY_DELAYS.length - 1] - TOGGLE_DELAY);
-        clock.advance(TOGGLE_DELAY);
-        expect(aidWrites().length).toBe(before + 2);
-    });
-
-    it('goes quiet after dispose', () => {
-        const { clock, recovery, aidWrites } = setup();
-
-        recovery.onPropChange('track-list', tracks(false));
-        recovery.dispose();
-        clock.advance(120000);
-        expect(aidWrites()).toEqual([]);
-        expect(clock.pendingCount).toBe(0);
+            const before = aidWrites().length;
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE + TOGGLE_DELAY);
+            expect(aidWrites().length).toBe(before + 2);
+        });
     });
 });
