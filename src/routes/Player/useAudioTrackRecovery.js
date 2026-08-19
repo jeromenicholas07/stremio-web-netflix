@@ -60,7 +60,11 @@ const DEVICE_BURST_RESET = 30000;
 // buffering hitch, so this stays rare on purpose — the device event is the
 // real trigger, this only stops a silent film if that event never comes.
 const SAFETY_INTERVAL = 60000;
-// A restored track only counts as healthy once it has held this long.
+// mpv reports the track selected as soon as mp_switch_track runs, which is
+// BEFORE ao_init_best gets a chance to fail. Treating that as success reset the
+// throttling and re-armed on the deselect that followed a moment later, which
+// span a ~1.5s loop of demuxer re-syncs. So a re-selected track only counts as
+// recovered once it has held for this long without being dropped again.
 const SETTLE = 3000;
 // Absolute floor between any two writes, whatever asked for them. Each write
 // makes mpv re-sync the demuxer and visibly buffers the stream, so this stops
@@ -140,22 +144,31 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
         const selected = audio.filter((track) => track.selected)[0];
         if (selected) {
             audioTrackId = selected.id;
-            if (down) {
-                down = false;
-                deviceAttempt = 0;
-                lastDeviceWriteAt = 0;
-                clearTimers();
-                log('AudioRecovery: audio restored');
+            // Do not declare victory here — wait and see whether it holds.
+            if (down && settleTimeout === null) {
                 settleTimeout = timers.setTimeout(() => {
                     settleTimeout = null;
+                    down = false;
+                    deviceAttempt = 0;
+                    lastDeviceWriteAt = 0;
+                    timers.clearTimeout(retryTimeout);
+                    retryTimeout = null;
+                    log('AudioRecovery: audio restored');
                 }, SETTLE);
             }
 
             return;
         }
 
-        // No audio track selected. Only a failure if mpv had one selected
-        // before and we are not tearing the stream down.
+        // Track is not selected. If we were mid-confirmation, the attempt just
+        // failed — cancel it, but leave `down` and the cooldown ladder alone so
+        // the next try waits its turn instead of restarting the cycle.
+        timers.clearTimeout(settleTimeout);
+        settleTimeout = null;
+
+        // Only a failure if mpv had one selected before and we are not tearing
+        // the stream down. Already being down means an attempt is pending; do
+        // not re-arm on top of it.
         if (!stopped && !sessionDisabled && !down && audioTrackId !== null && isStreamLoaded()) {
             down = true;
             log('AudioRecovery: mpv dropped the audio track, output device gone');

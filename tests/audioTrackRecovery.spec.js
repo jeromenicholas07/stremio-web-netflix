@@ -137,6 +137,7 @@ describe('audio track recovery', () => {
         expect(aidWrites()).toEqual(['1']);
 
         recovery.onPropChange('track-list', tracks(true));
+        clock.advance(SETTLE);
         clock.advance(10 * SAFETY_INTERVAL);
         expect(aidWrites()).toEqual(['1']);
     });
@@ -208,6 +209,62 @@ describe('audio track recovery', () => {
         clock.advance(10 * SAFETY_INTERVAL);
         expect(aidWrites()).toEqual([]);
         expect(clock.pendingCount).toBe(0);
+    });
+
+    // mpv reports the track selected as soon as mp_switch_track runs, before
+    // ao_init_best can fail. Believing that transient reset the throttling and
+    // re-armed on the deselect that followed, spinning a ~1.5s loop of demuxer
+    // re-syncs — the stutter this whole schedule exists to avoid.
+    describe('failed attempt that briefly looks like success', () => {
+        it('does not treat a selection that immediately drops as recovery', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            expect(aidWrites().length).toBe(1);
+
+            // mpv selects the track, then fails to open the device and drops it.
+            recovery.onPropChange('track-list', tracks(true));
+            clock.advance(200);
+            recovery.onPropChange('track-list', tracks(false));
+
+            expect(recovery.isDown()).toBe(true);
+            // Crucially: no fresh GRACE-length re-arm, so no tight loop.
+            clock.advance(GRACE * 3);
+            expect(aidWrites().length).toBe(1);
+        });
+
+        it('does not restart the cycle over and over', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+
+            // Ten rounds of mpv flickering the track while the device is away.
+            for (let i = 0; i < 10; i++) {
+                recovery.onPropChange('track-list', tracks(true));
+                clock.advance(200);
+                recovery.onPropChange('track-list', tracks(false));
+                clock.advance(1000);
+            }
+
+            // Only the safety attempts, not one per flicker.
+            expect(aidWrites().length).toBeLessThanOrEqual(2);
+        });
+
+        it('still recovers when the selection holds', () => {
+            const { clock, recovery, aidWrites } = setup();
+
+            recovery.onPropChange('track-list', tracks(false));
+            clock.advance(GRACE);
+            recovery.onPropChange('track-list', tracks(true));
+            clock.advance(SETTLE + 100);
+
+            expect(recovery.isDown()).toBe(false);
+            const before = aidWrites().length;
+            clock.advance(10 * SAFETY_INTERVAL);
+            expect(aidWrites().length).toBe(before);
+        });
     });
 
     // A Bluetooth device that is off or reconnecting can emit devicechange
@@ -346,7 +403,11 @@ describe('audio track recovery', () => {
             recovery.onPropChange('track-list', tracks(false));
             expect(recovery.isDown()).toBe(true);
             clock.advance(GRACE);
+            // Still down until the re-selection has held — mpv reports selected
+            // before the audio output has actually opened.
             recovery.onPropChange('track-list', tracks(true));
+            expect(recovery.isDown()).toBe(true);
+            clock.advance(SETTLE);
             expect(recovery.isDown()).toBe(false);
         });
 
@@ -404,6 +465,7 @@ describe('audio track recovery', () => {
             first.recovery.onPropChange('track-list', tracks(false));
             first.clock.advance(GRACE);
             first.recovery.onPropChange('track-list', tracks(true));
+            first.clock.advance(SETTLE);
             first.clock.advance(BLAME_WINDOW + 1000);
             first.recovery.onEnded();
 
