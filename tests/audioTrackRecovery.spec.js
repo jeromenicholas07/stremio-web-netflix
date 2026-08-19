@@ -1,13 +1,17 @@
 // Copyright (C) 2017-2026 Smart code 203358507
 
+const recoveryModule = require('../src/routes/Player/useAudioTrackRecovery');
 const {
     createAudioTrackRecovery,
-    TOGGLE_DELAY,
     GRACE,
     DEVICE_RETRY,
     SAFETY_INTERVAL,
     SETTLE,
-} = require('../src/routes/Player/useAudioTrackRecovery');
+    BLAME_WINDOW,
+} = recoveryModule;
+
+// The session kill switch is module state by design; each test starts clean.
+beforeEach(() => recoveryModule.__resetSessionDisabled());
 
 // Deterministic clock so the toggle and the schedule can be stepped exactly.
 function createClock() {
@@ -42,6 +46,7 @@ function createClock() {
         get pendingCount() {
             return pending.size;
         },
+        now: () => now,
     };
 }
 
@@ -58,6 +63,7 @@ function setup({ streamLoaded = true } = {}) {
         send: (event, args) => sent.push([event, args]),
         isStreamLoaded: () => state.streamLoaded,
         timers: clock.timers,
+        now: clock.now,
     });
     const aidWrites = () => sent
         .filter(([event, args]) => event === 'mpv-set-prop' && args[0] === 'aid')
@@ -69,20 +75,28 @@ function setup({ streamLoaded = true } = {}) {
 }
 
 describe('audio track recovery', () => {
-    it('toggles aid off and back as strings when the track is dropped', () => {
+    it('re-selects the track with a single string write', () => {
         const { clock, recovery, aidWrites } = setup();
 
         recovery.onPropChange('track-list', tracks(false));
         expect(aidWrites()).toEqual([]);
 
         clock.advance(GRACE);
-        expect(aidWrites()).toEqual(['no']);
+        // One write, and never `no` first: deselecting can leave mpv with
+        // neither audio nor video, which ends the file and skips the episode.
+        expect(aidWrites()).toEqual(['1']);
+        expect(typeof aidWrites()[0]).toBe('string');
+    });
 
-        clock.advance(TOGGLE_DELAY);
-        // Strings, not numbers: mpv rejects an f64 on an integer choice option,
-        // which is what left an earlier attempt with the track dropped.
-        expect(aidWrites()).toEqual(['no', '1']);
-        expect(aidWrites().every((value) => typeof value === 'string')).toBe(true);
+    it('never deselects the audio track', () => {
+        const { clock, recovery, aidWrites } = setup();
+
+        recovery.onPropChange('track-list', tracks(false));
+        clock.advance(5 * SAFETY_INTERVAL);
+        recovery.onDeviceChange('devicechange');
+        clock.advance(DEVICE_RETRY);
+        expect(aidWrites()).not.toContain('no');
+        expect(aidWrites()).not.toContain(false);
     });
 
     // Each attempt makes mpv re-sync the demuxer, which visibly buffers a
@@ -92,36 +106,36 @@ describe('audio track recovery', () => {
         const { clock, recovery, aidWrites } = setup();
 
         recovery.onPropChange('track-list', tracks(false));
-        clock.advance(GRACE + TOGGLE_DELAY);
-        expect(aidWrites().length).toBe(2);
+        clock.advance(GRACE);
+        expect(aidWrites().length).toBe(1);
 
         // Nearly a full minute of the device being gone: still just one attempt.
         clock.advance(SAFETY_INTERVAL - 5000);
-        expect(aidWrites().length).toBe(2);
+        expect(aidWrites().length).toBe(1);
     });
 
     it('falls back to a slow safety attempt if no device event ever arrives', () => {
         const { clock, recovery, aidWrites } = setup();
 
         recovery.onPropChange('track-list', tracks(false));
-        clock.advance(GRACE + TOGGLE_DELAY);
-        expect(aidWrites().length).toBe(2);
+        clock.advance(GRACE);
+        expect(aidWrites().length).toBe(1);
 
         clock.advance(SAFETY_INTERVAL);
-        expect(aidWrites().length).toBe(4);
-        expect(aidWrites().slice(-2)).toEqual(['no', '1']);
+        expect(aidWrites().length).toBe(2);
+        expect(aidWrites()[1]).toBe('1');
     });
 
     it('stops once mpv reports the track selected again', () => {
         const { clock, recovery, aidWrites } = setup();
 
         recovery.onPropChange('track-list', tracks(false));
-        clock.advance(GRACE + TOGGLE_DELAY);
-        expect(aidWrites()).toEqual(['no', '1']);
+        clock.advance(GRACE);
+        expect(aidWrites()).toEqual(['1']);
 
         recovery.onPropChange('track-list', tracks(true));
         clock.advance(10 * SAFETY_INTERVAL);
-        expect(aidWrites()).toEqual(['no', '1']);
+        expect(aidWrites()).toEqual(['1']);
     });
 
     it('does nothing while the stream is being torn down', () => {
@@ -160,8 +174,8 @@ describe('audio track recovery', () => {
             { id: 1, type: 'audio', selected: false },
             { id: 2, type: 'audio', selected: false },
         ]);
-        clock.advance(GRACE + TOGGLE_DELAY);
-        expect(aidWrites()).toEqual(['no', '2']);
+        clock.advance(GRACE);
+        expect(aidWrites()).toEqual(['2']);
     });
 
     // The failure mode that previously looped the player back to the streams list.
@@ -198,13 +212,13 @@ describe('audio track recovery', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
-            clock.advance(GRACE + TOGGLE_DELAY);
-            expect(aidWrites().length).toBe(2);
+            clock.advance(GRACE);
+            expect(aidWrites().length).toBe(1);
 
             recovery.onDeviceChange('devicechange');
-            clock.advance(DEVICE_RETRY + TOGGLE_DELAY);
-            expect(aidWrites().length).toBe(4);
-            expect(aidWrites().slice(-2)).toEqual(['no', '1']);
+            clock.advance(DEVICE_RETRY);
+            expect(aidWrites().length).toBe(2);
+            expect(aidWrites()[1]).toBe('1');
         });
 
         it('is ignored while audio is healthy', () => {
@@ -231,7 +245,7 @@ describe('audio track recovery', () => {
             expect(recovery.isDown()).toBe(false);
             recovery.onPropChange('track-list', tracks(false));
             expect(recovery.isDown()).toBe(true);
-            clock.advance(GRACE + TOGGLE_DELAY);
+            clock.advance(GRACE);
             recovery.onPropChange('track-list', tracks(true));
             expect(recovery.isDown()).toBe(false);
         });
@@ -240,28 +254,61 @@ describe('audio track recovery', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
-            clock.advance(GRACE + TOGGLE_DELAY);
+            clock.advance(GRACE);
             const before = aidWrites().length;
 
             recovery.onDeviceChange('devicechange');
             recovery.onDeviceChange('devicechange');
             recovery.onDeviceChange('devicechange');
-            clock.advance(DEVICE_RETRY + TOGGLE_DELAY);
-            expect(aidWrites().length).toBe(before + 2);
+            clock.advance(DEVICE_RETRY);
+            expect(aidWrites().length).toBe(before + 1);
         });
 
         it('handles a second outage from a clean slate', () => {
             const { clock, recovery, aidWrites } = setup();
 
             recovery.onPropChange('track-list', tracks(false));
-            clock.advance(GRACE + TOGGLE_DELAY);
+            clock.advance(GRACE);
             recovery.onPropChange('track-list', tracks(true));
             clock.advance(SETTLE + 100);
 
             const before = aidWrites().length;
             recovery.onPropChange('track-list', tracks(false));
-            clock.advance(GRACE + TOGGLE_DELAY);
-            expect(aidWrites().length).toBe(before + 2);
+            clock.advance(GRACE);
+            expect(aidWrites().length).toBe(before + 1);
+        });
+    });
+
+    // Skipping an episode is not something to risk twice.
+    describe('session kill switch', () => {
+        it('stands down for good if mpv ends the file right after a write', () => {
+            const first = setup();
+            first.recovery.onPropChange('track-list', tracks(false));
+            first.clock.advance(GRACE);
+            expect(first.aidWrites().length).toBe(1);
+            first.recovery.onEnded();
+
+            // Next episode mounts a fresh recovery — it must stay disabled.
+            const second = setup();
+            second.recovery.onPropChange('track-list', tracks(false));
+            second.clock.advance(10 * SAFETY_INTERVAL);
+            second.recovery.onDeviceChange('devicechange');
+            second.clock.advance(DEVICE_RETRY);
+            expect(second.aidWrites()).toEqual([]);
+        });
+
+        it('keeps working when the file ends well after our last write', () => {
+            const first = setup();
+            first.recovery.onPropChange('track-list', tracks(false));
+            first.clock.advance(GRACE);
+            first.recovery.onPropChange('track-list', tracks(true));
+            first.clock.advance(BLAME_WINDOW + 1000);
+            first.recovery.onEnded();
+
+            const second = setup();
+            second.recovery.onPropChange('track-list', tracks(false));
+            second.clock.advance(GRACE);
+            expect(second.aidWrites()).toEqual(['1']);
         });
     });
 });

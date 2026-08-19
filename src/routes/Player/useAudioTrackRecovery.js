@@ -17,11 +17,17 @@
 //     few seconds after the device dies. `aid` is useless for this — it reports
 //     the option, not the live selection, and never changes.
 //
-//   * The repair is a two-step `aid` toggle, no -> id, with BOTH values as
-//     STRINGS. The option still reads as the old id so rewriting it changes
-//     nothing, and stremio-shell-ng deserializes into PropVal::Bool|Str|Num
-//     where a number becomes an f64 that mpv rejects on an integer choice
-//     option.
+//   * The repair is a single `aid` write, as a STRING. mpv has already set
+//     current_track to NULL, so mp_switch_track re-selects and rebuilds the
+//     audio chain; the value must not be a number because stremio-shell-ng
+//     deserializes into PropVal::Bool|Str|Num and an f64 is rejected on an
+//     integer choice option.
+//
+//     It must NOT deselect first. `aid no` leaves mpv with neither audio nor
+//     video selected, which is one of the conditions under which error_on_track
+//     sets stop_play = PT_ERROR. The shell emits `mpv-event-ended` for every
+//     EndFile reason, so that surfaces as the episode ending and the player
+//     jumps to the next one.
 //
 // Retrying is deliberately rare. Each attempt makes mpv run
 // reinit_audio_chain, which re-syncs the demuxer and visibly stalls a network
@@ -36,8 +42,6 @@
 
 const React = require('react');
 
-// mpv needs a moment between dropping the track and taking it back.
-const TOGGLE_DELAY = 300;
 // track-list also empties during teardown; waiting lets the stream prop catch
 // up so ordinary unloads are not mistaken for a device failure.
 const GRACE = 1500;
@@ -50,25 +54,31 @@ const DEVICE_RETRY = 250;
 const SAFETY_INTERVAL = 60000;
 // A restored track only counts as healthy once it has held this long.
 const SETTLE = 3000;
+// If mpv ends the file this soon after a write of ours, assume we caused it and
+// never try again this session. Recovery is a convenience; skipping an episode
+// is not something to risk twice.
+const BLAME_WINDOW = 5000;
 
 const noop = () => undefined;
 
 const audioTracks = (list) => (Array.isArray(list) ? list.filter((t) => t && t.type === 'audio') : []);
 
-const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log = noop }) => {
+// Survives Player remounts on purpose: if recovery ever ends a file, it stays
+// off for the rest of the session rather than doing it again in the next episode.
+let sessionDisabled = false;
+
+const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log = noop, now = Date.now }) => {
     let audioTrackId = null;
+    let lastWriteAt = 0;
     let down = false;
     let stopped = false;
     let retryTimeout = null;
-    let toggleTimeout = null;
     let settleTimeout = null;
 
     const clearTimers = () => {
         timers.clearTimeout(retryTimeout);
-        timers.clearTimeout(toggleTimeout);
         timers.clearTimeout(settleTimeout);
         retryTimeout = null;
-        toggleTimeout = null;
         settleTimeout = null;
     };
 
@@ -79,20 +89,14 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
 
     function reselect() {
         retryTimeout = null;
-        if (stopped || !down || audioTrackId === null || !isStreamLoaded()) {
+        if (stopped || sessionDisabled || !down || audioTrackId === null || !isStreamLoaded()) {
             return;
         }
 
         log('AudioRecovery: re-selecting audio track', audioTrackId);
-        // Strings on both writes. A number is rejected by mpv here.
-        send('mpv-set-prop', ['aid', 'no']);
-        timers.clearTimeout(toggleTimeout);
-        toggleTimeout = timers.setTimeout(() => {
-            toggleTimeout = null;
-            if (!stopped && down && isStreamLoaded()) {
-                send('mpv-set-prop', ['aid', String(audioTrackId)]);
-            }
-        }, TOGGLE_DELAY);
+        // One write, and a string. Never `no` first — see the header.
+        lastWriteAt = now();
+        send('mpv-set-prop', ['aid', String(audioTrackId)]);
 
         // Success is confirmed by track-list, not assumed. Until then, sit on
         // the slow safety net rather than hitching playback repeatedly.
@@ -122,7 +126,7 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
 
         // No audio track selected. Only a failure if mpv had one selected
         // before and we are not tearing the stream down.
-        if (!stopped && !down && audioTrackId !== null && isStreamLoaded()) {
+        if (!stopped && !sessionDisabled && !down && audioTrackId !== null && isStreamLoaded()) {
             down = true;
             log('AudioRecovery: mpv dropped the audio track, output device gone');
             schedule(GRACE);
@@ -138,7 +142,7 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
         // An audio output appeared. This is the trigger that matters — the
         // safety net exists only in case it never fires.
         onDeviceChange: (why) => {
-            if (stopped || !down) {
+            if (stopped || sessionDisabled || !down) {
                 return;
             }
 
@@ -149,6 +153,14 @@ const createAudioTrackRecovery = ({ send, isStreamLoaded, timers = global, log =
         // Never fight a file that is ending — that is how a previous attempt
         // put the player into a loop back to the streams list.
         onEnded: () => {
+            // The shell reports every EndFile reason through this, and the
+            // player turns it into "go to the next episode". If it lands right
+            // after a write of ours, we caused it — stand down for good.
+            if (lastWriteAt !== 0 && now() - lastWriteAt < BLAME_WINDOW) {
+                sessionDisabled = true;
+                log('AudioRecovery: mpv ended the file right after a write — disabling recovery for this session');
+            }
+
             stopped = true;
             down = false;
             clearTimers();
@@ -215,8 +227,10 @@ const useAudioTrackRecovery = ({ shell, stream }) => {
 
 module.exports = useAudioTrackRecovery;
 module.exports.createAudioTrackRecovery = createAudioTrackRecovery;
-module.exports.TOGGLE_DELAY = TOGGLE_DELAY;
 module.exports.GRACE = GRACE;
 module.exports.DEVICE_RETRY = DEVICE_RETRY;
 module.exports.SAFETY_INTERVAL = SAFETY_INTERVAL;
 module.exports.SETTLE = SETTLE;
+module.exports.BLAME_WINDOW = BLAME_WINDOW;
+// Test seam: the session kill switch is module state by design.
+module.exports.__resetSessionDisabled = () => { sessionDisabled = false; };
