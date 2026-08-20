@@ -16,10 +16,12 @@ const OptionsMenu = ({ className, stream, playbackDevices, extraSubtitlesTracks,
     const platform = usePlatform();
     const toast = useToast();
     const [streamingUrl, downloadUrl] = React.useMemo(() => {
-        return stream !== null ?
-            stream.deepLinks &&
-            stream.deepLinks.externalPlayer &&
-            [stream.deepLinks.externalPlayer.streaming, stream.deepLinks.externalPlayer.download]
+        // `stream` is undefined (not null) when nothing is selected, and the
+        // deepLinks chain is optional — either used to throw here and take the
+        // whole menu down with it.
+        const externalPlayer = stream?.deepLinks?.externalPlayer;
+        return externalPlayer ?
+            [externalPlayer.streaming, externalPlayer.download]
             :
             [null, null];
     }, [stream]);
