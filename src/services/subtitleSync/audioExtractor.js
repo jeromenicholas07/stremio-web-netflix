@@ -116,13 +116,14 @@ async function extractBatch(mediaUrl, chunks, headers) {
 /**
  * Resolve the mediaURL that FFmpeg can fetch from directly.
  *
- * FFmpeg runs locally and can only do plain HTTP reliably (the bundled
- * ffmpeg-static build often lacks working TLS on Windows). So we always
- * route through the streaming server on localhost:
- *   - Torrents → http://127.0.0.1:11470/<hash>/<idx>
- *   - HTTP/Debrid → http://127.0.0.1:11470/proxy/...  (streaming server proxies the HTTPS request)
+ * Torrents go through the streaming server, which is the only thing that can
+ * serve them: http://127.0.0.1:11470/<hash>/<idx>
  *
- * All URLs are plain HTTP to localhost — no TLS, no CORS issues for FFmpeg.
+ * HTTP/debrid streams are handed over as-is. They used to be routed through
+ * the streaming server's /proxy/ as well, on the assumption that the bundled
+ * ffmpeg lacked working TLS on Windows — the sidecar handles HTTPS fine, and
+ * /proxy/ actively breaks debrid links (see buildMediaUrl). The proxy is now
+ * used only when the stream needs auth headers forwarded.
  */
 async function resolveMediaUrl(streamingServerUrl, streamContent) {
     // Two separate URL contexts:
@@ -338,7 +339,16 @@ async function buildMediaUrl(ssUrl, streamContent, fetchBase) {
             }
         }
         if (streamContent.url.startsWith('http')) {
-            return buildProxyUrl(ssUrl, streamContent);
+            // Only go through the streaming server's /proxy/ when the stream
+            // actually needs headers forwarded. /proxy/ is pinned to the single
+            // origin in its `d=` parameter, so a debrid link that 302s to a
+            // different host (torrentio -> real-debrid.com) makes it answer 500
+            // — which is what broke extraction for every debrid stream. FFmpeg
+            // and the HLS transcoder both fetch the URL themselves and follow
+            // the redirect, and both handle HTTPS fine.
+            const proxyHeaders = streamContent.behaviorHints && streamContent.behaviorHints.proxyHeaders;
+            const needsHeaders = !!(proxyHeaders && (proxyHeaders.request || proxyHeaders.response));
+            return needsHeaders ? buildProxyUrl(ssUrl, streamContent) : streamContent.url;
         }
     }
 
