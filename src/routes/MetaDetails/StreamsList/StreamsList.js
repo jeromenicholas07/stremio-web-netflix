@@ -34,6 +34,12 @@ const {
     storeAutoPickSelection,
 } = require('stremio/common/autoPick');
 const { preflightAutoPickStream } = require('stremio/common/streamPreflight');
+const {
+    CLEAN_RUNS_TO_TRUST,
+    getCopyrightCheckState,
+    recordCopyrightCheckRun,
+    setCopyrightCheckManual,
+} = require('stremio/common/copyrightCheckHistory');
 const { default: SeasonEpisodePicker } = require('../EpisodePicker');
 
 const ALL_ADDONS_KEY = 'ALL';
@@ -91,6 +97,20 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             .filter((source) => !source.enabled)
             .map((source) => source.key);
     }, [globalSettings]);
+    // Per-show copyright check. Automatic by default: a show whose top pick has
+    // come back clean often enough stops being probed, and any observed block
+    // puts the probe straight back. The toggle below writes a manual override
+    // on top of that, which a block also clears (see copyrightCheckHistory).
+    const [copyrightCheck, setCopyrightCheckState] = React.useState(() => getCopyrightCheckState(type, metaId));
+    React.useEffect(() => {
+        setCopyrightCheckState(getCopyrightCheckState(type, metaId));
+    }, [type, metaId]);
+    const onCopyrightCheckToggle = React.useCallback(() => {
+        const next = !copyrightCheck.enabled;
+        // Choosing the value automation would have picked anyway just hands the
+        // show back to automatic rather than pinning it there.
+        setCopyrightCheckState(setCopyrightCheckManual(type, metaId, next === copyrightCheck.auto ? null : next));
+    }, [type, metaId, copyrightCheck]);
     const onAutoPickModeChange = React.useCallback((custom) => {
         if (custom) {
             const base = overrideSettings || globalSettings;
@@ -397,6 +417,16 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                 ...blockedKeysRef.current,
             ]);
 
+            // Read straight from storage rather than the render closure so a
+            // toggle flipped moments ago is honoured without restarting the run.
+            const shouldCheckCopyright = getCopyrightCheckState(type, metaId).enabled;
+            // Only the first definite verdict of a run feeds the history, and
+            // only on a fresh entry: a retry run starts below the true top pick
+            // (it is here *because* something was blocked), so a clean result
+            // there says nothing about how this show usually behaves.
+            const canRecordRun = !retryToken;
+            let recordedRun = false;
+
             while (!cancelled) {
                 const best = pickBestStream(autoPickStreams, settings, {
                     failedStreamKeys: Array.from(failedSet),
@@ -425,6 +455,16 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
 
                 const described = describeStream(best, settings);
                 const attempt = getStreamAttemptNumber(autoPickStreams, best);
+
+                // This show is trusted (or the user turned the check off) —
+                // play without probing. If we are wrong, the player reports a
+                // copyright error, which records a block and bounces back here
+                // with checking switched on again.
+                if (!shouldCheckCopyright) {
+                    commit(best, described, attempt, blockedCount);
+                    return;
+                }
+
                 setAutoPickInfo({
                     attempt,
                     blockedCount,
@@ -440,6 +480,13 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                     signal: controller.signal,
                 });
                 if (cancelled) return;
+
+                // An inconclusive probe has no `blocked` field and is not
+                // evidence either way, so it never feeds the history.
+                if (canRecordRun && !recordedRun && typeof verdict.blocked === 'boolean') {
+                    recordedRun = true;
+                    setCopyrightCheckState(recordCopyrightCheckRun(type, metaId, { clean: !verdict.blocked }));
+                }
 
                 if (verdict.blocked) {
                     // Confirmed copyright stub — remember it and try the next.
@@ -474,6 +521,26 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             qualities: qualities.length > 0 ? qualities.join(' \u203A ') : 'None',
         };
     }, [effectiveAutoPickSettings]);
+
+    const copyrightCheckHint = React.useMemo(() => {
+        if (!copyrightCheck.enabled) {
+            return copyrightCheck.manual === false ?
+                'Off for this show — playing the top stream straight away.'
+                :
+                `Off automatically — the last ${copyrightCheck.cleanStreak} top picks were clean.`;
+        }
+
+        if (copyrightCheck.manual === true) {
+            return 'Always checking this show, however clean its picks are.';
+        }
+
+        if (copyrightCheck.blocks > 0) {
+            return 'This show has been copyright-blocked before — checking every pick.';
+        }
+
+        const remaining = Math.max(1, CLEAN_RUNS_TO_TRUST - copyrightCheck.cleanStreak);
+        return `Probes the top stream before playing. ${remaining} more clean ${remaining === 1 ? 'pick' : 'picks'} and it turns itself off.`;
+    }, [copyrightCheck]);
 
     const autoPickSkipSummary = React.useMemo(() => {
         return autoPickInfo && autoPickInfo.blockedCount > 0 ?
@@ -524,6 +591,14 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                                         <span className={styles['autopick-status-mode']}>
                                             {isCustomMode ? ' \u00b7 Custom' : ' \u00b7 Global'}
                                         </span>
+                                        {
+                                            !copyrightCheck.enabled ?
+                                                <span className={styles['autopick-check-badge']} title={copyrightCheckHint}>
+                                                    {'Instant'}
+                                                </span>
+                                                :
+                                                null
+                                        }
                                     </div>
                                     <div className={styles['autopick-status-subtitle']}>
                                         {autoPickSummary.sources}{' \u203A '}{autoPickSummary.qualities}
@@ -541,6 +616,25 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                         {
                             autoPickPanelOpen ?
                                 <div className={styles['autopick-panel-body']}>
+                                    <div className={styles['autopick-check-row']}>
+                                        <div className={styles['autopick-check-text']}>
+                                            <div className={styles['autopick-check-title']}>
+                                                {'Copyright check'}
+                                                <span className={styles['autopick-check-mode']}>
+                                                    {copyrightCheck.manual === null ? ' · Auto' : ' · Manual'}
+                                                </span>
+                                            </div>
+                                            <div className={styles['autopick-check-subtitle']}>
+                                                {copyrightCheckHint}
+                                            </div>
+                                        </div>
+                                        <Toggle
+                                            className={styles['autopick-check-toggle']}
+                                            checked={copyrightCheck.enabled}
+                                            title={copyrightCheck.enabled ? 'Skip the copyright check for this show' : 'Check this show for copyright-blocked streams'}
+                                            onClick={onCopyrightCheckToggle}
+                                        />
+                                    </div>
                                     <div className={styles['autopick-mode']}>
                                         <Button
                                             className={classnames(styles['autopick-mode-button'], { 'active': !isCustomMode })}

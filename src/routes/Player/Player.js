@@ -37,6 +37,7 @@ const {
     isRecoverableAutoPickError,
     recordAutoPickFailure,
 } = require('stremio/common/autoPick');
+const { recordCopyrightBlockObserved } = require('stremio/common/copyrightCheckHistory');
 
 const findTrackByLang = (tracks, lang) => tracks.find((track) => track.lang === lang || langs.where('1', track.lang)?.[2] === lang);
 const findTrackById = (tracks, id) => tracks.find((track) => track.id === id);
@@ -211,6 +212,12 @@ const Player = ({ urlParams, queryParams }) => {
         ) {
             const reason = /copyright/i.test(error.message || '') ? 'copyright' : 'unavailable';
             recordAutoPickFailure(autoPickSelection, reason);
+            if (reason === 'copyright') {
+                // This title is being copyright-filtered after all. Break its
+                // clean streak and drop any manual override so the retry — and
+                // every later play — probes before committing to a stream.
+                recordCopyrightBlockObserved(urlParams.type, urlParams.id);
+            }
             isNavigating.current = true;
             window.location.replace(buildMetaDetailsStreamsHash(urlParams.type, urlParams.id, urlParams.videoId, {
                 autopickRetry: String(Date.now()),

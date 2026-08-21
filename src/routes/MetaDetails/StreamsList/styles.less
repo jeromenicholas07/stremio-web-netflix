@@ -197,6 +197,21 @@
                         color: rgba(255, 255, 255, 0.45);
                         font-weight: 600;
                     }
+
+                    // Shown only while the copyright probe is skipped for this
+                    // show, so the speed-up is visible without opening the panel.
+                    .autopick-check-badge {
+                        margin-left: 0.35rem;
+                        padding: 0.05rem 0.3rem;
+                        border-radius: 0.25rem;
+                        background-color: rgba(70, 211, 105, 0.18);
+                        color: #46d369;
+                        font-size: 0.62rem;
+                        font-weight: 700;
+                        letter-spacing: 0.02em;
+                        text-transform: uppercase;
+                        vertical-align: 0.05rem;
+                    }
                 }
 
                 .autopick-status-subtitle {
@@ -231,6 +246,44 @@
             max-height: 42vh;
             overflow-y: auto;
             padding: 0.2rem 0.7rem 0.7rem;
+
+            .autopick-check-row {
+                flex: none;
+                display: flex;
+                align-items: center;
+                gap: 0.55rem;
+                padding: 0.5rem 0.6rem;
+                border-radius: 0.45rem;
+                background-color: rgba(0, 0, 0, 0.35);
+
+                .autopick-check-text {
+                    flex: 1 1 auto;
+                    min-width: 0;
+
+                    .autopick-check-title {
+                        color: var(--primary-foreground-color);
+                        font-size: 0.78rem;
+                        font-weight: 700;
+                        line-height: 1.2;
+
+                        .autopick-check-mode {
+                            color: rgba(255, 255, 255, 0.45);
+                            font-weight: 600;
+                        }
+                    }
+
+                    .autopick-check-subtitle {
+                        margin-top: 0.15rem;
+                        color: rgba(255, 255, 255, 0.5);
+                        font-size: 0.7rem;
+                        line-height: 1.3;
+                    }
+                }
+
+                .autopick-check-toggle {
+                    flex: none;
+                }
+            }
 
             .autopick-mode {
                 flex: none;
