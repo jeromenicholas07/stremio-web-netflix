@@ -14,6 +14,12 @@
         "lint": "eslint src",
         "scan-translations": "pnpx jest ./tests/i18nScan.test.js"
     },
+    "jest": {
+        "moduleNameMapper": {
+            "^stremio-router(.*)$": "<rootDir>/src/router$1",
+            "^stremio/(.*)$": "<rootDir>/src/$1"
+        }
+    },
     "dependencies": {
         "@babel/runtime": "7.26.0",
         "@huggingface/transformers": "^3.8.1",

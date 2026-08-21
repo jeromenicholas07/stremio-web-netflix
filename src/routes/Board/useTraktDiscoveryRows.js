@@ -12,6 +12,7 @@ const tmdbService = require('stremio/services/TMDBService');
 // crash, so this hook no-ops there — the home falls back to Continue Watching
 // plus the lightweight core addon catalogs.
 const { isMobile } = require('stremio/common/Platform/device');
+const { loadRowsSnapshot, saveRowsSnapshot } = require('./boardRowsSnapshot');
 
 const TMDB_IMAGE_BASE = 'https://image.tmdb.org/t/p';
 const FETCH_LIMIT = 50;
@@ -151,6 +152,30 @@ function useTraktDiscoveryRows() {
     React.useEffect(() => {
         if (isMobile) return;
         let cancelled = false;
+        // Rows restored from the last session, shown until the matching fresh
+        // row replaces them. Keyed so a fresh row swaps in place instead of the
+        // whole list being torn down and rebuilt.
+        let snapshotByKey = new Map();
+        let buildFinished = false;
+
+        // Coalesce publishes. A full build touches every row twice (placeholder,
+        // then enriched) and each setRows re-runs the board's dedup/merge memo
+        // over every row on the page, so publishing straight from the loop
+        // costs dozens of full re-renders. One frame, one render.
+        let queued = null;
+        let frame = 0;
+        const flush = () => {
+            frame = 0;
+            if (cancelled || queued === null) return;
+            const next = queued;
+            queued = null;
+            setRows(next);
+        };
+        const publish = (next) => {
+            queued = next;
+            if (frame) return;
+            frame = requestAnimationFrame(flush);
+        };
 
         const run = async () => {
             if (!traktBridge.isConfigured()) {
@@ -182,50 +207,115 @@ function useTraktDiscoveryRows() {
             const AUTH_TTL = 30 * 60 * 1000;
             const DISCOVERY_TTL = 60 * 60 * 1000;
             const USERLIST_TTL = 6 * 60 * 60 * 1000;
-            const responses = await Promise.all(allDefs.map((def) => {
-                let p;
+
+            // Canonical display order. Rows are published in this order however
+            // their fetches interleave, so a row never jumps position as its
+            // neighbours arrive.
+            const order = allDefs.map((def) => def.key);
+            const built = new Map();
+            const stale = () => cancelled || myBuildId !== buildCounterRef.current;
+
+            // Fresh rows where we have them, last session's rows where we don't
+            // yet. Once the build is done the snapshot stops contributing, so
+            // rows that no longer exist upstream drop out on their own.
+            //
+            // A build that produced nothing at all (offline, Trakt down, token
+            // rejected) is not evidence that the rows are gone, so the snapshot
+            // keeps standing rather than the home screen going blank.
+            const publishMerged = () => {
+                const settled = buildFinished && built.size > 0;
+                const merged = [];
+                order.forEach((key) => {
+                    if (built.has(key)) merged.push(built.get(key));
+                    else if (!settled && snapshotByKey.has(key)) merged.push(snapshotByKey.get(key));
+                });
+                publish(merged);
+            };
+
+            await Promise.all(allDefs.map(async (def) => {
+                let request;
                 if (def.requiresAuth) {
-                    p = traktBridge.fetchAuthCached(def.path, AUTH_TTL);
+                    request = traktBridge.fetchAuthCached(def.path, AUTH_TTL);
                 } else if (def.key && def.key.startsWith('userlist-')) {
-                    p = traktBridge.fetchPublicCached(def.path, USERLIST_TTL);
+                    request = traktBridge.fetchPublicCached(def.path, USERLIST_TTL);
                 } else {
-                    p = traktBridge.fetchPublicCached(def.path, DISCOVERY_TTL);
+                    request = traktBridge.fetchPublicCached(def.path, DISCOVERY_TTL);
                 }
-                return p.catch((err) => {
+
+                const raw = await request.catch((err) => {
                     console.warn('[Trakt] Row fetch failed:', def.title, err && err.message);
                     return null;
                 });
+                if (stale() || !raw) return;
+
+                const items = unwrapTraktItems(raw, def.mediaType).map(toStremioItemBase).filter(Boolean);
+                if (items.length === 0) return;
+
+                // Carry over artwork we already have for these items so a fresh
+                // row never publishes *less* than what is on screen — without
+                // this the posters blank out and refill as each row lands.
+                items.forEach((item) => {
+                    const known = cacheRef.current.get(item.id);
+                    if (known) {
+                        item.poster = known.poster;
+                        item.background = known.background;
+                    }
+                });
+
+                built.set(def.key, { key: def.key, title: def.title, items });
+                publishMerged();
             }));
 
-            if (cancelled || myBuildId !== buildCounterRef.current) return;
+            if (stale()) return;
 
-            // Convert each response into placeholder Stremio items
-            const placeholderRows = [];
-            for (let i = 0; i < allDefs.length; i++) {
-                const def = allDefs[i];
-                const raw = responses[i];
-                if (!raw) continue;
-                const unwrapped = unwrapTraktItems(raw, def.mediaType);
-                const items = unwrapped.map(toStremioItemBase).filter(Boolean);
-                if (items.length === 0) continue;
-                placeholderRows.push({ key: def.key, title: def.title, items });
+            // Enrich in display order so the rows the user is looking at fill in
+            // first. Items already carrying artwork are cache hits and cost
+            // nothing; only genuinely new titles reach the network.
+            for (const key of order) {
+                if (stale()) return;
+                const row = built.get(key);
+                if (!row) continue;
+                const items = await enrichBatch(row.items, cacheRef.current);
+                if (stale()) return;
+                built.set(key, { key, title: row.title, items: items.slice() });
+                publishMerged();
             }
 
-            // Render placeholder rows immediately so the layout appears fast,
-            // then enrich poster/backdrop in the background.
-            setRows(placeholderRows.map((r) => ({ ...r, items: r.items.slice() })));
+            buildFinished = true;
+            publishMerged();
 
-            for (const row of placeholderRows) {
-                if (cancelled || myBuildId !== buildCounterRef.current) return;
-                row.items = await enrichBatch(row.items, cacheRef.current);
-            }
-            if (!cancelled && myBuildId === buildCounterRef.current) {
-                setRows(placeholderRows.map((r) => ({ ...r, items: r.items.slice() })));
-            }
+            saveRowsSnapshot(order.filter((key) => built.has(key)).map((key) => built.get(key)))
+                .catch(() => { /* cache write is best effort */ });
         };
 
+        // Paint the last known board straight from disk. This races the fresh
+        // build deliberately: whichever resolves first is shown, and a build
+        // that has already produced rows is never overwritten by stale ones.
+        if (traktBridge.isConfigured()) {
+            loadRowsSnapshot()
+                .then((snapshot) => {
+                    if (cancelled || buildFinished || !snapshot) return;
+                    snapshotByKey = new Map(snapshot.map((row) => [row.key, row]));
+                    // Seed the artwork cache too — the snapshot already holds a
+                    // poster and backdrop per item, which is exactly what
+                    // enrichment would otherwise re-request from TMDB.
+                    snapshot.forEach((row) => {
+                        row.items.forEach((item) => {
+                            if (!cacheRef.current.has(item.id) && (item.poster || item.background)) {
+                                cacheRef.current.set(item.id, { poster: item.poster, background: item.background });
+                            }
+                        });
+                    });
+                    setRows((current) => (current.length > 0 ? current : snapshot));
+                })
+                .catch(() => { /* no snapshot — fall back to the live build */ });
+        }
+
         run();
-        return () => { cancelled = true; };
+        return () => {
+            cancelled = true;
+            if (frame) cancelAnimationFrame(frame);
+        };
     }, []);
 
     return rows;

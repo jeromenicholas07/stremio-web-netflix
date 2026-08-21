@@ -94,13 +94,20 @@ class TMDBService {
         this._cache = new Map();
         this._imdbCache = new Map(); // tmdbId → imdbId (mirrors persistent cache)
         // In-memory cache starts empty and is hydrated asynchronously from
-        // IndexedDB (migrating any legacy localStorage blob). Lookups before
-        // hydration completes simply miss and refetch — correct, just colder.
+        // IndexedDB (migrating any legacy localStorage blob).
         this._persist = {};
         this._useIdb = idbAvailable();
         this._persistDirty = false;
         this._persistFlushTimer = null;
-        this._persistReady = this._hydratePersist();
+        // Every async read below awaits this before touching `_persist`.
+        // Without the gate a lookup issued before hydration resolves reads an
+        // empty `_persist`, misses, and refetches over the network. Measured
+        // either way the difference is inside the run-to-run noise — the board's
+        // TMDB calls happen late enough that hydration usually wins the race
+        // anyway — so this closes a real race rather than a hot path.
+        // `_hydratePersist` swallows its own errors; the extra catch is
+        // belt-and-braces so a rejection can never wedge every read.
+        this._persistReady = this._hydratePersist().catch(() => undefined);
 
         // ─── Request flow control ────────────────────────────────
         // In-flight deduplication: coalesce concurrent callers for the same
@@ -364,6 +371,7 @@ class TMDBService {
     }
 
     async _fetch(path, params = {}) {
+        await this._persistReady;
         const apiKey = this.getApiKey();
         if (!apiKey) return null;
 
@@ -444,6 +452,7 @@ class TMDBService {
     }
 
     async findByImdbId(imdbId) {
+        await this._persistReady;
         // Persistent cache: imdbId → { type, id } (stable, safe to cache long-term)
         const persistKey = `find:${imdbId}`;
         const cached = this._persistGet(persistKey);
@@ -517,6 +526,7 @@ class TMDBService {
 
     // Resolve TMDB ID → IMDB ID via external_ids endpoint (cached, persisted)
     async getImdbId(tmdbId, mediaType = 'movie') {
+        await this._persistReady;
         const cacheKey = `${mediaType}:${tmdbId}`;
         if (this._imdbCache.has(cacheKey)) return this._imdbCache.get(cacheKey);
         const persistKey = `imdb:${cacheKey}`;
@@ -603,6 +613,7 @@ class TMDBService {
      *   4. Fallback to any language if preferred language has no results
      */
     async getBestTrailerYtId(tmdbId, mediaType = 'movie') {
+        await this._persistReady;
         // Trailer ytIds are stable per (tmdbId, mediaType, language) and a
         // popular per-card lookup — persist them across reloads so the
         // videos endpoint isn't re-hit on every home-screen mount.
@@ -693,6 +704,7 @@ class TMDBService {
      * Returns null if no logo is found.
      */
     async getLogoUrl(tmdbId, mediaType = 'movie') {
+        await this._persistReady;
         const persistKey = `logo:${mediaType}:${tmdbId}`;
         const persisted = this._persistGet(persistKey);
         if (persisted !== undefined) return persisted;
