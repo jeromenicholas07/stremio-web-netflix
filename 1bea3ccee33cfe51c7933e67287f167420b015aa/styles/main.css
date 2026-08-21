@@ -6252,6 +6252,18 @@ kbd {
   color: rgba(255, 255, 255, 0.45);
   font-weight: 600;
 }
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-header-guNni .autopick-status-text-CInu1 .autopick-status-title-iQbwV .autopick-check-badge-DqRuG {
+  margin-left: 0.35rem;
+  padding: 0.05rem 0.3rem;
+  border-radius: 0.25rem;
+  background-color: rgba(70, 211, 105, 0.18);
+  color: #46d369;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  vertical-align: 0.05rem;
+}
 .streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-header-guNni .autopick-status-text-CInu1 .autopick-status-subtitle-iyonI {
   color: rgba(255, 255, 255, 0.45);
   font-size: 0.72rem;
@@ -6279,6 +6291,38 @@ kbd {
   max-height: 42vh;
   overflow-y: auto;
   padding: 0.2rem 0.7rem 0.7rem;
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-body-FABKW .autopick-check-row-Ft_94 {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.5rem 0.6rem;
+  border-radius: 0.45rem;
+  background-color: rgba(0, 0, 0, 0.35);
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-body-FABKW .autopick-check-row-Ft_94 .autopick-check-text-m6zlc {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-body-FABKW .autopick-check-row-Ft_94 .autopick-check-text-m6zlc .autopick-check-title-uB5pC {
+  color: var(--primary-foreground-color);
+  font-size: 0.78rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-body-FABKW .autopick-check-row-Ft_94 .autopick-check-text-m6zlc .autopick-check-title-uB5pC .autopick-check-mode-zeO8c {
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 600;
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-body-FABKW .autopick-check-row-Ft_94 .autopick-check-text-m6zlc .autopick-check-subtitle-GHv_s {
+  margin-top: 0.15rem;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 0.7rem;
+  line-height: 1.3;
+}
+.streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-body-FABKW .autopick-check-row-Ft_94 .autopick-check-toggle-OZDfs {
+  flex: none;
 }
 .streams-list-container-xYMJo .autopick-panel-MlNJe .autopick-panel-body-FABKW .autopick-mode-olwEL {
   flex: none;
