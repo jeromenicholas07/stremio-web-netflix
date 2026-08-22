@@ -5,6 +5,13 @@ Safari with **no self-hosted server** — you just need a Real-Debrid account. A
 free Cloudflare Worker makes Trakt sync and the auto-pick copyright preflight work
 in Safari.
 
+> **Add-ons must be set up on a computer first.** They can't be added from the
+> iPhone — installation and configuration are unreliable in mobile Safari, and
+> add-ons that hand off to their own site to collect an API key don't return
+> cleanly. Because add-ons are stored on the Stremio account rather than the
+> device, doing it once on a desktop is enough: sign in on the iPhone and they're
+> already there. See the [step-by-step setup guide](../README.md#setup-guide).
+
 ## What works on iPhone (and what doesn't)
 
 | Feature | On iPhone |
@@ -31,7 +38,13 @@ in Safari.
    If you skip the Worker, Trakt may be flaky on iOS and preflight simply won't
    pre-skip copyright stubs (it fails open — playback is never blocked).
 
-## One-time setup (your friend, on the iPhone)
+## One-time setup (your friend)
+
+**On a computer, first:** sign in to the Stremio desktop app with the account
+they'll use on the phone, install the add-ons they need, and configure each one
+(Real-Debrid API key and so on). Nothing below can substitute for this.
+
+**Then on the iPhone:**
 
 1. Open the site URL in **Safari** → tap **Share** → **Add to Home Screen**. Launch
    it from the new Home-Screen icon — it opens **full-screen** and respects the
@@ -41,9 +54,9 @@ in Safari.
    - Note: a standalone WASM app this heavy can hit iOS's per-app memory limit on
      low-memory devices ("A problem repeatedly occurred"). If that happens, the fix
      is reducing startup memory — modern iOS launches it standalone regardless.
-2. **Leave the streaming server unset** (Settings → Streaming) — it's not used on iOS.
-3. Install a **Real-Debrid**-capable add-on from Stremio's add-on catalogue and
-   configure it with your RD API key.
+2. Sign in with the **same Stremio account** used on the computer — that's what
+   carries the add-ons across. Add-ons configured there need no further setup here.
+3. **Leave the streaming server unset** (Settings → Streaming) — it's not used on iOS.
 4. Install **Infuse** (or VLC) from the App Store — used only for the occasional file
    Safari can't play inline.
 5. (Optional) Sign in to **Trakt** to sync watched/watchlist.

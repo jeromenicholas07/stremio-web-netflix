@@ -14,6 +14,7 @@ A custom Stremio Web UI with a Netflix-style redesign and AI-powered automatic s
 - **Trakt Integration** — watchlist, ratings, scrobbling, and personalized recommendations
 - **GPU Acceleration** — uses WebGPU when available for fast transcription, falls back to WASM
 - **Zero Setup** — download one file, double-click, done
+- **Works on iPhone** — add it to your Home Screen from Safari, no App Store needed
 
 ![Subtitles Auto-Sync](screenshots/subtitles.png)
 
@@ -22,6 +23,10 @@ A custom Stremio Web UI with a Netflix-style redesign and AI-powered automatic s
 Everything below takes about ten minutes, most of which is waiting for a
 download. You don't need to be technical, and you don't need to install
 anything beyond Stremio itself.
+
+Start here even if you mainly want it on your iPhone. **Steps 1–3 have to be
+done on a computer**, and the iPhone instructions further down pick up from
+there.
 
 ### 1. Install Stremio
 
@@ -39,6 +44,12 @@ UI reads them from there.
 
 ### 3. Add a source add-on
 
+> **⚠️ Do this on a computer — it cannot be done from an iPhone or iPad.**
+> Add-on installation and configuration is unreliable in mobile Safari, and
+> some add-ons send you to their own website to enter a key, which doesn't
+> come back cleanly on iOS. Set them up once on a computer and they follow you
+> everywhere (see below).
+
 Stremio on its own is a media centre with no content. **Add-ons** are what give
 it something to play, and you choose which ones to trust.
 
@@ -50,7 +61,16 @@ it something to play, and you choose which ones to trust.
 Which add-ons to use is your decision, and it's worth knowing what each one
 does before you install it. The custom UI works with whatever you pick.
 
+**Your add-ons live on your Stremio account, not on the computer.** That's why
+this step only has to happen once: sign in on any other device — including your
+iPhone — and the same add-ons are already there. Whenever you want to add or
+reconfigure one later, go back to a computer to do it.
+
 ### 4. Download the launcher
+
+> Only want this on your iPhone? You're done with the computer — skip to
+> [Setting it up on an iPhone or iPad](#setting-it-up-on-an-iphone-or-ipad).
+> Steps 4–8 are for watching on the computer itself.
 
 Go to the [latest release](https://github.com/jeromenicholas07/stremio-web-netflix/releases/latest)
 and download:
@@ -118,6 +138,67 @@ Still in **Settings → Modern UI**:
   of showing you a list. Drag the **Sources** and **Quality** rows into the
   order you prefer, and switch off any you never want.
 
+## Setting it up on an iPhone or iPad
+
+There's no app to install from the App Store. The UI runs as a web app you add
+to your Home Screen, and it looks and behaves like a normal app once it's there.
+
+**Before you start**, you must have done **steps 1–3 above on a computer** —
+created your Stremio account and installed your add-ons. Add-ons cannot be added
+from an iPhone. They're stored on your account, so once they're set up on a
+computer they appear on your phone automatically.
+
+### 1. Add it to your Home Screen
+
+1. Open **Safari** on your iPhone. It has to be Safari — Chrome and Firefox on
+   iOS can't add web apps to the Home Screen.
+2. Go to
+   [jeromenicholas07.github.io/stremio-web-netflix](https://jeromenicholas07.github.io/stremio-web-netflix/#/)
+3. Tap the **Share** button (the square with an arrow pointing up, at the bottom
+   of the screen).
+4. Scroll down the list and tap **Add to Home Screen**, then **Add** in the top
+   right.
+5. Close Safari and open the new icon from your Home Screen — it's called
+   **Stremio**. It fills the whole screen, with no address bar.
+
+Always open it from that Home Screen icon. Opening the address in Safari again
+works, but you get the browser chrome and it feels like a website.
+
+### 2. Sign in
+
+Tap the person icon in the top right, then **Log in**, and use the same Stremio
+account you created on the computer. Your add-ons, library and watch history are
+already there.
+
+### 3. Leave the streaming server alone
+
+Go to **Settings → Streaming** and leave the server URL empty. iPhones can't run
+the streaming server, and the app doesn't need it — playback comes straight from
+your add-on over the internet.
+
+This is also why **peer-to-peer streams don't work on iPhone**. You need an
+add-on backed by a service that streams over HTTPS, such as Real-Debrid. Auto-pick
+already knows this and prefers streams your iPhone can actually play.
+
+### 4. Install a video player app (recommended)
+
+Install **[Infuse](https://apps.apple.com/app/infuse-7/id1136220934)** or **VLC**
+from the App Store. Most things play directly in the app, but Safari can't handle
+certain formats (MKV, HEVC, AC3, 4K HDR). When that happens the player shows a
+row of buttons — tap Infuse or VLC and it plays there, then come back.
+
+### 5. Connect Trakt (optional)
+
+Same as on a computer: **Settings → Modern UI → Connect to Trakt**. This links
+your own Trakt account.
+
+### Updating on iPhone
+
+The app updates itself when you open it, so normally there's nothing to do. If
+it seems stuck on an old version, remove the Home Screen icon (press and hold →
+**Remove App** → **Delete from Home Screen**) and add it again with the steps
+above. Nothing is lost — everything is on your Stremio account.
+
 ## If something goes wrong
 
 **Stremio opens but the window is blank.**
@@ -142,6 +223,30 @@ and clear the fields you changed.
 **I want to remove it completely.**
 Delete the folder above, delete the launcher file, and uninstall Stremio the
 normal way through Windows Settings → Apps.
+
+### On iPhone
+
+**I can't find "Add to Home Screen".**
+You're not in Safari. Chrome and Firefox on iOS don't offer it — open the address
+in Safari instead. If you are in Safari, scroll further down the share sheet; it
+sits below the row of app icons.
+
+**There's nothing to watch — no sources appear.**
+Your add-ons aren't set up yet, or you're signed into a different account. Add-ons
+can only be added on a computer (step 3 above). Do that, then check under the
+person icon that your iPhone is signed into the same Stremio account.
+
+**A stream won't play, or plays sound with no picture.**
+Safari can't decode that file. Tap the **Infuse** or **VLC** button in the player.
+If you don't see those buttons, install one of those apps first.
+
+**Everything fails to play.**
+Peer-to-peer streams can't work on an iPhone. You need an add-on backed by a
+service that streams over HTTPS, such as Real-Debrid, configured on a computer.
+
+**It says "A problem repeatedly occurred".**
+The page ran out of memory, which happens on older iPhones. Close the app fully
+(swipe up from the bottom and swipe it away) and reopen it.
 
 ## How Auto-Sync Works
 
