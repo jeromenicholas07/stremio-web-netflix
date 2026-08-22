@@ -15,6 +15,7 @@
 // Ports (all loopback):
 //   7000  — adult addon          9696  — Prowlarr       8191  — FlareSolverr
 //   11470 — streaming server     12470 — CORS proxy     12471 — audio extract
+using Microsoft.Win32;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -22,7 +23,9 @@ using System.IO;
 using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using System.Threading;
 
@@ -40,7 +43,7 @@ class StremioLauncherFULL
     // with the freshly-downloaded exe and relaunches. Bump this whenever you
     // ship a new StremioLauncherFULL.exe — and update the same value in the
     // version file deployed to gh-pages (the deploy script handles this).
-    const string LAUNCHER_VERSION = "2026-06-30-launcher-probe";
+    const string LAUNCHER_VERSION = "2026-08-08-managed-app-update";
 
     // Bump BASE_LAUNCHER_VERSION whenever StremioLauncher.exe changes. We
     // write this string into <rootDir>\StremioLauncher.version on a fresh
@@ -80,6 +83,14 @@ class StremioLauncherFULL
     const int PROWLARR_PORT = 9696;
     const int ADDON_PORT = 7000;
     const int FLARESOLVERR_PORT = 8191;
+
+    // Authenticode subject on every official Stremio binary. We only execute a
+    // staged installer out of %TEMP% if it's signed by this publisher — see
+    // CheckStremioAppUpdate.
+    const string STREMIO_SIGNER = "Smart Code OOD";
+    // Stremio's installer is ~73MB and unpacks a 115MB libmpv; five minutes is
+    // slow-disk headroom, not an expected duration.
+    const int STREMIO_INSTALL_TIMEOUT_MS = 5 * 60 * 1000;
 
     static Process _prowlarrProc;
     static Process _addonProc;
@@ -143,6 +154,13 @@ class StremioLauncherFULL
             // immediately so the script can replace our exe.
             return 0;
         }
+
+        // Install any Stremio release the shell staged into %TEMP% on an
+        // earlier run, then (re)claim the Start Menu shortcuts. Order matters:
+        // the installer reclaims "Stremio.lnk" for the stock shell, so the
+        // shortcut pass has to come after it to undo that in the same launch.
+        CheckStremioAppUpdate();
+        EnsureShortcuts();
 
         string appRoot = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
@@ -518,7 +536,7 @@ class StremioLauncherFULL
             }
 
             Console.WriteLine("[update] StremioLauncherFULL update available: "
-                + LAUNCHER_VERSION + " → " + remote);
+                + LAUNCHER_VERSION + " -> " + remote);
 
             string tempExe = currentExe + ".update";
             string script = currentExe + ".update.cmd";
@@ -674,6 +692,261 @@ class StremioLauncherFULL
         catch (Exception ex)
         {
             Console.WriteLine("FAILED (" + ex.Message + " — keeping existing exe)");
+        }
+    }
+
+    // ── Stremio app update + shortcut ownership ──────────────
+    //
+    // The stock Stremio shell auto-downloads its next installer into %TEMP%
+    // (StremioSetup-v<x.y.z>_x64.exe) and shows the in-app "Install now"
+    // banner. Clicking that banner runs the installer interactively, which
+    // does two annoying things to this setup:
+    //
+    //   1. It recreates the Start Menu shortcut pointing at the STOCK
+    //      stremio-shell-ng.exe, so the next launch skips this launcher
+    //      entirely — no custom web UI, no Prowlarr, no addon.
+    //   2. Its post-install step launches vanilla Stremio for that session.
+    //
+    // Nothing else is at risk: this exe is not tracked in Stremio's
+    // unins000.dat (it's an untracked extra file in the app dir), the payload
+    // lives under %LOCALAPPDATA%\StremioLauncherFULL, and the custom UI is a
+    // remote URL passed as a CLI flag. So we take the update over: install the
+    // staged setup ourselves in silent mode (Inno's standard `skipifsilent`
+    // flag on [Run] entries means silent mode also skips the vanilla relaunch),
+    // then make sure the shortcuts point back here.
+
+    /// <summary>
+    /// Install a newer Stremio release if its installer is already sitting in
+    /// %TEMP%, staged there by the shell's auto-updater on a previous run.
+    /// Runs before anything else starts, so no Stremio process holds a lock.
+    /// Every failure path is non-fatal — we log and boot on the old version.
+    /// </summary>
+    static void CheckStremioAppUpdate()
+    {
+        try
+        {
+            Version installed = GetInstalledStremioVersion();
+            if (installed == null)
+            {
+                // No Stremio install detected at all — nothing to upgrade, and
+                // running an installer unattended here would be a surprise.
+                return;
+            }
+
+            string setup = null;
+            Version staged = null;
+            foreach (var candidate in Directory.GetFiles(Path.GetTempPath(), "StremioSetup-v*_x64.exe"))
+            {
+                Version v = ParseSetupVersion(Path.GetFileName(candidate));
+                if (v == null) continue;
+                if (staged == null || v > staged) { staged = v; setup = candidate; }
+            }
+
+            if (setup == null || staged <= installed) return;
+
+            // We're about to execute a 73MB binary from %TEMP% unattended, and
+            // %TEMP% is writable by anything running as this user. Refuse
+            // unless it's actually signed by Stremio's publisher.
+            if (!IsSignedByStremio(setup))
+            {
+                Console.WriteLine("[stremio-update] REFUSING " + Path.GetFileName(setup)
+                    + " — not signed by " + STREMIO_SIGNER);
+                return;
+            }
+
+            Console.WriteLine("[stremio-update] " + installed + " -> " + staged + ", installing silently...");
+            var psi = new ProcessStartInfo(setup,
+                "/VERYSILENT /NORESTART /SUPPRESSMSGBOXES /NOCANCEL /NOICONS")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            var p = Process.Start(psi);
+            if (!p.WaitForExit(STREMIO_INSTALL_TIMEOUT_MS))
+            {
+                Console.WriteLine("[stremio-update] WARN: installer still running after "
+                    + (STREMIO_INSTALL_TIMEOUT_MS / 1000) + "s — continuing without waiting");
+                return;
+            }
+
+            if (p.ExitCode != 0)
+            {
+                Console.WriteLine("[stremio-update] WARN: installer exited with code " + p.ExitCode);
+                return;
+            }
+
+            Version now = GetInstalledStremioVersion();
+            Console.WriteLine("[stremio-update] done — now on " + (now != null ? now.ToString() : "(unknown)"));
+            try { File.Delete(setup); } catch { /* temp cleanup is best-effort */ }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[stremio-update] check failed: " + ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Installed Stremio version from the per-user Inno uninstall entry.
+    /// Looked up by DisplayName rather than a hardcoded AppId GUID so a
+    /// future re-key doesn't silently disable the updater.
+    /// </summary>
+    static Version GetInstalledStremioVersion()
+    {
+        try
+        {
+            using (var uninstall = Registry.CurrentUser.OpenSubKey(
+                @"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"))
+            {
+                if (uninstall == null) return null;
+                foreach (string name in uninstall.GetSubKeyNames())
+                {
+                    using (var k = uninstall.OpenSubKey(name))
+                    {
+                        if (k == null) continue;
+                        string display = k.GetValue("DisplayName") as string;
+                        if (display == null || !display.StartsWith("Stremio", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        Version v = ParseVersion(k.GetValue("DisplayVersion") as string);
+                        if (v != null) return v;
+                    }
+                }
+            }
+        }
+        catch { /* fall through to the exe probe */ }
+
+        // Fallback: read it straight off the shell binary.
+        try
+        {
+            string shell = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "Programs", "Stremio", "stremio-shell-ng.exe");
+            if (File.Exists(shell))
+                return ParseVersion(FileVersionInfo.GetVersionInfo(shell).ProductVersion);
+        }
+        catch { }
+
+        return null;
+    }
+
+    /// <summary>"StremioSetup-v5.0.24_x64.exe" → 5.0.24</summary>
+    static Version ParseSetupVersion(string fileName)
+    {
+        int start = fileName.IndexOf("-v", StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return null;
+        start += 2;
+        int end = fileName.IndexOf('_', start);
+        if (end < 0) return null;
+        return ParseVersion(fileName.Substring(start, end - start));
+    }
+
+    static Version ParseVersion(string s)
+    {
+        if (string.IsNullOrWhiteSpace(s)) return null;
+        Version v;
+        return Version.TryParse(s.Trim(), out v) ? v : null;
+    }
+
+    /// <summary>
+    /// True if the file carries an Authenticode signature whose subject names
+    /// Stremio's publisher. This proves who produced the binary; it does not
+    /// walk the trust chain or check revocation, which is why we pin the exact
+    /// subject string rather than accepting any valid signature.
+    /// </summary>
+    static bool IsSignedByStremio(string path)
+    {
+        try
+        {
+            var cert = X509Certificate.CreateFromSignedFile(path);
+            return cert.Subject.IndexOf(STREMIO_SIGNER, StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+        catch
+        {
+            // Unsigned files throw here — that's a refusal, not an error.
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Point the Start Menu shortcuts back at this exe. Runs on every start,
+    /// so whatever a Stremio installer (or the user) did to them gets undone
+    /// on the next launch.
+    ///
+    /// "Stremio.lnk" is the name the Stremio installer itself owns and will
+    /// keep reclaiming; "Stremio Custom.lnk" is a name it never writes, so it
+    /// stays correct no matter what and is the safe one to pin.
+    /// </summary>
+    static void EnsureShortcuts()
+    {
+        string exe;
+        try { exe = Process.GetCurrentProcess().MainModule.FileName; }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[shortcut] skipped — can't resolve own path: " + ex.Message);
+            return;
+        }
+
+        string programs = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            @"Microsoft\Windows\Start Menu\Programs");
+
+        // The plain "Stremio" entry and our installer-proof alias are both
+        // created if missing. The Startup entry is only ever repaired — we
+        // don't add the app to autostart on someone's behalf.
+        WriteShortcut(Path.Combine(programs, "Stremio.lnk"), exe, false);
+        WriteShortcut(Path.Combine(programs, "Stremio Custom.lnk"), exe, false);
+        WriteShortcut(Path.Combine(programs, "Startup", "Stremio.lnk"), exe, true);
+    }
+
+    /// <summary>
+    /// Create or repoint a .lnk via late-bound WScript.Shell COM. Late binding
+    /// keeps this compiling under the bare `csc` invocation in
+    /// build-launchers.ps1, which has no COM interop reference.
+    /// </summary>
+    /// <param name="repairOnly">Leave the shortcut alone if it doesn't exist.</param>
+    static void WriteShortcut(string lnkPath, string targetExe, bool repairOnly)
+    {
+        try
+        {
+            bool exists = File.Exists(lnkPath);
+            if (repairOnly && !exists) return;
+
+            Type shellType = Type.GetTypeFromProgID("WScript.Shell");
+            if (shellType == null)
+            {
+                Console.WriteLine("[shortcut] skipped — WScript.Shell unavailable");
+                return;
+            }
+            object shell = Activator.CreateInstance(shellType);
+            object lnk = shellType.InvokeMember("CreateShortcut",
+                BindingFlags.InvokeMethod, null, shell, new object[] { lnkPath });
+            Type lnkType = lnk.GetType();
+
+            // Don't rewrite a shortcut that's already correct — keeps normal
+            // startups free of disk writes and keeps this log quiet.
+            if (exists)
+            {
+                var current = lnkType.InvokeMember("TargetPath",
+                    BindingFlags.GetProperty, null, lnk, null) as string;
+                if (string.Equals(current, targetExe, StringComparison.OrdinalIgnoreCase)) return;
+            }
+
+            lnkType.InvokeMember("TargetPath", BindingFlags.SetProperty, null, lnk,
+                new object[] { targetExe });
+            lnkType.InvokeMember("WorkingDirectory", BindingFlags.SetProperty, null, lnk,
+                new object[] { Path.GetDirectoryName(targetExe) });
+            lnkType.InvokeMember("IconLocation", BindingFlags.SetProperty, null, lnk,
+                new object[] { targetExe + ",0" });
+            lnkType.InvokeMember("Description", BindingFlags.SetProperty, null, lnk,
+                new object[] { "Stremio (custom launcher)" });
+            lnkType.InvokeMember("Save", BindingFlags.InvokeMethod, null, lnk, null);
+
+            Console.WriteLine("[shortcut] " + (exists ? "repaired " : "created ")
+                + Path.GetFileName(lnkPath) + " -> " + Path.GetFileName(targetExe));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[shortcut] WARN: " + Path.GetFileName(lnkPath) + " — " + ex.Message);
         }
     }
 
