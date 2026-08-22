@@ -42,7 +42,8 @@ in Safari.
      low-memory devices ("A problem repeatedly occurred"). If that happens, the fix
      is reducing startup memory — modern iOS launches it standalone regardless.
 2. **Leave the streaming server unset** (Settings → Streaming) — it's not used on iOS.
-3. Install a **Real-Debrid** addon (e.g. Torrentio configured with your RD API key).
+3. Install a **Real-Debrid**-capable add-on from Stremio's add-on catalogue and
+   configure it with your RD API key.
 4. Install **Infuse** (or VLC) from the App Store — used only for the occasional file
    Safari can't play inline.
 5. (Optional) Sign in to **Trakt** to sync watched/watchlist.
@@ -55,8 +56,8 @@ in Safari.
 
 ## Privacy & legality (not legal advice)
 
-- All traffic is HTTPS/encrypted. Using Real-Debrid (rather than P2P) keeps your IP
-  off torrent swarms.
+- All traffic is HTTPS/encrypted. Real-Debrid streams over HTTPS from their
+  servers, so your connection is not part of any peer-to-peer swarm.
 - The Worker is **your** infrastructure but can see plaintext (e.g. your Trakt token)
   as it passes through — that's inherent to any proxy.
 - The app, Trakt, and Real-Debrid are legal. Streaming specific content you don't
