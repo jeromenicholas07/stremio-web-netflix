@@ -43,7 +43,10 @@ const SOURCES = [
     { key: 'debridlink', label: 'Debrid-Link', test: (stream) => /\[dl\+?\]|debrid-link/i.test(stream?.name || '') },
     { key: 'alldebrid', label: 'AllDebrid', test: (stream) => /\[ad\+?\]|alldebrid/i.test(stream?.name || '') },
     { key: 'premiumize', label: 'Premiumize', test: (stream) => /\[pm\+?\]|premiumize/i.test(stream?.name || '') },
-    { key: 'torrentio', label: 'Torrentio', test: (stream) => /torrentio/i.test(stream?.addonName || '') },
+    // Keyed by add-on name, but shown neutrally: this bucket is "P2P streams
+    // from the main source add-on", as distinct from the catch-all below.
+    // The key is persisted in user settings and must not be renamed.
+    { key: 'torrentio', label: 'Main add-on (P2P)', test: (stream) => /torrentio/i.test(stream?.addonName || '') },
     { key: 'other', label: 'Other / P2P', test: () => true },
 ];
 

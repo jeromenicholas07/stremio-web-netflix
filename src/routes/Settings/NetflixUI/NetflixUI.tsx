@@ -5,6 +5,7 @@ import styles from './NetflixUI.less';
 
 const { useToast } = require('stremio/common');
 const traktBridge = require('stremio/services/TraktBridge');
+const { isIncognitoEnabled, setIncognitoEnabled } = require('stremio/common/incognitoEnabled');
 const {
     getGlobalAutoPickSettings,
     setGlobalAutoPickSettings,
@@ -99,6 +100,8 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     const [recSource, setRecSource] = useState(() => getSetting('netflix_ui_rec_source', 'tmdb'));
     const [autoPick, setAutoPick] = useState(() => getGlobalAutoPickSettings());
     const [debugEnabled, setDebugEnabled] = useState(() => getSetting('netflix_ui_debug', 'false') === 'true');
+    const [incognitoEnabled, setIncognitoEnabledState] = useState(() => isIncognitoEnabled());
+    const [showTraktAdvanced, setShowTraktAdvanced] = useState(false);
     const [saved, setSaved] = useState(false);
 
     // Trakt auth state
@@ -222,19 +225,23 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
     }, []);
 
     // ─── Trakt Client Credentials ───
+    // Route through reportSave like every other handler here, so a write that
+    // didn't stick doesn't get a "Saved" flash. Clearing a field is a valid
+    // action — TraktBridge falls back to the built-in app credentials on an
+    // empty string — so an empty value only has to not throw.
     const onTraktClientIdChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value.trim();
         setTraktClientId(val);
         traktBridge.setClientId(val);
-        flashSaved();
-    }, []);
+        reportSave(!val || traktBridge.getClientId() === val);
+    }, [reportSave]);
 
     const onTraktClientSecretChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
         const val = e.target.value.trim();
         setTraktClientSecret(val);
         traktBridge.setClientSecret(val);
-        flashSaved();
-    }, []);
+        reportSave(!val || traktBridge.getClientSecret() === val);
+    }, [reportSave]);
 
     // ─── Handlers ───
     const onTmdbKeyChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
@@ -296,6 +303,42 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
             });
         });
     }, [debugEnabled, toast, reportSave]);
+
+    // ─── Incognito toggle ───
+    // Two places have to agree: localStorage drives the nav tab and route
+    // guard in this session, and the launcher's flag file decides whether
+    // StremioLauncherFULL fetches and starts Prowlarr, FlareSolverr and the
+    // addon at all. The launcher reads its flag only at startup, so the
+    // services follow on the next launch — same contract as the Debug toggle.
+    const onIncognitoToggle = useCallback(() => {
+        const next = !incognitoEnabled;
+        setIncognitoEnabledState(next);
+        reportSave(setIncognitoEnabled(next));
+        fetch('http://127.0.0.1:12470/_launcher/incognito', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: next }),
+        }).then((r) => {
+            if (!r.ok) {
+                toast?.show?.({ type: 'error', title: 'Incognito toggle', message: `Launcher returned ${r.status}`, timeout: 4000 });
+            } else if (next) {
+                toast?.show?.({
+                    type: 'info',
+                    title: 'Enabled — restart Stremio',
+                    message: 'The first launch after this downloads a few hundred MB of components.',
+                    timeout: 6000,
+                });
+            }
+        }).catch(() => {
+            // Browser/dev mode without the launcher running.
+            toast?.show?.({
+                type: 'info',
+                title: 'Saved (UI only)',
+                message: 'Run via the launcher for its background services to follow this setting.',
+                timeout: 5000,
+            });
+        });
+    }, [incognitoEnabled, toast, reportSave]);
 
     // ─── Sync Trakt Data ───
     const syncTraktData = useCallback(async () => {
@@ -406,6 +449,11 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
                         >
                             Connect to Trakt
                         </button>
+                        <div className={styles['option-desc']}>
+                            Links <strong>your own</strong> Trakt account for watchlist, ratings and history.
+                            A browser tab opens with a short code to confirm. Nothing is shared with
+                            whoever gave you this app, and you can disconnect at any time.
+                        </div>
                         {authError && (
                             <div className={styles['auth-error']}>{authError}</div>
                         )}
@@ -477,31 +525,56 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
                 </Option>
             )}
 
-            <Option label={'Client ID'}>
+            {/* These identify the *application* to Trakt, not the person —
+                everyone shares them, and each user's login still mints their
+                own token against their own account. Nobody needs to touch
+                them, so they stay folded away. */}
+            <Option label={'Advanced'}>
                 <div className={styles['input-row']}>
-                    <input
-                        type="text"
-                        className={styles['text-input']}
-                        value={traktClientId}
-                        onChange={onTraktClientIdChange}
-                        placeholder="Trakt Client ID..."
-                        spellCheck={false}
-                    />
+                    <span className={styles['option-desc']}>
+                        App credentials, already filled in. You do not need these to sign in.
+                    </span>
+                    <button
+                        className={styles['action-btn']}
+                        onClick={() => setShowTraktAdvanced((v) => !v)}
+                    >
+                        {showTraktAdvanced ? 'Hide' : 'Show'}
+                    </button>
                 </div>
             </Option>
 
-            <Option label={'Client Secret'}>
-                <div className={styles['input-row']}>
-                    <input
-                        type="password"
-                        className={styles['text-input']}
-                        value={traktClientSecret}
-                        onChange={onTraktClientSecretChange}
-                        placeholder="Trakt Client Secret..."
-                        spellCheck={false}
-                    />
-                </div>
-            </Option>
+            {showTraktAdvanced && (
+                <>
+                    <Option label={'Client ID'}>
+                        <div className={styles['input-row']}>
+                            <input
+                                type="text"
+                                className={styles['text-input']}
+                                value={traktClientId}
+                                onChange={onTraktClientIdChange}
+                                placeholder="Trakt Client ID..."
+                                spellCheck={false}
+                            />
+                        </div>
+                    </Option>
+
+                    <Option label={'Client Secret'}>
+                        <div className={styles['input-row']}>
+                            <input
+                                type="password"
+                                className={styles['text-input']}
+                                value={traktClientSecret}
+                                onChange={onTraktClientSecretChange}
+                                placeholder="Trakt Client Secret..."
+                                spellCheck={false}
+                            />
+                        </div>
+                        <div className={styles['hint']}>
+                            Clear either field to go back to the built-in values.
+                        </div>
+                    </Option>
+                </>
+            )}
 
             {/* ─── Content ─── */}
             <div className={styles['section-divider']}>Content &amp; Discovery</div>
@@ -524,6 +597,9 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
                         Test
                     </button>
                     <StatusIcon status={tmdbStatus} tooltip={tmdbTip} />
+                </div>
+                <div className={styles['hint']}>
+                    Pre-filled and working. Replace it only if you would rather use your own key.
                 </div>
             </Option>
 
@@ -579,6 +655,26 @@ const ModernUI = forwardRef<HTMLDivElement>((_, ref) => {
                     value={autoPick}
                     onChange={onAutoPickChange}
                 />
+            </Option>
+
+            {/* ─── Incognito ─── */}
+            <div className={styles['section-divider']}>Incognito</div>
+
+            <Option label={'Incognito Section'}>
+                <div className={styles['input-row']}>
+                    <span className={styles['option-desc']}>
+                        Adds a separate, PIN-protected Incognito tab with adult catalogues.
+                        Turning it on downloads roughly 300&nbsp;MB of extra components and runs
+                        three background services (an indexer, a proxy and a local add-on) while
+                        Stremio is open. Off by default; takes effect on next Stremio start.
+                    </span>
+                    <button
+                        className={incognitoEnabled ? styles['toggle-on'] : styles['toggle-off']}
+                        onClick={onIncognitoToggle}
+                    >
+                        {incognitoEnabled ? 'ON' : 'OFF'}
+                    </button>
+                </div>
             </Option>
 
             {/* ─── Developer ─── */}
