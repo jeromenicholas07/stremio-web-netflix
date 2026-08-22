@@ -35,7 +35,7 @@ const {
 } = require('stremio/common/autoPick');
 const { preflightAutoPickStream } = require('stremio/common/streamPreflight');
 const {
-    CLEAN_RUNS_TO_TRUST,
+    CLEAN_RUNS_TO_CLEAR,
     getCopyrightCheckState,
     recordCopyrightCheckRun,
     setCopyrightCheckManual,
@@ -525,21 +525,17 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     const copyrightCheckHint = React.useMemo(() => {
         if (!copyrightCheck.enabled) {
             return copyrightCheck.manual === false ?
-                'Off for this show — playing the top stream straight away.'
+                'Off for this show, whatever its history.'
                 :
-                `Off automatically — the last ${copyrightCheck.cleanStreak} top picks were clean.`;
+                'Off — plays the top stream straight away. Turns itself on if this show ever serves a copyright-blocked file.';
         }
 
         if (copyrightCheck.manual === true) {
             return 'Always checking this show, however clean its picks are.';
         }
 
-        if (copyrightCheck.blocks > 0) {
-            return 'This show has been copyright-blocked before — checking every pick.';
-        }
-
-        const remaining = Math.max(1, CLEAN_RUNS_TO_TRUST - copyrightCheck.cleanStreak);
-        return `Probes the top stream before playing. ${remaining} more clean ${remaining === 1 ? 'pick' : 'picks'} and it turns itself off.`;
+        const remaining = Math.max(1, CLEAN_RUNS_TO_CLEAR - copyrightCheck.cleanSinceBlock);
+        return `A copyright-blocked stream turned up here, so the top pick is probed first. ${remaining} more clean ${remaining === 1 ? 'pick' : 'picks'} and it goes back off.`;
     }, [copyrightCheck]);
 
     const autoPickSkipSummary = React.useMemo(() => {
@@ -592,9 +588,9 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                                             {isCustomMode ? ' \u00b7 Custom' : ' \u00b7 Global'}
                                         </span>
                                         {
-                                            !copyrightCheck.enabled ?
+                                            copyrightCheck.enabled ?
                                                 <span className={styles['autopick-check-badge']} title={copyrightCheckHint}>
-                                                    {'Instant'}
+                                                    {'Checked'}
                                                 </span>
                                                 :
                                                 null

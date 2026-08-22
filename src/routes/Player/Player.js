@@ -203,6 +203,16 @@ const Player = ({ urlParams, queryParams }) => {
 
     const onError = React.useCallback((error) => {
         console.error('Player', error);
+        const isCopyrightError = error.critical && /copyright/i.test(error.message || '');
+        if (isCopyrightError) {
+            // The copyright probe is off by default, so this failure IS the
+            // detector: hitting the blocked file is how we learn the show needs
+            // checking. Recorded before anything else and independently of
+            // auto-pick — a manually picked stream is evidence about this show
+            // just the same, and it must stick even if we don't redirect below.
+            recordCopyrightBlockObserved(urlParams.type, urlParams.id);
+        }
+
         const autoPickSelection = getAutoPickSelection(urlParams.type, urlParams.id, urlParams.videoId);
         if (
             error.critical &&
@@ -210,14 +220,8 @@ const Player = ({ urlParams, queryParams }) => {
             !isNavigating.current &&
             isRecoverableAutoPickError(error)
         ) {
-            const reason = /copyright/i.test(error.message || '') ? 'copyright' : 'unavailable';
+            const reason = isCopyrightError ? 'copyright' : 'unavailable';
             recordAutoPickFailure(autoPickSelection, reason);
-            if (reason === 'copyright') {
-                // This title is being copyright-filtered after all. Break its
-                // clean streak and drop any manual override so the retry — and
-                // every later play — probes before committing to a stream.
-                recordCopyrightBlockObserved(urlParams.type, urlParams.id);
-            }
             isNavigating.current = true;
             window.location.replace(buildMetaDetailsStreamsHash(urlParams.type, urlParams.id, urlParams.videoId, {
                 autopickRetry: String(Date.now()),

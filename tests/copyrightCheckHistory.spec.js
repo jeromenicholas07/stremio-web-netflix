@@ -3,8 +3,8 @@
 const history = require('../src/common/copyrightCheckHistory');
 
 const {
-    CLEAN_RUNS_TO_TRUST,
-    TRUST_TTL_MS,
+    CLEAN_RUNS_TO_CLEAR,
+    BLOCK_MEMORY_MS,
     HISTORY_LIMIT,
     getCopyrightCheckState,
     shouldCheckCopyright,
@@ -36,117 +36,120 @@ beforeEach(() => {
     global.sessionStorage = createStorageMock();
 });
 
-// Push `count` clean first-picks, one per simulated day.
-function recordClean(count, startAt = NOW) {
+function recordClean(count, startAt) {
     for (let i = 0; i < count; i += 1) {
         recordCopyrightCheckRun(TYPE, ID, { clean: true }, startAt + i * 1000);
     }
 }
 
-describe('default behaviour', () => {
-    it('checks a show it has never seen', () => {
+describe('off by default', () => {
+    it('does not check a show it has never seen', () => {
         const state = getCopyrightCheckState(TYPE, ID, NOW);
-        expect(state.enabled).toBe(true);
-        expect(state.auto).toBe(true);
+        expect(state.enabled).toBe(false);
+        expect(state.auto).toBe(false);
         expect(state.manual).toBe(null);
         expect(state.known).toBe(false);
-        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(true);
+        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(false);
     });
 
-    it('keeps checking while the clean streak is short of the threshold', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST - 1);
+    it('stays off no matter how many clean picks accumulate', () => {
+        recordClean(HISTORY_LIMIT, NOW);
         const state = getCopyrightCheckState(TYPE, ID, NOW);
-        expect(state.cleanStreak).toBe(CLEAN_RUNS_TO_TRUST - 1);
-        expect(state.enabled).toBe(true);
-    });
-
-    it('stops checking once the show has enough consecutive clean picks', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
-        const state = getCopyrightCheckState(TYPE, ID, NOW);
-        expect(state.cleanStreak).toBe(CLEAN_RUNS_TO_TRUST);
-        expect(state.auto).toBe(false);
         expect(state.enabled).toBe(false);
+        expect(state.blocks).toBe(0);
+        expect(state.lastBlockAt).toBe(null);
     });
 
-    it('ignores a show with no usable type/metaId', () => {
-        expect(shouldCheckCopyright(null, null, NOW)).toBe(true);
-        expect(shouldCheckCopyright(TYPE, '', NOW)).toBe(true);
-        // Recording against an unusable key must not throw or persist.
-        expect(() => recordCopyrightCheckRun(null, null, { clean: true }, NOW)).not.toThrow();
+    it('stays off for a show with no usable type/metaId', () => {
+        expect(shouldCheckCopyright(null, null, NOW)).toBe(false);
+        expect(shouldCheckCopyright(TYPE, '', NOW)).toBe(false);
+        expect(() => recordCopyrightBlockObserved(null, null, NOW)).not.toThrow();
     });
 });
 
-describe('losing trust', () => {
-    it('a single block re-enables checking immediately', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
-        expect(getCopyrightCheckState(TYPE, ID, NOW).enabled).toBe(false);
+describe('a block switches it on', () => {
+    it('turns on the moment a blocked file is seen', () => {
+        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(false);
 
-        recordCopyrightBlockObserved(TYPE, ID, NOW + 5000);
-        const state = getCopyrightCheckState(TYPE, ID, NOW + 5000);
-        expect(state.cleanStreak).toBe(0);
+        const state = recordCopyrightBlockObserved(TYPE, ID, NOW);
         expect(state.enabled).toBe(true);
+        expect(state.auto).toBe(true);
         expect(state.blocks).toBe(1);
+        expect(state.lastBlockAt).toBe(NOW);
+        expect(state.cleanSinceBlock).toBe(0);
     });
 
-    it('requires the full streak again after a block', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
-        recordCopyrightBlockObserved(TYPE, ID, NOW + 5000);
-
-        recordClean(CLEAN_RUNS_TO_TRUST - 1, NOW + 10_000);
-        expect(getCopyrightCheckState(TYPE, ID, NOW + 20_000).enabled).toBe(true);
-
-        recordCopyrightCheckRun(TYPE, ID, { clean: true }, NOW + 20_000);
-        expect(getCopyrightCheckState(TYPE, ID, NOW + 20_000).enabled).toBe(false);
+    it('turns on from a preflight block too, not just a playback failure', () => {
+        recordCopyrightCheckRun(TYPE, ID, { clean: false }, NOW);
+        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(true);
     });
 
-    it('expires trust once the newest clean pick ages past the TTL', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
-        expect(getCopyrightCheckState(TYPE, ID, NOW).enabled).toBe(false);
+    it('only affects the show it happened on', () => {
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(true);
+        expect(shouldCheckCopyright(TYPE, 'tt0944947', NOW)).toBe(false);
+        expect(shouldCheckCopyright('movie', ID, NOW)).toBe(false);
+    });
 
-        // Past the TTL for every recorded pick, not just the oldest.
-        const later = NOW + TRUST_TTL_MS + 5000;
-        const state = getCopyrightCheckState(TYPE, ID, later);
-        expect(state.cleanStreak).toBe(0);
+    it('stays on while clean picks are still short of the clearing run', () => {
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        recordClean(CLEAN_RUNS_TO_CLEAR - 1, NOW + 1000);
+
+        const state = getCopyrightCheckState(TYPE, ID, NOW + 10_000);
+        expect(state.cleanSinceBlock).toBe(CLEAN_RUNS_TO_CLEAR - 1);
         expect(state.enabled).toBe(true);
     });
+});
 
-    it('only counts clean picks that are still inside the TTL', () => {
-        // One ancient clean pick plus two recent ones is not a streak of three.
-        recordCopyrightCheckRun(TYPE, ID, { clean: true }, NOW);
-        const recent = NOW + TRUST_TTL_MS - 1000;
-        recordCopyrightCheckRun(TYPE, ID, { clean: true }, recent);
-        recordCopyrightCheckRun(TYPE, ID, { clean: true }, recent + 1000);
+describe('switching back off', () => {
+    it('clears after a full run of clean probes', () => {
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        recordClean(CLEAN_RUNS_TO_CLEAR, NOW + 1000);
 
-        const at = recent + 2000;
-        expect(getCopyrightCheckState(TYPE, ID, at).cleanStreak).toBe(2);
-        expect(getCopyrightCheckState(TYPE, ID, at).enabled).toBe(true);
+        const state = getCopyrightCheckState(TYPE, ID, NOW + 10_000);
+        expect(state.cleanSinceBlock).toBe(CLEAN_RUNS_TO_CLEAR);
+        expect(state.enabled).toBe(false);
+    });
+
+    it('clears once the block ages out of memory, even with no clean probes', () => {
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        expect(shouldCheckCopyright(TYPE, ID, NOW + BLOCK_MEMORY_MS - 1000)).toBe(true);
+        expect(shouldCheckCopyright(TYPE, ID, NOW + BLOCK_MEMORY_MS + 1000)).toBe(false);
+    });
+
+    it('re-arms on a second block and needs the full clean run again', () => {
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        recordClean(CLEAN_RUNS_TO_CLEAR, NOW + 1000);
+        expect(shouldCheckCopyright(TYPE, ID, NOW + 10_000)).toBe(false);
+
+        recordCopyrightBlockObserved(TYPE, ID, NOW + 20_000);
+        const state = getCopyrightCheckState(TYPE, ID, NOW + 20_000);
+        expect(state.enabled).toBe(true);
+        expect(state.cleanSinceBlock).toBe(0);
+        expect(state.blocks).toBe(2);
+
+        recordClean(CLEAN_RUNS_TO_CLEAR - 1, NOW + 21_000);
+        expect(shouldCheckCopyright(TYPE, ID, NOW + 30_000)).toBe(true);
+        recordCopyrightCheckRun(TYPE, ID, { clean: true }, NOW + 31_000);
+        expect(shouldCheckCopyright(TYPE, ID, NOW + 31_000)).toBe(false);
     });
 });
 
 describe('inconclusive results', () => {
-    it('does not treat a missing verdict as evidence', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST - 1);
-        recordCopyrightCheckRun(TYPE, ID, {}, NOW + 5000);
-        recordCopyrightCheckRun(TYPE, ID, { clean: 'yes' }, NOW + 6000);
+    it('are not evidence in either direction', () => {
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        recordCopyrightCheckRun(TYPE, ID, {}, NOW + 1000);
+        recordCopyrightCheckRun(TYPE, ID, { clean: 'yes' }, NOW + 2000);
 
-        const state = getCopyrightCheckState(TYPE, ID, NOW + 7000);
-        expect(state.runs).toBe(CLEAN_RUNS_TO_TRUST - 1);
-        expect(state.cleanStreak).toBe(CLEAN_RUNS_TO_TRUST - 1);
+        const state = getCopyrightCheckState(TYPE, ID, NOW + 3000);
+        expect(state.runs).toBe(1);
+        expect(state.cleanSinceBlock).toBe(0);
         expect(state.enabled).toBe(true);
     });
 });
 
 describe('manual override', () => {
-    it('can force checking off before any history exists', () => {
-        setCopyrightCheckManual(TYPE, ID, false, NOW);
-        const state = getCopyrightCheckState(TYPE, ID, NOW);
-        expect(state.enabled).toBe(false);
-        expect(state.auto).toBe(true);
-        expect(state.manual).toBe(false);
-    });
-
-    it('can force checking on despite a clean streak', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
+    it('can force checking on for a show with no history', () => {
         setCopyrightCheckManual(TYPE, ID, true, NOW);
         const state = getCopyrightCheckState(TYPE, ID, NOW);
         expect(state.enabled).toBe(true);
@@ -154,16 +157,25 @@ describe('manual override', () => {
         expect(state.manual).toBe(true);
     });
 
+    it('can force checking off for a show that was blocked', () => {
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        setCopyrightCheckManual(TYPE, ID, false, NOW);
+        const state = getCopyrightCheckState(TYPE, ID, NOW);
+        expect(state.enabled).toBe(false);
+        expect(state.auto).toBe(true);
+        expect(state.manual).toBe(false);
+    });
+
     it('returns the show to automatic when cleared', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
-        setCopyrightCheckManual(TYPE, ID, true, NOW);
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        setCopyrightCheckManual(TYPE, ID, false, NOW);
         setCopyrightCheckManual(TYPE, ID, null, NOW);
         const state = getCopyrightCheckState(TYPE, ID, NOW);
         expect(state.manual).toBe(null);
-        expect(state.enabled).toBe(false);
+        expect(state.enabled).toBe(true);
     });
 
-    it('is cleared by an observed block so a forced-off show self-corrects', () => {
+    it('is cleared by a fresh block so a forced-off show self-corrects', () => {
         setCopyrightCheckManual(TYPE, ID, false, NOW);
         expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(false);
 
@@ -181,32 +193,26 @@ describe('manual override', () => {
 });
 
 describe('storage', () => {
-    it('keeps history per show', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
-        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(false);
-        expect(shouldCheckCopyright(TYPE, 'tt0944947', NOW)).toBe(true);
-        expect(shouldCheckCopyright('movie', ID, NOW)).toBe(true);
-    });
-
     it('mirrors writes to sessionStorage and reads them back when local is empty', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
         expect(global.sessionStorage.setItem).toHaveBeenCalled();
 
         const mirrored = global.sessionStorage.getItem('netflix_ui_rdcheck_history');
         global.localStorage = createStorageMock();
         global.sessionStorage.getItem.mockReturnValue(mirrored);
 
-        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(false);
+        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(true);
     });
 
     it('caps the stored run log', () => {
-        recordClean(HISTORY_LIMIT + 5);
-        expect(getCopyrightCheckState(TYPE, ID, NOW).runs).toBe(HISTORY_LIMIT);
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
+        recordClean(HISTORY_LIMIT + 5, NOW + 1000);
+        expect(getCopyrightCheckState(TYPE, ID, NOW + 60_000).runs).toBe(HISTORY_LIMIT);
     });
 
-    it('survives corrupt stored data', () => {
+    it('survives corrupt stored data by falling back to off', () => {
         global.localStorage.getItem.mockReturnValue('not json');
-        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(true);
+        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(false);
 
         global.localStorage.getItem.mockReturnValue(JSON.stringify({
             [`${TYPE}:${ID}`]: { runs: [{ clean: 'nope' }, null, 7], manual: 'yes' },
@@ -214,13 +220,13 @@ describe('storage', () => {
         const state = getCopyrightCheckState(TYPE, ID, NOW);
         expect(state.runs).toBe(0);
         expect(state.manual).toBe(null);
-        expect(state.enabled).toBe(true);
+        expect(state.enabled).toBe(false);
     });
 
     it('forgets a show on demand', () => {
-        recordClean(CLEAN_RUNS_TO_TRUST);
+        recordCopyrightBlockObserved(TYPE, ID, NOW);
         clearCopyrightCheckHistory(TYPE, ID);
-        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(true);
+        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(false);
     });
 
     it('does not throw when storage is unavailable', () => {
@@ -230,7 +236,6 @@ describe('storage', () => {
         global.sessionStorage.setItem.mockImplementation(() => {
             throw new Error('QuotaExceededError');
         });
-        expect(() => recordCopyrightCheckRun(TYPE, ID, { clean: true }, NOW)).not.toThrow();
-        expect(shouldCheckCopyright(TYPE, ID, NOW)).toBe(true);
+        expect(() => recordCopyrightBlockObserved(TYPE, ID, NOW)).not.toThrow();
     });
 });

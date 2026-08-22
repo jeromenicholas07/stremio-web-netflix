@@ -2,35 +2,34 @@
 
 // Per-show Real-Debrid copyright-check history.
 //
-// `streamPreflight` probes every auto-pick candidate's real size to catch the
+// `streamPreflight` can probe an auto-pick candidate's real size to catch the
 // ~2 MB "File was removed from debrid service due to copyright infringement"
-// stub Real-Debrid serves in place of a blocked file. That probe is reliable
-// but it costs a round trip before playback can start (on the shell, a
-// launcher fetch that may read up to ~4 MB of body).
+// stub Real-Debrid serves in place of a blocked file. The probe is reliable but
+// it costs a round trip before playback can start, and the overwhelming
+// majority of shows are never filtered — so paying it everywhere buys nothing.
 //
-// Most shows are never copyright-filtered: their top-ranked stream plays
-// first time, every time, and the probe only ever confirms what we already
-// knew. This module remembers - per show - whether the FIRST auto-pick
-// candidate came back clean, and once a show has a run of clean first-picks
-// it stops asking for the probe. Auto-pick then plays the top stream
-// immediately.
+// The check is therefore OFF by default, everywhere. Auto-pick plays the top
+// stream immediately and we find out the hard way: when a blocked file
+// actually turns up, the player fails with a copyright error, that failure is
+// recorded against the show, and every later play of that show is probed
+// first. One bad playback buys permanent protection for that title.
 //
-// Trust is slow to earn and instant to lose:
-//   - CLEAN_RUNS_TO_TRUST consecutive clean first-picks turn checking off
-//   - ONE observed block turns it back on AND clears any manual override, so
-//     a show that starts getting filtered self-corrects on the very next play
-//   - trust ages out after TRUST_TTL_MS, because a title's RD status is not
-//     permanent - an untouched show re-proves itself every so often
+// Turning it back off again:
+//   - CLEAN_RUNS_TO_CLEAR clean probes after the last block, or
+//   - BLOCK_MEMORY_MS elapsing since that block
+// so a one-off blip stops costing a probe quickly, and a title whose RD status
+// has since been fixed is not probed forever.
 //
-// With no history at all the answer is CHECK ON. Skipping the probe is an
-// optimisation we only apply to evidence we actually collected.
+// A manual toggle overrides all of it, except that a fresh block always clears
+// the override — you cannot pin a show "off" and then silently keep getting
+// broken streams from it.
 
 const HISTORY_KEY = 'netflix_ui_rdcheck_history';
 
-// Consecutive clean first-picks before we stop probing this show.
-const CLEAN_RUNS_TO_TRUST = 3;
-// A clean run older than this no longer counts toward the streak.
-const TRUST_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+// Clean probes recorded after a block before we trust the show again.
+const CLEAN_RUNS_TO_CLEAR = 3;
+// How long a single observed block keeps the check switched on for a show.
+const BLOCK_MEMORY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 // Cap the per-show run log so storage cannot grow without bound.
 const HISTORY_LIMIT = 10;
 
@@ -93,7 +92,7 @@ function setHistory(history) {
 
 // --- Record shape ---
 // { runs: Array<{ clean: boolean, at: number }>, manual: boolean | null }
-// `runs` is oldest-first; only the trailing clean entries matter.
+// `runs` is oldest-first; only what happened at and after the last block matters.
 function normalizeRecord(raw) {
     const runs = (Array.isArray(raw?.runs) ? raw.runs : [])
         .filter((run) => run && typeof run.clean === 'boolean' && Number.isFinite(run.at))
@@ -124,30 +123,47 @@ function writeRecord(type, metaId, record) {
 
 // --- Decision ---
 // `enabled` is the answer auto-pick acts on: true -> probe before playing.
-//   auto        - what the history alone says (the automatic behaviour)
-//   manual      - the user's explicit toggle for this show, or null
-//   cleanStreak - trailing run of clean, non-expired first-picks
+//   auto            - what the history alone says (the automatic behaviour)
+//   manual          - the user's explicit toggle for this show, or null
+//   cleanSinceBlock - clean probes recorded after the most recent block
+//   lastBlockAt     - when this show last served a copyright-blocked file
+//
+// Off unless this show has actually misbehaved: a block inside the memory
+// window that has not yet been cleared by a run of clean probes.
 function computeState(record, now) {
     if (record === null) {
-        return { enabled: true, auto: true, manual: null, cleanStreak: 0, runs: 0, blocks: 0, known: false };
+        return {
+            enabled: false, auto: false, manual: null,
+            cleanSinceBlock: 0, runs: 0, blocks: 0, lastBlockAt: null, known: false,
+        };
     }
 
-    let cleanStreak = 0;
+    let lastBlockIndex = -1;
     for (let i = record.runs.length - 1; i >= 0; i -= 1) {
-        const run = record.runs[i];
-        // A block, or a clean result old enough to be stale, ends the streak.
-        if (!run.clean || now - run.at > TRUST_TTL_MS) break;
-        cleanStreak += 1;
+        if (!record.runs[i].clean) {
+            lastBlockIndex = i;
+            break;
+        }
     }
 
-    const auto = cleanStreak < CLEAN_RUNS_TO_TRUST;
+    const lastBlock = lastBlockIndex >= 0 ? record.runs[lastBlockIndex] : null;
+    // Everything recorded after the last block is by definition clean.
+    const cleanSinceBlock = lastBlockIndex >= 0 ?
+        record.runs.length - 1 - lastBlockIndex
+        :
+        record.runs.length;
+
+    const blockRemembered = lastBlock !== null && now - lastBlock.at <= BLOCK_MEMORY_MS;
+    const auto = blockRemembered && cleanSinceBlock < CLEAN_RUNS_TO_CLEAR;
+
     return {
         enabled: record.manual === null ? auto : record.manual,
         auto,
         manual: record.manual,
-        cleanStreak,
+        cleanSinceBlock,
         runs: record.runs.length,
         blocks: record.runs.filter((run) => !run.clean).length,
+        lastBlockAt: lastBlock ? lastBlock.at : null,
         known: record.runs.length > 0 || record.manual !== null,
     };
 }
@@ -162,7 +178,7 @@ function shouldCheckCopyright(type, metaId, now = Date.now()) {
 
 // Record the verdict of a run's FIRST preflighted candidate. Call this only
 // with a definite verdict - an inconclusive probe (`skipped`) is not evidence
-// and must not feed the streak in either direction.
+// and must not feed the history in either direction.
 function recordCopyrightCheckRun(type, metaId, { clean } = {}, now = Date.now()) {
     const record = readRecord(type, metaId);
     if (record === null || typeof clean !== 'boolean') return getCopyrightCheckState(type, metaId, now);
@@ -175,9 +191,9 @@ function recordCopyrightCheckRun(type, metaId, { clean } = {}, now = Date.now())
     return getCopyrightCheckState(type, metaId, now);
 }
 
-// The safety net: a stream we let through (or probed as clean) turned out to
-// be copyright-blocked at playback. Break the streak and clear any manual
-// override so the next play probes again.
+// The show served a copyright-blocked file. With the check off by default this
+// is the primary way a bad title is ever discovered: playback fails, we record
+// it here, and every later play of this show is probed first.
 function recordCopyrightBlockObserved(type, metaId, now = Date.now()) {
     return recordCopyrightCheckRun(type, metaId, { clean: false }, now);
 }
@@ -201,8 +217,8 @@ function clearCopyrightCheckHistory(type, metaId) {
 }
 
 module.exports = {
-    CLEAN_RUNS_TO_TRUST,
-    TRUST_TTL_MS,
+    CLEAN_RUNS_TO_CLEAR,
+    BLOCK_MEMORY_MS,
     HISTORY_LIMIT,
     getCopyrightCheckState,
     shouldCheckCopyright,

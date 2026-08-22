@@ -198,14 +198,15 @@
                         font-weight: 600;
                     }
 
-                    // Shown only while the copyright probe is skipped for this
-                    // show, so the speed-up is visible without opening the panel.
+                    // Shown only for the exceptional case — a show that has
+                    // served a blocked file and is therefore being probed. The
+                    // default (no probe) is silent, so this never becomes noise.
                     .autopick-check-badge {
                         margin-left: 0.35rem;
                         padding: 0.05rem 0.3rem;
                         border-radius: 0.25rem;
-                        background-color: rgba(70, 211, 105, 0.18);
-                        color: #46d369;
+                        background-color: rgba(229, 160, 13, 0.18);
+                        color: #e5a00d;
                         font-size: 0.62rem;
                         font-weight: 700;
                         letter-spacing: 0.02em;
