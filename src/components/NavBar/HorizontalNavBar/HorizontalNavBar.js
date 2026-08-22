@@ -9,6 +9,7 @@ const { default: useFullscreen } = require('stremio/common/useFullscreen');
 // Direct source import (not the 'stremio/common' barrel) — this file is pulled
 // in eagerly via the components barrel, so the barrel can be mid-init here.
 const { usePlatform } = require('stremio/common/Platform');
+const { isIncognitoEnabled } = require('stremio/common/incognitoEnabled');
 const SearchBar = require('./SearchBar');
 const NavMenu = require('./NavMenu');
 const styles = require('./styles');
@@ -21,9 +22,14 @@ const NAV_LINKS = [
 
 const HorizontalNavBar = React.memo(({ className, route, query, title, backButton, backButtonHref, searchBar, fullscreenButton, navMenu, ...props }) => {
     const platform = usePlatform();
-    // Hide the Incognito tab on iOS.
+    // Incognito is opt-in and unavailable on iOS (it needs the launcher's
+    // local services, which iOS can't run). Either way the tab is absent
+    // rather than present-but-broken.
     const navLinks = React.useMemo(() => (
-        platform.name === 'ios' ? NAV_LINKS.filter((link) => link.id !== 'incognito') : NAV_LINKS
+        platform.name === 'ios' || !isIncognitoEnabled() ?
+            NAV_LINKS.filter((link) => link.id !== 'incognito')
+            :
+            NAV_LINKS
     ), [platform.name]);
     const [scrolled, setScrolled] = React.useState(false);
     const backButtonOnClick = React.useCallback(() => {

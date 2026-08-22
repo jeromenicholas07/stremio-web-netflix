@@ -43,7 +43,7 @@ class StremioLauncherFULL
     // with the freshly-downloaded exe and relaunches. Bump this whenever you
     // ship a new StremioLauncherFULL.exe — and update the same value in the
     // version file deployed to gh-pages (the deploy script handles this).
-    const string LAUNCHER_VERSION = "2026-08-08-managed-app-update";
+    const string LAUNCHER_VERSION = "2026-08-22-incognito-opt-in";
 
     // Bump BASE_LAUNCHER_VERSION whenever StremioLauncher.exe changes. We
     // write this string into <rootDir>\StremioLauncher.version on a fresh
@@ -51,7 +51,7 @@ class StremioLauncherFULL
     // on disk differs we re-download just the base launcher. This is the
     // same pattern as ADDON_VERSION below — small targeted update, no
     // full re-install.
-    const string BASE_LAUNCHER_VERSION = "2026-06-30-launcher-probe";
+    const string BASE_LAUNCHER_VERSION = "2026-08-22-incognito-flag";
 
     // Bump ADDON_VERSION on every addon code change. The launcher checks
     // <rootDir>\stremio-adult-addon\.addon-version against this on every
@@ -122,6 +122,22 @@ class StremioLauncherFULL
             "StremioLauncherFULL", "debug.flag");
     }
 
+    // The Incognito stack (Prowlarr, FlareSolverr, the Node addon) is opt-in:
+    // absent flag file = off, which is what a fresh install gets. The flag is
+    // written by the Settings toggle via the base launcher's
+    // /_launcher/incognito endpoint. Read once at startup, so flipping the
+    // toggle lands on the next launch rather than mid-session.
+    static bool IncognitoEnabled()
+    {
+        try
+        {
+            return File.Exists(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+                "StremioLauncherFULL", "incognito.flag"));
+        }
+        catch { return false; }
+    }
+
     static void TryAttachDebugConsole()
     {
         try
@@ -172,10 +188,15 @@ class StremioLauncherFULL
         string sharedDir = Path.Combine(appRoot, "shared");
         string sharedProwlarrData = Path.Combine(sharedDir, "prowlarr-data");
         string marker = Path.Combine(rootDir, ".ready");
+        // Read once, up front: every decision below about Prowlarr,
+        // FlareSolverr, Node and the addon keys off this one value, and it
+        // must not change halfway through a launch.
+        bool incognito = IncognitoEnabled();
 
         Console.WriteLine("=== StremioLauncherFULL " + LAUNCHER_VERSION + " (payload " + PAYLOAD_VERSION + ") ===");
         Console.WriteLine("Install root: " + rootDir);
         Console.WriteLine("Shared data:  " + sharedDir);
+        Console.WriteLine("Incognito:    " + (incognito ? "on" : "off (default)"));
         Console.WriteLine();
 
         // Put ourselves + all children into a Win32 Job Object with
@@ -194,19 +215,19 @@ class StremioLauncherFULL
             try
             {
                 Directory.CreateDirectory(rootDir);
-                DownloadAndExtract("Portable Node.js", NODE_URL, rootDir, "node");
-                DownloadAndExtract("Prowlarr", PROWLARR_URL, rootDir, "prowlarr");
-                DownloadAndExtract("FlareSolverr", FLARESOLVERR_URL, rootDir, "flaresolverr");
-                DownloadAndExtract("Incognito Addon", ADDON_URL, rootDir, "stremio-adult-addon");
                 DownloadFile("StremioLauncher.exe", BASE_LAUNCHER_URL, Path.Combine(rootDir, "StremioLauncher.exe"));
 
-                // Mark the addon as current-version so we don't re-extract
-                // it on the very next start.
-                WriteAddonVersionMarker(rootDir);
+                // The Incognito payload is ~200MB of Node + Prowlarr +
+                // FlareSolverr + addon. With the feature off — the default —
+                // none of it is fetched, so a fresh install is a few hundred KB.
+                // EnsureIncognitoPayload below fills it in if the user ever
+                // turns the toggle on, so .ready no longer implies "everything
+                // is present", only "the base install completed".
+                if (incognito) DownloadIncognitoPayload(rootDir);
 
                 File.WriteAllText(marker, DateTime.UtcNow.ToString("o"));
                 Console.WriteLine();
-                Console.WriteLine("[OK] All components downloaded and extracted");
+                Console.WriteLine("[OK] Install complete");
                 Console.WriteLine();
             }
             catch (Exception ex)
@@ -219,6 +240,11 @@ class StremioLauncherFULL
                 return ExitWithPause(1);
             }
         }
+
+        // An install that was created with Incognito off has no payload on
+        // disk. If the toggle has since been turned on, fetch the missing
+        // pieces now rather than making the user reinstall.
+        if (incognito) EnsureIncognitoPayload(rootDir);
 
         // Resolve extracted paths.
         // Node zip extracts to node-v20.18.1-win-x64\ — we need to find node.exe
@@ -252,20 +278,26 @@ class StremioLauncherFULL
         // "deploy a new addon" actually take effect on existing installs;
         // without it, a pre-existing .ready marker means the addon is only
         // ever extracted once.
-        EnsureAddonUpToDate(rootDir);
+        if (incognito)
+        {
+            EnsureAddonUpToDate(rootDir);
 
-        // Re-resolve the addon entry path now in case we just re-extracted
-        // (extraction may produce a slightly different layout depending on
-        // how the zip is structured).
-        addonEntry = FindFile(rootDir, "stremio-adult-addon", "index.js");
+            // Re-resolve the addon entry path now in case we just re-extracted
+            // (extraction may produce a slightly different layout depending on
+            // how the zip is structured).
+            addonEntry = FindFile(rootDir, "stremio-adult-addon", "index.js");
+        }
 
         // Prowlarr data: ALWAYS the shared dir, regardless of PAYLOAD_VERSION.
         // If this is a first install on a machine that previously ran an
         // older version, migrate that version's DB over so the user keeps
         // all their indexers and settings. Runs after KillByPort so the
         // source DB isn't locked.
-        Directory.CreateDirectory(sharedProwlarrData);
-        MigrateProwlarrDataIfNeeded(appRoot, sharedProwlarrData);
+        if (incognito)
+        {
+            Directory.CreateDirectory(sharedProwlarrData);
+            MigrateProwlarrDataIfNeeded(appRoot, sharedProwlarrData);
+        }
 
         Console.CancelKeyPress += delegate { Shutdown(); };
         AppDomain.CurrentDomain.ProcessExit += delegate { Shutdown(); };
@@ -276,35 +308,43 @@ class StremioLauncherFULL
         // addon registers itself with Stremio asynchronously, and Prowlarr's
         // initial indexer health checks only matter once the user actually
         // searches — both can happen comfortably after Stremio is on screen.
-        if (flaresolverrExe != null)
+        if (!incognito)
         {
-            StartFlareSolverr(flaresolverrExe);
-            WaitForPortAsync(FLARESOLVERR_PORT, "FlareSolverr", 40);
+            Console.WriteLine("Incognito is off — skipping FlareSolverr, Prowlarr and the addon.");
+            Console.WriteLine("(turn it on in Settings → Modern UI if you want them)");
         }
         else
         {
-            Console.WriteLine("[WARN] flaresolverr.exe not found in " + Path.Combine(rootDir, "flaresolverr"));
-        }
+            if (flaresolverrExe != null)
+            {
+                StartFlareSolverr(flaresolverrExe);
+                WaitForPortAsync(FLARESOLVERR_PORT, "FlareSolverr", 40);
+            }
+            else
+            {
+                Console.WriteLine("[WARN] flaresolverr.exe not found in " + Path.Combine(rootDir, "flaresolverr"));
+            }
 
-        if (prowlarrExe != null)
-        {
-            StartProwlarr(prowlarrExe, prowlarrDataDir);
-            WaitForPortAsync(PROWLARR_PORT, "Prowlarr", 60);
-        }
-        else
-        {
-            Console.WriteLine("[WARN] Prowlarr.exe not found in " + Path.Combine(rootDir, "prowlarr"));
-        }
+            if (prowlarrExe != null)
+            {
+                StartProwlarr(prowlarrExe, prowlarrDataDir);
+                WaitForPortAsync(PROWLARR_PORT, "Prowlarr", 60);
+            }
+            else
+            {
+                Console.WriteLine("[WARN] Prowlarr.exe not found in " + Path.Combine(rootDir, "prowlarr"));
+            }
 
-        if (addonEntry != null && nodeExe != null)
-        {
-            StartAddon(nodeExe, addonEntry, prowlarrDataDir);
-            WaitForPortAsync(ADDON_PORT, "Incognito addon", 20);
-        }
-        else
-        {
-            if (nodeExe == null) Console.WriteLine("[WARN] node.exe not found in " + Path.Combine(rootDir, "node"));
-            if (addonEntry == null) Console.WriteLine("[WARN] index.js not found in " + Path.Combine(rootDir, "stremio-adult-addon"));
+            if (addonEntry != null && nodeExe != null)
+            {
+                StartAddon(nodeExe, addonEntry, prowlarrDataDir);
+                WaitForPortAsync(ADDON_PORT, "Incognito addon", 20);
+            }
+            else
+            {
+                if (nodeExe == null) Console.WriteLine("[WARN] node.exe not found in " + Path.Combine(rootDir, "node"));
+                if (addonEntry == null) Console.WriteLine("[WARN] index.js not found in " + Path.Combine(rootDir, "stremio-adult-addon"));
+            }
         }
 
         // Start base launcher
@@ -353,6 +393,49 @@ class StremioLauncherFULL
         }
         long size = new FileInfo(destPath).Length;
         Console.WriteLine("done (" + (size / (1024 * 1024)) + " MB)");
+    }
+
+    /// <summary>
+    /// Fetch every component the Incognito stack needs. Node is in here rather
+    /// than the base install because the addon is the only thing that uses it.
+    /// </summary>
+    static void DownloadIncognitoPayload(string rootDir)
+    {
+        DownloadAndExtract("Portable Node.js", NODE_URL, rootDir, "node");
+        DownloadAndExtract("Prowlarr", PROWLARR_URL, rootDir, "prowlarr");
+        DownloadAndExtract("FlareSolverr", FLARESOLVERR_URL, rootDir, "flaresolverr");
+        DownloadAndExtract("Incognito Addon", ADDON_URL, rootDir, "stremio-adult-addon");
+        WriteAddonVersionMarker(rootDir);
+    }
+
+    /// <summary>
+    /// Download the Incognito payload if it isn't already on disk. This is the
+    /// path taken when the toggle is switched on against an install that was
+    /// created without it. Non-fatal: a failure here leaves Incognito
+    /// unavailable for this launch but must not stop Stremio from opening.
+    /// </summary>
+    static void EnsureIncognitoPayload(string rootDir)
+    {
+        if (FindFile(rootDir, "node", "node.exe") != null
+            && FindFile(rootDir, "prowlarr", "Prowlarr.exe") != null
+            && FindFile(rootDir, "flaresolverr", "flaresolverr.exe") != null
+            && FindFile(rootDir, "stremio-adult-addon", "index.js") != null)
+        {
+            return;
+        }
+
+        Console.WriteLine("Incognito was turned on — downloading its components...");
+        Console.WriteLine("(one-time, a few hundred MB)");
+        try
+        {
+            DownloadIncognitoPayload(rootDir);
+            Console.WriteLine("[OK] Incognito components ready");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine("[WARN] Incognito download failed (" + ex.Message + ")");
+            Console.WriteLine("       Starting without it; it will retry on the next launch.");
+        }
     }
 
     static void DownloadAndExtract(string label, string url, string rootDir, string subDir)

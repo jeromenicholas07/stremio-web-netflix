@@ -3,6 +3,7 @@ const classnames = require('classnames');
 const { default: Icon } = require('@stremio/stremio-icons/react');
 const { MainNavBars, MetaRow } = require('stremio/components');
 const MetaRowPlaceholder = require('stremio/components/MetaRow/MetaRowPlaceholder');
+const { isIncognitoEnabled } = require('stremio/common/incognitoEnabled');
 const usePinGate = require('./usePinGate');
 const PinDialog = require('./PinDialog');
 const IncognitoSettings = require('./IncognitoSettings');
@@ -31,6 +32,16 @@ const Incognito = ({ urlParams }) => {
         resetPin();
         setShowSettings(false);
     }, [resetPin]);
+
+    // The nav tab is hidden when Incognito is off, but a bookmark or a stale
+    // hash can still land here. Send those back to Home rather than rendering
+    // a section whose backing services the launcher never started.
+    const enabled = isIncognitoEnabled();
+    React.useEffect(() => {
+        if (!enabled) window.location.replace('#/');
+    }, [enabled]);
+
+    if (!enabled) return null;
 
     // PIN gate
     if (pinState === 'no_pin') {

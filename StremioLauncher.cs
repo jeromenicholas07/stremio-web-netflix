@@ -29,6 +29,18 @@ class StremioLauncher
             "StremioLauncherFULL", "debug.flag");
     }
 
+    // Sibling of debug.flag. Its presence is the single source of truth for
+    // whether the Incognito stack (Prowlarr, FlareSolverr, the addon) is
+    // wanted on this machine; StremioLauncherFULL reads it at startup to
+    // decide whether to download or start any of them. Absent = off, which
+    // is what a fresh install gets.
+    static string IncognitoFlagPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StremioLauncherFULL", "incognito.flag");
+    }
+
     static void TryAttachDebugConsole()
     {
         try
@@ -703,11 +715,51 @@ class StremioLauncher
     }
 
     // ── Internal launcher control endpoints ──────────────────
-    // GET  /_launcher/debug     → {"enabled": <bool>}
-    // POST /_launcher/debug     body: {"enabled": <bool>}
-    //   ↳ writes/removes the flag file at %LOCALAPPDATA%\StremioLauncherFULL\debug.flag.
-    //     Read by both launcher .exes at startup to decide whether to attach
-    //     a console window (AllocConsole). Takes effect on next Stremio start.
+    // GET  /_launcher/debug      → {"enabled": <bool>}
+    // POST /_launcher/debug      body: {"enabled": <bool>}
+    //   ↳ debug.flag — whether the launchers attach a console window
+    //     (AllocConsole) at startup.
+    // GET  /_launcher/incognito  → {"enabled": <bool>}
+    // POST /_launcher/incognito  body: {"enabled": <bool>}
+    //   ↳ incognito.flag — whether StremioLauncherFULL fetches and starts the
+    //     Incognito stack at all. Off on a fresh install.
+    // Both write/remove a flag file under %LOCALAPPDATA%\StremioLauncherFULL    // and both take effect on the next Stremio start, not the current one —
+    // the launchers only read them during startup.
+    // GET reports whether a flag file exists; POST creates or deletes it.
+    // Both toggles are the same three lines of state, so they share one
+    // handler and differ only in which path they point at.
+    static void HandleFlagEndpoint(Stream stream, string method, Dictionary<string, string> reqHeaders, string flagPath)
+    {
+        if (method == "GET")
+        {
+            bool current = File.Exists(flagPath);
+            WriteResponse(stream, 200, "application/json",
+                Encoding.UTF8.GetBytes("{\"enabled\":" + (current ? "true" : "false") + "}"), true);
+            return;
+        }
+        if (method == "POST")
+        {
+            string body = ReadRequestBody(stream, reqHeaders);
+            bool enabled = body != null && body.IndexOf("\"enabled\"", StringComparison.Ordinal) >= 0
+                && body.IndexOf("true", StringComparison.Ordinal) >= 0;
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(flagPath));
+                if (enabled) File.WriteAllText(flagPath, "1");
+                else if (File.Exists(flagPath)) File.Delete(flagPath);
+                WriteResponse(stream, 200, "application/json",
+                    Encoding.UTF8.GetBytes("{\"ok\":true,\"enabled\":" + (enabled ? "true" : "false") + "}"), true);
+            }
+            catch (Exception ex)
+            {
+                WriteResponse(stream, 500, "application/json",
+                    Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"" + ex.Message.Replace("\"", "\\\"") + "\"}"), true);
+            }
+            return;
+        }
+        WriteResponse(stream, 405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"), true);
+    }
+
     static void HandleLauncherControl(Stream stream, string method, string path, string qs, Dictionary<string, string> reqHeaders)
     {
         // GET /_launcher/probe-size?u=<url>&h=<key:val>&h=...
@@ -743,35 +795,12 @@ class StremioLauncher
         }
         if (path == "/_launcher/debug")
         {
-            string flagPath = DebugFlagPath();
-            if (method == "GET")
-            {
-                bool enabled = File.Exists(flagPath);
-                WriteResponse(stream, 200, "application/json",
-                    Encoding.UTF8.GetBytes("{\"enabled\":" + (enabled ? "true" : "false") + "}"), true);
-                return;
-            }
-            if (method == "POST")
-            {
-                string body = ReadRequestBody(stream, reqHeaders);
-                bool enabled = body != null && body.IndexOf("\"enabled\"", StringComparison.Ordinal) >= 0
-                    && body.IndexOf("true", StringComparison.Ordinal) >= 0;
-                try
-                {
-                    Directory.CreateDirectory(Path.GetDirectoryName(flagPath));
-                    if (enabled) File.WriteAllText(flagPath, "1");
-                    else if (File.Exists(flagPath)) File.Delete(flagPath);
-                    WriteResponse(stream, 200, "application/json",
-                        Encoding.UTF8.GetBytes("{\"ok\":true,\"enabled\":" + (enabled ? "true" : "false") + "}"), true);
-                }
-                catch (Exception ex)
-                {
-                    WriteResponse(stream, 500, "application/json",
-                        Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"" + ex.Message.Replace("\"", "\\\"") + "\"}"), true);
-                }
-                return;
-            }
-            WriteResponse(stream, 405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"), true);
+            HandleFlagEndpoint(stream, method, reqHeaders, DebugFlagPath());
+            return;
+        }
+        if (path == "/_launcher/incognito")
+        {
+            HandleFlagEndpoint(stream, method, reqHeaders, IncognitoFlagPath());
             return;
         }
         WriteResponse(stream, 404, "text/plain", Encoding.UTF8.GetBytes("Not Found"), true);
