@@ -5,6 +5,7 @@ using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Runtime.InteropServices;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 
@@ -14,6 +15,11 @@ class StremioLauncher
     static TcpListener _audioTcp;
     static TcpListener _corsTcp;
     static Process _serverProc;
+
+    // How long a freshly started shell has to stay alive before we believe it
+    // is really ours. Below this it forwarded to a peer and exited; the value
+    // only has to outlast a pipe connect and write, not any UI work.
+    const int SHELL_FORWARD_GRACE_MS = 3000;
 
     // ── Debug console (winexe by default — no terminal popup) ──
     // Compiled with /target:winexe so the launcher runs without a console
@@ -39,6 +45,23 @@ class StremioLauncher
         return Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "StremioLauncherFULL", "incognito.flag");
+    }
+
+    // The Trakt session lives here as well as in the webview's localStorage.
+    // localStorage sits inside the Stremio install directory
+    // (Programs\Stremio\stremio-shell-ng.exe.WebView2\...), so anything that
+    // resets that profile -- a repair install, a move, clearing site data --
+    // silently signs the user out. This copy is under the launcher's own
+    // shared dir, which survives payload version bumps and Stremio reinstalls
+    // alike, and is what the UI restores from when localStorage comes up empty.
+    //
+    // Encrypted with DPAPI under the current user account: a refresh token is
+    // a long-lived credential and shouldn't sit in plaintext on disk.
+    static string TraktSessionPath()
+    {
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "StremioLauncherFULL", "shared", "trakt-session.dat");
     }
 
     static void TryAttachDebugConsole()
@@ -141,7 +164,22 @@ class StremioLauncher
             + "#/?streamingServerUrl=" + Uri.EscapeDataString("http://127.0.0.1:12470/");
         Console.WriteLine("[OK] Launching Stremio...");
         Console.WriteLine("[INFO] URL: " + webuiUrl);
-        var proc = Process.Start(shell, "--webui-url=" + webuiUrl + " --development");
+        string shellArgs = "--webui-url=" + webuiUrl + " --development";
+        var proc = Process.Start(shell, shellArgs);
+
+        // A shell that exits straight away hasn't failed -- it found a peer on
+        // the single-instance pipe, handed our arguments over and quit, leaving
+        // the stock UI on screen. That peer can appear after KillStremioShell()
+        // has already run (a Stremio installer relaunching itself is the usual
+        // cause), so clear it out and take the instance for ourselves. Once.
+        if (proc.WaitForExit(SHELL_FORWARD_GRACE_MS))
+        {
+            Console.WriteLine("[WARN] Shell exited after "
+                + (SHELL_FORWARD_GRACE_MS / 1000.0) + "s or less (code " + proc.ExitCode
+                + ") - another Stremio instance took our arguments. Retrying...");
+            KillStremioShell();
+            proc = Process.Start(shell, shellArgs);
+        }
 
         // Maximize window + apply dark title bar once the main window appears.
         new Thread(() => ApplyWindowStyling(proc)) { IsBackground = true }.Start();
@@ -479,6 +517,17 @@ class StremioLauncher
             catch { }
         }
 
+        // Kill any Stremio shell that is already up.
+        //
+        // stremio-shell-ng is single-instance: on start it connects to the
+        // named pipe of a running peer, forwards its argv there and exit(0)s.
+        // A stock instance -- the one a Stremio installer relaunches from its
+        // post-install step -- therefore swallows our --webui-url, leaving the
+        // official web UI on screen, and our process tree tears itself down
+        // because the "shell" we started exited immediately. The custom URL
+        // only survives if we are the first instance.
+        KillStremioShell();
+
         // Kill any process holding our ports
         KillByPort(12471);
         KillByPort(12470);
@@ -505,6 +554,36 @@ class StremioLauncher
                 Console.WriteLine("[WARN] Could not restart HTTP service: " + ex.Message);
             }
         }
+    }
+
+    /// <summary>
+    /// Terminate a running Stremio shell and the streaming server it owns, so
+    /// our launch becomes the single instance and keeps its own arguments.
+    /// The server child goes too: killing only the shell orphans a stock
+    /// stremio-runtime.exe on :11470, which StartStreamingServer would then
+    /// adopt and Shutdown() would never clean up.
+    /// </summary>
+    static void KillStremioShell()
+    {
+        string[] names = { "stremio-shell-ng", "stremio-runtime" };
+        foreach (string name in names)
+        {
+            foreach (var p in Process.GetProcessesByName(name))
+            {
+                try
+                {
+                    Console.WriteLine("[CLEANUP] Killing existing " + name + " (PID " + p.Id + ")");
+                    p.Kill();
+                    p.WaitForExit(5000);
+                }
+                catch { }
+            }
+        }
+
+        // The pipe server dies with the process, but not instantly -- give the
+        // name a moment to be released so our own launch doesn't connect to a
+        // dying instance and forward to it.
+        Thread.Sleep(300);
     }
 
     static bool IsPortHeldBySystem(int port)
@@ -760,6 +839,74 @@ class StremioLauncher
         WriteResponse(stream, 405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"), true);
     }
 
+    // GET    -> the stored session JSON, or {} when there is nothing saved.
+    // POST    -> encrypt and store the body verbatim (the UI decides its shape).
+    // DELETE  -> forget it, on an explicit disconnect.
+    // Only ever reachable from 127.0.0.1; the listener does not bind publicly.
+    static void HandleTraktSession(Stream stream, string method, Dictionary<string, string> reqHeaders)
+    {
+        string sessionPath = TraktSessionPath();
+
+        if (method == "GET")
+        {
+            string json = "{}";
+            try
+            {
+                if (File.Exists(sessionPath))
+                {
+                    byte[] plain = ProtectedData.Unprotect(
+                        File.ReadAllBytes(sessionPath), null, DataProtectionScope.CurrentUser);
+                    json = Encoding.UTF8.GetString(plain);
+                }
+            }
+            catch
+            {
+                // Unreadable or written by another user account. Treat as absent
+                // rather than failing -- the UI just falls back to localStorage.
+                json = "{}";
+            }
+            WriteResponse(stream, 200, "application/json", Encoding.UTF8.GetBytes(json), true);
+            return;
+        }
+
+        if (method == "POST")
+        {
+            string body = ReadRequestBody(stream, reqHeaders);
+            if (string.IsNullOrEmpty(body))
+            {
+                WriteResponse(stream, 400, "application/json",
+                    Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"empty body\"}"), true);
+                return;
+            }
+            try
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(sessionPath));
+                byte[] cipher = ProtectedData.Protect(
+                    Encoding.UTF8.GetBytes(body), null, DataProtectionScope.CurrentUser);
+                File.WriteAllBytes(sessionPath, cipher);
+                WriteResponse(stream, 200, "application/json",
+                    Encoding.UTF8.GetBytes("{\"ok\":true}"), true);
+            }
+            catch (Exception ex)
+            {
+                WriteResponse(stream, 500, "application/json",
+                    Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"" + ex.Message.Replace("\"", "\\\"") + "\"}"), true);
+            }
+            return;
+        }
+
+        if (method == "DELETE")
+        {
+            try { if (File.Exists(sessionPath)) File.Delete(sessionPath); }
+            catch { /* best effort */ }
+            WriteResponse(stream, 200, "application/json",
+                Encoding.UTF8.GetBytes("{\"ok\":true}"), true);
+            return;
+        }
+
+        WriteResponse(stream, 405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"), true);
+    }
+
     static void HandleLauncherControl(Stream stream, string method, string path, string qs, Dictionary<string, string> reqHeaders)
     {
         // GET /_launcher/probe-size?u=<url>&h=<key:val>&h=...
@@ -801,6 +948,11 @@ class StremioLauncher
         if (path == "/_launcher/incognito")
         {
             HandleFlagEndpoint(stream, method, reqHeaders, IncognitoFlagPath());
+            return;
+        }
+        if (path == "/_launcher/trakt-session")
+        {
+            HandleTraktSession(stream, method, reqHeaders);
             return;
         }
         WriteResponse(stream, 404, "text/plain", Encoding.UTF8.GetBytes("Not Found"), true);
@@ -938,7 +1090,7 @@ class StremioLauncher
         if (cors)
         {
             sb.Append("Access-Control-Allow-Origin: *\r\n");
-            sb.Append("Access-Control-Allow-Methods: GET, HEAD, POST, OPTIONS\r\n");
+            sb.Append("Access-Control-Allow-Methods: GET, HEAD, POST, DELETE, OPTIONS\r\n");
             sb.Append("Access-Control-Allow-Headers: *\r\n");
             // Required when the web UI (GitHub Pages, a public origin) fetches
             // this loopback proxy — Chrome's Private Network Access blocks
