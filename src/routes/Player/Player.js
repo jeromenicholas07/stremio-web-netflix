@@ -353,6 +353,7 @@ const Player = ({ urlParams, queryParams }) => {
         streamingServer.baseUrl || CONSTANTS.DEFAULT_STREAMING_SERVER_URL,
         player.stream?.type === 'Ready' ? player.stream.content : null,
         video.state.time,
+        video.state.duration,
     );
 
     const onSubtitlesSizeChanged = React.useCallback((size) => {

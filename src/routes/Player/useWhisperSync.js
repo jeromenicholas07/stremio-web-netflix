@@ -8,11 +8,13 @@ const {
 const {
     findBestMatch: findBestMatchExport,
     consensusOffset,
+    isConfident,
     indexCues,
     fetchAndParseSubtitles,
     findBestChunkOffsets,
     findChunkOffsetsNearTime,
-    MIN_MATCHES_FOR_CONFIDENCE,
+    MAX_PLAUSIBLE_OFFSET_MS,
+    REFINE_WINDOW_MS,
 } = require('stremio/services/subtitleSync/subtitleAligner');
 
 const SYNC_STATUS = {
@@ -26,15 +28,48 @@ const SYNC_STATUS = {
 };
 
 const CHUNK_DURATION = 5;           // seconds per chunk (was 15)
-const MAX_CHUNK_ATTEMPTS = 8;       // max chunks to try (auto-sync)
+const MAX_CHUNK_ATTEMPTS = 16;      // max chunks to try (auto-sync, a long movie)
 const BATCH_SIZE = 3;               // parallel fetches per batch (auto-sync)
 const MANUAL_CHUNK_ATTEMPTS = 2;    // manual sync: 1 batch of 2 near current time
 const MAX_RETRIES = 3;              // full pipeline retries (HLS fallback only)
 
-const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, setSubtitlesDelay, streamingServerUrl, streamContent, currentTimeMs) => {
+// Floor for the auto-sync budget: what a ~45min episode has always used.
+const MIN_CHUNK_ATTEMPTS = 8;
+// Runtime per chunk, between that floor and MAX_CHUNK_ATTEMPTS.
+const SECONDS_PER_CHUNK = 420;
+
+// A movie is 2-3x an episode, so a fixed 8-chunk budget samples it 2-3x more
+// thinly. Scale with runtime instead. The early stop still applies, so a
+// cleanly-matching movie costs nothing extra — only the ones that need more
+// evidence spend it, and episodes stay exactly where they were.
+const chunkBudget = (durationSec) => {
+    if (!durationSec || !isFinite(durationSec) || durationSec <= 0) return MIN_CHUNK_ATTEMPTS;
+    const scaled = Math.round(durationSec / SECONDS_PER_CHUNK);
+    return Math.max(MIN_CHUNK_ATTEMPTS, Math.min(MAX_CHUNK_ATTEMPTS, scaled));
+};
+
+// whisper-tiny emits these stock phrases over music and silence, which movies
+// serve up constantly during scored sequences. They are pure spurious-match
+// fuel: fake text that still scores above threshold against some real line.
+const HALLUCINATION_PATTERNS = [
+    /^thanks? (you|for watching)\b/i,
+    /\bsubtitles?\s+(by|provided)\b/i,
+    /\bamara\.org\b/i,
+    /^[\s♪♫*[\]()-]*$/,
+];
+
+const isHallucination = (text) => {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return true;
+    return HALLUCINATION_PATTERNS.some((re) => re.test(trimmed));
+};
+
+const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, setSubtitlesDelay, streamingServerUrl, streamContent, currentTimeMs, durationMs) => {
     // Keep latest currentTime in a ref so callbacks don't need to recreate
     const currentTimeMsRef = React.useRef(currentTimeMs);
     React.useEffect(() => { currentTimeMsRef.current = currentTimeMs; }, [currentTimeMs]);
+    const durationMsRef = React.useRef(durationMs);
+    React.useEffect(() => { durationMsRef.current = durationMs; }, [durationMs]);
     const [syncStatus, setSyncStatus] = React.useState(SYNC_STATUS.IDLE);
     const [syncProgress, setSyncProgress] = React.useState(0);
     const [syncError, setSyncError] = React.useState(null);
@@ -117,44 +152,92 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         });
     }, []);
 
+    // How many chunks this title earns, from player duration (cue span as fallback).
+    const resolveAutoBudget = React.useCallback((cues) => {
+        const fromPlayer = durationMsRef.current;
+        const durationSec = (fromPlayer && isFinite(fromPlayer) && fromPlayer > 0)
+            ? fromPlayer / 1000
+            : (cues.length > 0 ? cues[cues.length - 1].end / 1000 : 0);
+        return chunkBudget(durationSec);
+    }, []);
+
     // ── Collect matches from a transcription result ──
-    const collectMatches = React.useCallback((transcription, audioData, cues) => {
-        const offsets = [];
-        for (const chunk of transcription.chunks) {
-            if (!chunk.text || !chunk.timestamp || chunk.timestamp[0] == null) continue;
-            const whisperStartMs = audioData.startTime * 1000 + chunk.timestamp[0] * 1000;
-            const match = findBestMatchExport(chunk.text, cues);
+    // Every sample carries the audio chunk it came from. One 5s chunk yields
+    // several whisper segments, so without provenance three "agreeing" offsets
+    // can all be the same 5 seconds of film agreeing with itself.
+    //
+    // `coarseOffset` switches this to the refine pass: search a tight window
+    // around where the coarse estimate says the line should be, instead of the
+    // whole plausible range.
+    const collectSamples = React.useCallback((transcription, audioData, cues, coarseOffset) => {
+        const refining = typeof coarseOffset === 'number' && isFinite(coarseOffset);
+        const samples = [];
+        for (const segment of transcription.chunks) {
+            if (!segment.text || !segment.timestamp || segment.timestamp[0] == null) continue;
+            if (isHallucination(segment.text)) continue;
+            const whisperStartMs = audioData.startTime * 1000 + segment.timestamp[0] * 1000;
+            const match = findBestMatchExport(segment.text, cues, {
+                centerMs: refining ? whisperStartMs - coarseOffset : whisperStartMs,
+                windowMs: refining ? REFINE_WINDOW_MS : MAX_PLAUSIBLE_OFFSET_MS,
+            });
             if (match) {
-                offsets.push(whisperStartMs - match.start);
+                samples.push({
+                    offset: whisperStartMs - match.start,
+                    sourceSec: audioData.startTime,
+                    score: match.score,
+                });
             }
         }
-        return offsets;
+        return samples;
     }, []);
 
     // ── Compute and apply the final offset from accumulated matches ──
     // Uses consensus clustering rather than raw median: if some matches locked
     // onto the wrong instance of a recurring phrase (causing -600s outliers),
     // they fall outside the cluster of agreeing matches and get dropped.
-    const applyOffset = React.useCallback((allOffsets, totalChunksProcessed) => {
-        const { offset, cluster, outliers, confidence } = consensusOffset(allOffsets);
-        const delayMs = Math.round(offset);
+    //
+    // Two passes. The first located the answer within a generous window; the
+    // second re-matches every retained segment within REFINE_WINDOW_MS of it,
+    // which drops the far-away lookalikes that survived pass one and tightens
+    // what is left. Pass two only ever refines the answer pass one found.
+    const finalize = React.useCallback((samples, transcripts, cues, totalChunksProcessed) => {
+        const coarse = consensusOffset(samples);
+
+        const refinedSamples = [];
+        for (const t of transcripts) {
+            const s = collectSamples(t.transcription, t.audioData, cues, coarse.offset);
+            refinedSamples.push.apply(refinedSamples, s);
+        }
+        const refined = consensusOffset(refinedSamples);
+
+        const chosen = refined.cluster.length > 0 ? refined : coarse;
+        const delayMs = Math.round(chosen.offset);
+
         setSubtitlesDelay(delayMs);
         setSyncResult({
-            offset: offset,
-            confidence: confidence,
-            matchCount: cluster.length,
-            rejectedCount: outliers.length,
+            offset: chosen.offset,
+            confidence: chosen.confidence,
+            matchCount: chosen.cluster.length,
+            sourceCount: chosen.sourceCount,
+            corroborated: isConfident(chosen),
+            rejectedCount: chosen.outliers.length,
             totalChunks: totalChunksProcessed,
         });
         setSyncStatus(SYNC_STATUS.DONE);
         // eslint-disable-next-line no-console
         console.log(
             '[WhisperSync] Consensus offset:', delayMs + 'ms',
-            '| cluster:', cluster.length, '/', allOffsets.length,
-            '| rejected outliers:', outliers.length,
-            outliers.length > 0 ? '(' + outliers.map(function (o) { return Math.round(o) + 'ms'; }).join(', ') + ')' : '',
+            '| pass1:', Math.round(coarse.offset) + 'ms (' + coarse.cluster.length + ' matches / ' +
+                coarse.sourceCount + ' chunks)',
+            '| pass2:', Math.round(refined.offset) + 'ms (' + refined.cluster.length + ' matches / ' +
+                refined.sourceCount + ' chunks)',
+            '| corroborated:', isConfident(chosen),
+            '| rejected outliers:', chosen.outliers.length,
+            chosen.outliers.length > 0
+                ? '(' + chosen.outliers.map(function (o) { return Math.round(o) + 'ms'; }).join(', ') + ')'
+                : '',
         );
-    }, [setSubtitlesDelay]);
+    }, [setSubtitlesDelay, collectSamples]);
 
     // ══════════════════════════════════════════════════════════════
     //  Direct extraction path — batch-of-3, parallel fetch, fast
@@ -182,7 +265,7 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         // Auto-sync (no focusTimeSec): density-ranked chunks across the whole
         // episode (up to 8 chunks, 3 per batch).
         const isManual = focusTimeSec != null;
-        const chunkLimit = isManual ? MANUAL_CHUNK_ATTEMPTS : MAX_CHUNK_ATTEMPTS;
+        const chunkLimit = isManual ? MANUAL_CHUNK_ATTEMPTS : resolveAutoBudget(cues);
         const batchSize = isManual ? MANUAL_CHUNK_ATTEMPTS : BATCH_SIZE;
 
         const chunkOffsets = isManual
@@ -202,7 +285,9 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
 
         // Create worker once — model stays loaded across all chunks
         const worker = createWorker();
-        const allOffsets = [];
+        const allSamples = [];
+        // Retained so the refine pass can re-match without re-transcribing.
+        const transcripts = [];
         let totalChunksProcessed = 0;
 
         for (let batchIdx = 0; batchIdx < batches.length; batchIdx++) {
@@ -232,7 +317,7 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 // sync. If nothing has worked yet, propagate so HLS fallback runs.
                 // eslint-disable-next-line no-console
                 console.warn('[WhisperSync] Batch', batchIdx + 1, 'failed:', err && err.message);
-                if (allOffsets.length === 0) throw err;
+                if (allSamples.length === 0) throw err;
                 break;
             }
             if (cancelledRef.current) return;
@@ -246,40 +331,46 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 if (cancelledRef.current) return;
 
                 setSyncStatus(SYNC_STATUS.ALIGNING);
-                const matchOffsets = collectMatches(transcription, audioData, cues);
-                allOffsets.push.apply(allOffsets, matchOffsets);
+                const samples = collectSamples(transcription, audioData, cues);
+                allSamples.push.apply(allSamples, samples);
+                transcripts.push({ transcription, audioData });
                 totalChunksProcessed++;
 
                 // eslint-disable-next-line no-console
                 console.log(
                     '[WhisperSync]   Chunk', totalChunksProcessed, '(@' + audioData.startTime + 's):',
-                    matchOffsets.length, 'matches — total:', allOffsets.length,
+                    samples.length, 'matches — total:', allSamples.length,
                 );
             }
 
-            // ── Early stop: enough *agreeing* matches? ──
+            // ── Early stop: enough *agreeing* matches, from enough places? ──
             // Don't stop on raw count alone — a few outlier matches with no
-            // consensus would produce a wrong sync. Require MIN_MATCHES_FOR_CONFIDENCE
-            // offsets that agree within the consensus bandwidth.
-            const { cluster: earlyCluster } = consensusOffset(allOffsets);
-            if (earlyCluster.length >= MIN_MATCHES_FOR_CONFIDENCE) {
+            // consensus would produce a wrong sync. And don't stop on cluster
+            // size alone either: one 5s chunk emits several whisper segments,
+            // so a single mis-matched window can hit the cluster threshold by
+            // itself. isConfident also requires agreement across distinct
+            // chunks, which the dispersed chunk ordering makes meaningful —
+            // they are different regions of the film, not neighbours.
+            const early = consensusOffset(allSamples);
+            if (isConfident(early)) {
                 // eslint-disable-next-line no-console
                 console.log('[WhisperSync] Consensus reached after', totalChunksProcessed, 'chunks (',
-                    earlyCluster.length, 'agreeing /', allOffsets.length, 'total)');
-                applyOffset(allOffsets, totalChunksProcessed);
+                    early.cluster.length, 'agreeing across', early.sourceCount, 'chunks /',
+                    allSamples.length, 'total)');
+                finalize(allSamples, transcripts, cues, totalChunksProcessed);
                 return;
             }
         }
 
         // All batches exhausted
-        if (allOffsets.length > 0) {
+        if (allSamples.length > 0) {
             // eslint-disable-next-line no-console
-            console.log('[WhisperSync] Low confidence — applying best effort with', allOffsets.length, 'matches');
-            applyOffset(allOffsets, totalChunksProcessed);
+            console.log('[WhisperSync] Low confidence — applying best effort with', allSamples.length, 'matches');
+            finalize(allSamples, transcripts, cues, totalChunksProcessed);
         } else {
             throw new Error('No matches found. Subtitle language may not match audio.');
         }
-    }, [streamingServerUrl, streamContent, createWorker, transcribeAudio, collectMatches, applyOffset]);
+    }, [streamingServerUrl, streamContent, createWorker, transcribeAudio, collectSamples, finalize, resolveAutoBudget]);
 
     // ══════════════════════════════════════════════════════════════
     //  HLS fallback path — sequential, original algorithm
@@ -299,14 +390,15 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
                 if (cancelledRef.current) return;
 
                 // For HLS fallback, chunks must be chronological (transcoder is sequential)
-                const hlsChunkLimit = focusTimeSec != null ? MANUAL_CHUNK_ATTEMPTS : MAX_CHUNK_ATTEMPTS;
+                const hlsChunkLimit = focusTimeSec != null ? MANUAL_CHUNK_ATTEMPTS : resolveAutoBudget(cues);
                 const chunkOffsets = focusTimeSec != null
                     ? findChunkOffsetsNearTime(cues, CHUNK_DURATION, hlsChunkLimit, focusTimeSec)
                     : findBestChunkOffsets(cues, CHUNK_DURATION, hlsChunkLimit);
                 const chronological = [...chunkOffsets].sort(function (a, b) { return a - b; });
 
                 const worker = createWorker();
-                const allOffsets = [];
+                const allSamples = [];
+                const transcripts = [];
 
                 for (let attempt = 0; attempt < chronological.length; attempt++) {
                     if (cancelledRef.current) return;
@@ -322,24 +414,26 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
 
                     setSyncStatus(SYNC_STATUS.ALIGNING);
 
-                    const matchOffsets = collectMatches(transcription, audioData, cues);
-                    allOffsets.push.apply(allOffsets, matchOffsets);
+                    const samples = collectSamples(transcription, audioData, cues);
+                    allSamples.push.apply(allSamples, samples);
+                    transcripts.push({ transcription, audioData });
 
-                    const { cluster: hlsCluster } = consensusOffset(allOffsets);
-                    if (hlsCluster.length >= MIN_MATCHES_FOR_CONFIDENCE) {
-                        applyOffset(allOffsets, attempt + 1);
+                    const hlsConsensus = consensusOffset(allSamples);
+                    if (isConfident(hlsConsensus)) {
+                        finalize(allSamples, transcripts, cues, attempt + 1);
                         session.close();
                         return;
                     }
 
                     if (attempt === chronological.length - 1) {
-                        lastError = 'Low confidence: only ' + allOffsets.length + ' matches found. ' +
+                        lastError = 'Low confidence: only ' + allSamples.length + ' matches found. ' +
                             'Subtitle language may not match audio.';
                         setSyncResult({
-                            offset: allOffsets.length > 0
-                                ? allOffsets.sort(function (a, b) { return a - b; })[Math.floor(allOffsets.length / 2)]
-                                : 0,
-                            matchCount: allOffsets.length,
+                            offset: hlsConsensus.offset,
+                            confidence: hlsConsensus.confidence,
+                            matchCount: hlsConsensus.cluster.length,
+                            sourceCount: hlsConsensus.sourceCount,
+                            corroborated: false,
                             totalChunks: chronological.length,
                         });
                     }
@@ -361,7 +455,7 @@ const useWhisperSync = (extraSubtitlesTracks, selectedExtraSubtitlesTrackId, set
         if (!cancelledRef.current) {
             throw new Error(lastError || 'Sync failed after multiple attempts');
         }
-    }, [streamingServerUrl, streamContent, createWorker, transcribeAudio, collectMatches, applyOffset]);
+    }, [streamingServerUrl, streamContent, createWorker, transcribeAudio, collectSamples, finalize, resolveAutoBudget]);
 
     // ══════════════════════════════════════════════════════════════
     //  Main entry point — picks the best available extraction path
