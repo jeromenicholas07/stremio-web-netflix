@@ -59,7 +59,28 @@ i18n
     });
 
 const root = ReactDOM.createRoot(document.getElementById('app'));
-root.render(<App />);
+
+// The shell's localStorage lives inside the Stremio install directory, so a
+// repair install or a cleared profile signs the user out of Trakt. The launcher
+// keeps an encrypted copy of the session elsewhere; restore from it before the
+// first render, because the home screen decides whether to sync on mount and
+// won't reconsider afterwards.
+//
+// Capped and swallowed: with no launcher listening the loopback fetch is
+// refused immediately, and any failure here must still leave us rendering.
+const restoreTraktSession = () => {
+    try {
+        const traktBridge = require('stremio/services/TraktBridge');
+        return Promise.race([
+            traktBridge.restoreSessionFromLauncher(),
+            new Promise((resolve) => setTimeout(resolve, 1500)),
+        ]).catch(() => undefined);
+    } catch {
+        return Promise.resolve();
+    }
+};
+
+restoreTraktSession().then(() => root.render(<App />));
 
 if (process.env.NODE_ENV === 'production' && process.env.SERVICE_WORKER_DISABLED !== 'true' && process.env.SERVICE_WORKER_DISABLED !== true && 'serviceWorker' in navigator) {
     // When a freshly-deployed service worker activates and takes control

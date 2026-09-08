@@ -22,6 +22,11 @@ const TRAKT_API = (() => {
     }
     return 'https://api.trakt.tv';
 })();
+// The launcher's loopback control API. Present only when running inside the
+// Stremio shell that the launcher started; in a browser these calls just fail
+// and every caller treats that as "no backup available".
+const LAUNCHER_API = 'http://127.0.0.1:12470';
+
 const DEFAULT_CLIENT_ID = '67bffdb0ebe7ee9ffda2192bf2a463d7a9f36da83325fd94e04552052ad7372c';
 const DEFAULT_CLIENT_SECRET = '02768d0e1459bd002b5b1a99f70e0b84d68d068823d3acce95b91fb282e8da95';
 
@@ -316,6 +321,56 @@ class TraktBridge {
         // expires_in is in seconds, created_at is unix timestamp
         const expiryMs = (data.created_at + data.expires_in) * 1000;
         this.setTokenExpiry(expiryMs);
+        this._backupSession();
+    }
+
+    // ─── Session backup, outside the webview profile ───
+    // localStorage for the shell lives inside the Stremio install directory, so
+    // a repair install or a cleared profile takes the login with it. The
+    // launcher keeps a DPAPI-encrypted copy under its own shared dir, which
+    // outlives both. Best-effort in both directions: in a plain browser there
+    // is no launcher listening and everything here quietly no-ops.
+    _backupSession() {
+        const session = {
+            access_token: this.getAccessToken(),
+            refresh_token: this.getRefreshToken(),
+            token_expiry: this.getTokenExpiry(),
+            username: this.getUsername(),
+        };
+        if (!session.access_token && !session.refresh_token) return Promise.resolve(false);
+        return fetch(`${LAUNCHER_API}/_launcher/trakt-session`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(session),
+        }).then((r) => r.ok).catch(() => false);
+    }
+
+    _clearSessionBackup() {
+        return fetch(`${LAUNCHER_API}/_launcher/trakt-session`, { method: 'DELETE' })
+            .then((r) => r.ok).catch(() => false);
+    }
+
+    // Restore a session the webview lost. Only fills gaps: a token already in
+    // localStorage is the newer one by definition, since every write backs
+    // itself up. Returns whether anything was restored.
+    async restoreSessionFromLauncher() {
+        if (this.getAccessToken()) return false;
+        let saved;
+        try {
+            const res = await fetch(`${LAUNCHER_API}/_launcher/trakt-session`);
+            if (!res.ok) return false;
+            saved = await res.json();
+        } catch {
+            return false;
+        }
+        if (!saved || !saved.access_token) return false;
+
+        this.setAccessToken(saved.access_token);
+        if (saved.refresh_token) this.setRefreshToken(saved.refresh_token);
+        if (saved.token_expiry) this.setTokenExpiry(saved.token_expiry);
+        if (saved.username) this.setUsername(saved.username);
+        this._notify();
+        return true;
     }
 
     // ─── Token Refresh ───
@@ -339,11 +394,17 @@ class TraktBridge {
 
         if (!res.ok) {
             const text = await res.text().catch(() => '');
-            // If refresh fails, clear tokens — user needs to re-authorize
-            if (res.status === 401 || res.status === 403) {
+            // Only a 401/403 means the grant itself is dead and re-authorizing
+            // is the only way forward. Anything else — a 5xx, a rate limit, a
+            // gateway error — is Trakt having a bad minute, and the refresh
+            // token is still good. Throwing without disconnecting lets the next
+            // launch retry instead of silently signing the user out.
+            const err = new Error(`Token refresh failed: ${res.status} ${text.slice(0, 200)}`);
+            err.authRejected = res.status === 401 || res.status === 403;
+            if (err.authRejected) {
                 this.disconnect();
             }
-            throw new Error(`Token refresh failed: ${res.status} ${text.slice(0, 200)}`);
+            throw err;
         }
 
         const data = await res.json();
@@ -354,6 +415,7 @@ class TraktBridge {
     // ─── Disconnect (clear all auth data) ───
     disconnect() {
         this.cancelDevicePoll();
+        this._clearSessionBackup();
         try {
             localStorage.removeItem('trakt_access_token');
             localStorage.removeItem('trakt_refresh_token');
@@ -505,27 +567,36 @@ class TraktBridge {
         if (res.status === 401) {
             // Token might have been revoked — try one refresh
             if (this.getRefreshToken()) {
-                try {
-                    await this.refreshAccessToken();
-                    // Retry with new token
-                    const newToken = this.getAccessToken();
-                    const retryRes = await fetch(`${TRAKT_API}${path}`, {
-                        ...options,
-                        headers: { ...headers, 'Authorization': `Bearer ${newToken}` },
-                    });
-                    if (!retryRes.ok) {
-                        const text = await retryRes.text().catch(() => '');
-                        throw new Error(`Trakt API ${retryRes.status}: ${text.slice(0, 200)}`);
-                    }
-                    if (retryRes.status === 204) return {};
-                    const ct = retryRes.headers.get('content-type') || '';
-                    if (ct.includes('json')) return retryRes.json();
-                    return {};
-                } catch {
+                // refreshAccessToken has already disconnected if Trakt rejected
+                // the grant. Any other failure here — offline, 5xx, a timeout —
+                // leaves the refresh token intact so the next attempt can use
+                // it. Letting this catch clear it is what used to sign people
+                // out on a flaky connection.
+                await this.refreshAccessToken();
+
+                // A failure past this point is about *this request*, not about
+                // the session: the tokens we just stored are known good, so a
+                // dropped retry must not take the login down with it.
+                const newToken = this.getAccessToken();
+                const retryRes = await fetch(`${TRAKT_API}${path}`, {
+                    ...options,
+                    headers: { ...headers, 'Authorization': `Bearer ${newToken}` },
+                });
+                if (retryRes.status === 401) {
+                    // A fresh token still rejected — the grant really is gone.
                     this.disconnect();
                     throw new Error('Trakt session expired. Please reconnect.');
                 }
+                if (!retryRes.ok) {
+                    const text = await retryRes.text().catch(() => '');
+                    throw new Error(`Trakt API ${retryRes.status}: ${text.slice(0, 200)}`);
+                }
+                if (retryRes.status === 204) return {};
+                const ct = retryRes.headers.get('content-type') || '';
+                if (ct.includes('json')) return retryRes.json();
+                return {};
             }
+            // Nothing to refresh with, so the session is genuinely unusable.
             this.disconnect();
             throw new Error('Trakt session expired. Please reconnect.');
         }
@@ -560,15 +631,17 @@ class TraktBridge {
 
         // Auto-retry on 401 with refreshed token
         if (res.status === 401 && this.getRefreshToken()) {
-            try {
-                await this.refreshAccessToken();
-                const newToken = this.getAccessToken();
-                res = await fetch(`${TRAKT_API}${path}`, {
-                    method: 'POST',
-                    headers: { ...headers, 'Authorization': `Bearer ${newToken}` },
-                    body: JSON.stringify(body),
-                });
-            } catch {
+            // As in _fetch: refreshAccessToken disconnects only when Trakt
+            // rejects the grant. Transient failures propagate with the session
+            // intact rather than signing the user out.
+            await this.refreshAccessToken();
+            const newToken = this.getAccessToken();
+            res = await fetch(`${TRAKT_API}${path}`, {
+                method: 'POST',
+                headers: { ...headers, 'Authorization': `Bearer ${newToken}` },
+                body: JSON.stringify(body),
+            });
+            if (res.status === 401) {
                 this.disconnect();
                 throw new Error('Trakt session expired. Please reconnect in Settings.');
             }
