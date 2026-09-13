@@ -278,9 +278,10 @@ function isLauncherBase(fetchBase) {
 // Ask the launcher to size the stream server-side. This is the reliable path in
 // the shell: the streaming-server /proxy is origin-locked and 500s when a
 // Torrentio /resolve/... URL redirects cross-origin to real-debrid.com, whereas
-// the launcher fetches the URL directly (AllowAutoRedirect) and reads the final
-// size. Returns { size, contentType }, { unavailable: true } (old launcher with
-// no endpoint → caller falls back), or null on error.
+// the launcher follows the redirects itself and reads the final size. Returns
+// { size, contentType, fileName }, { unavailable: true } (old launcher with no
+// endpoint → caller falls back), or null on error. fileName is '' from a
+// launcher too old to report it.
 async function probeSizeViaLauncher(fetchBase, url, proxyHeaders, signal) {
     const params = new URLSearchParams();
     params.set('u', url);
@@ -304,7 +305,11 @@ async function probeSizeViaLauncher(fetchBase, url, proxyHeaders, signal) {
         if (!res.ok) return null;
         const data = await res.json().catch(() => null);
         if (!data || typeof data.size !== 'number') return null;
-        return { size: data.size, contentType: data.contentType || '' };
+        return {
+            size: data.size,
+            contentType: data.contentType || '',
+            fileName: typeof data.fileName === 'string' ? data.fileName : '',
+        };
     } catch (err) {
         log('launcher probe error', err && err.message);
         return null;
@@ -348,10 +353,29 @@ async function probeSizeViaWorker(workerBase, url, proxyHeaders, signal) {
     }
 }
 
+// Torrentio answers a dead stream by redirecting to one of its own error clips
+// (torrentio.strem.fun/videos/<name>_v3.mp4), and the launcher reports the name
+// the redirects ended on. Most clips mark a stream that will be just as dead
+// next time — failed_infringement (the copyright block), failed_unexpected,
+// failed_rar — so they are worth remembering against the show. `downloading`
+// only means Real-Debrid has not finished caching the file: skip it for this
+// play, but it says nothing about whether the show needs probing.
+function isTransientStubFileName(fileName) {
+    return typeof fileName === 'string' && /^downloading(?:_v\d+)?\.mp4$/i.test(fileName);
+}
+
+// Whether a preflight verdict may feed the per-show copyright-check history.
+// An inconclusive probe (no `blocked`) is no evidence either way, and neither is
+// a stub that is only still caching.
+function isCopyrightHistoryEvidence(verdict) {
+    return Boolean(verdict) && typeof verdict.blocked === 'boolean' && verdict.transient !== true;
+}
+
 // Preflight a single auto-pick candidate.
 //
 // Returns one of:
-//   { blocked: true, contentLength }   — confirmed copyright stub
+//   { blocked: true, contentLength }   — confirmed stub; the launcher path adds
+//                                        `transient` (see isTransientStubFileName)
 //   { blocked: false, contentLength }  — looks like real media
 //   { skipped: true, reason }          — could not check (fail open)
 async function preflightAutoPickStream({ core, stream, ssBaseUrl, signal } = {}) {
@@ -401,8 +425,11 @@ async function preflightAutoPickStream({ core, stream, ssBaseUrl, signal } = {})
                 const total = classifyProbedSize(launcher.size, launcher.contentType);
                 if (total === null) return { skipped: true, reason: 'launcher-ambiguous' };
                 const blocked = isStubSize(total);
-                log('verdict (launcher)', { name: stream && stream.name, blocked, size: launcher.size, contentType: launcher.contentType });
-                return { blocked, contentLength: total };
+                // The name only refines a block the size already confirmed; it
+                // can never turn a real-sized file into one.
+                const transient = blocked && isTransientStubFileName(launcher.fileName);
+                log('verdict (launcher)', { name: stream && stream.name, blocked, transient, size: launcher.size, contentType: launcher.contentType, fileName: launcher.fileName });
+                return { blocked, transient, contentLength: total };
             }
             // Old launcher (no endpoint) or transient error → fall back to the
             // streaming-server /proxy probe below (best effort).
@@ -428,6 +455,8 @@ async function preflightAutoPickStream({ core, stream, ssBaseUrl, signal } = {})
 
 module.exports = {
     preflightAutoPickStream,
+    isTransientStubFileName,
+    isCopyrightHistoryEvidence,
     parseAdvertisedSizeBytes,
     isStubSize,
     probeContentLength,

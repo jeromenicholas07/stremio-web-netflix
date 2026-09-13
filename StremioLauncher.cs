@@ -158,7 +158,7 @@ class StremioLauncher
         // Without it GitHub Pages' max-age=600 pins a stale bundle for up to 10
         // minutes after every deploy (the service worker often does not control
         // navigations inside the Stremio shell webview).
-        const string WEB_UI_CACHE_VERSION = "2026-06-30-launcher-probe";
+        const string WEB_UI_CACHE_VERSION = "2026-09-13-probe-ipv4";
         string webuiUrl = "https://jeromenicholas07.github.io/stremio-web-netflix/?v="
             + Uri.EscapeDataString(WEB_UI_CACHE_VERSION)
             + "#/?streamingServerUrl=" + Uri.EscapeDataString("http://127.0.0.1:12470/");
@@ -910,14 +910,15 @@ class StremioLauncher
     static void HandleLauncherControl(Stream stream, string method, string path, string qs, Dictionary<string, string> reqHeaders)
     {
         // GET /_launcher/probe-size?u=<url>&h=<key:val>&h=...
-        //   → {"size": <bytes or -1>, "contentType": "<ct>"}
+        //   → {"size": <bytes or -1>, "contentType": "<ct>", "fileName": "<name>"}
         // Server-side size probe for the auto-pick copyright preflight. The
         // browser cannot size these streams itself: the streaming-server /proxy
         // is origin-locked to the `d` param and 500s when a Torrentio
         // /resolve/... URL 302-redirects to real-debrid.com. Here we fetch the
-        // URL directly with AllowAutoRedirect, so the whole resolve→RD→CDN chain
-        // is followed and we read the final Content-Length (or measure a capped
-        // body for chunked responses). size = -1 means "unknown" (caller plays).
+        // URL directly, following the resolve→RD→CDN redirects hop by hop, and
+        // read the total from a ranged request (or measure a capped body for
+        // chunked responses). fileName is the last path segment the redirects
+        // ended on. size = -1 means "unknown" (caller plays).
         if (path == "/_launcher/probe-size")
         {
             if (method != "GET")
@@ -933,11 +934,12 @@ class StremioLauncher
             }
             long size = -1;
             string ctype = "";
-            try { size = ProbeRemoteSize(target, GetQueryParams(qs, "h"), out ctype); }
-            catch { size = -1; ctype = ""; }
-            string ctEsc = (ctype ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"");
+            string fileName = "";
+            try { size = ProbeRemoteSize(target, GetQueryParams(qs, "h"), out ctype, out fileName); }
+            catch { size = -1; ctype = ""; fileName = ""; }
             WriteResponse(stream, 200, "application/json",
-                Encoding.UTF8.GetBytes("{\"size\":" + size + ",\"contentType\":\"" + ctEsc + "\"}"), true);
+                Encoding.UTF8.GetBytes("{\"size\":" + size + ",\"contentType\":\"" + JsonEscape(ctype) +
+                    "\",\"fileName\":\"" + JsonEscape(fileName) + "\"}"), true);
             return;
         }
         if (path == "/_launcher/debug")
@@ -985,80 +987,197 @@ class StremioLauncher
                 case "referer": wr.Referer = v; break;
                 case "host": wr.Host = v; break;
                 case "content-type": wr.ContentType = v; break;
-                case "range": break; // never forward a Range to the probe
+                case "range": break; // the probe sets its own Range; a caller's must not replace it
                 default: wr.Headers[k] = v; break;
             }
         }
         catch { /* restricted/invalid header — skip */ }
     }
 
-    // GET the URL following redirects and return the total byte size: the
-    // final response's Content-Length, or — when the response is chunked with
-    // no length — the body size measured up to a ~4 MB cap (enough to tell the
-    // ~2 MB RD copyright stub from a real multi-GB file without downloading it).
-    // Returns -1 on any error so the caller fails open (plays).
-    static long ProbeRemoteSize(string url, List<string> headers, out string contentType)
+    // GET the URL following redirects and return the total byte size, or -1 on
+    // any error so the caller fails open (plays).
+    //
+    // Every hop prefers IPv4 (see PreferIPv4). Where DNS64 hands out a
+    // synthesized AAAA (64:ff9b::/96) for an IPv4-only host but the NAT64 path
+    // behind it is dead, HttpWebRequest - which has no Happy Eyeballs - dials
+    // the IPv6 address first and never gets past it. Real-Debrid's download
+    // hosts are IPv4-only, so every clean stream used to spend the whole 15 s
+    // there and come back unknown, while the stubs (served over working IPv6)
+    // answered at once. Redirects are followed by hand because the bind
+    // delegate belongs to one host's ServicePoint: AllowAutoRedirect would dial
+    // the redirect target without it.
+    //
+    // Each request carries its own `Range: bytes=0-1`, so the answer is a
+    // 2-byte 206 with the total in Content-Range. A server that ignores the
+    // Range answers 200 with the full Content-Length, and a chunked 200 with no
+    // length still has its body measured up to a ~4 MB cap.
+    //
+    // fileName is the last path segment of the URL the redirects ended on.
+    // Torrentio answers a dead stream by redirecting to one of its own error
+    // clips (torrentio.strem.fun/videos/failed_infringement_v3.mp4,
+    // downloading_v3.mp4, ...) whose name says why, which the size cannot.
+    static long ProbeRemoteSize(string url, List<string> headers, out string contentType, out string fileName)
     {
         contentType = "";
-        HttpWebRequest wr;
-        try { wr = (HttpWebRequest)WebRequest.Create(url); }
+        fileName = "";
+        const int budgetMs = 15000;
+        const int maxRedirects = 5;
+        Uri current;
+        try { current = new Uri(url); }
         catch { return -1; }
-        wr.Method = "GET";
-        wr.AllowAutoRedirect = true;
-        wr.Timeout = 15000;
-        wr.ReadWriteTimeout = 15000;
-        wr.ServicePoint.Expect100Continue = false;
-        try { wr.UserAgent = "Stremio"; } catch { }
-        if (headers != null)
-        {
-            foreach (string h in headers)
-            {
-                if (string.IsNullOrEmpty(h)) continue;
-                int c = h.IndexOf(':');
-                if (c <= 0) continue;
-                SetProbeHeader(wr, h.Substring(0, c).Trim(), h.Substring(c + 1).Trim());
-            }
-        }
+        Stopwatch elapsed = Stopwatch.StartNew();
 
-        HttpWebResponse resp;
-        try { resp = (HttpWebResponse)wr.GetResponse(); }
-        catch (WebException wex)
+        for (int hop = 0; hop <= maxRedirects; hop++)
         {
-            // An error response can still carry a usable Content-Length.
-            var er = wex.Response as HttpWebResponse;
-            if (er == null) return -1;
-            using (er)
-            {
-                contentType = er.ContentType ?? "";
-                return er.ContentLength >= 0 ? er.ContentLength : -1;
-            }
-        }
-        catch { return -1; }
+            // One 15 s budget for the whole chain, so a redirect cannot stretch
+            // the probe past what the caller is prepared to wait.
+            int remainingMs = budgetMs - (int)elapsed.ElapsedMilliseconds;
+            if (remainingMs <= 0) return -1;
 
-        using (resp)
-        {
-            contentType = resp.ContentType ?? "";
-            if (resp.ContentLength >= 0) return resp.ContentLength;
-
-            // Chunked / no length: measure the body, bounded.
-            try
+            HttpWebRequest wr;
+            try { wr = (HttpWebRequest)WebRequest.Create(current); }
+            catch { return -1; }
+            wr.Method = "GET";
+            wr.AllowAutoRedirect = false;
+            wr.AddRange(0, 1);
+            wr.Timeout = remainingMs;
+            wr.ReadWriteTimeout = remainingMs;
+            wr.ServicePoint.Expect100Continue = false;
+            wr.ServicePoint.BindIPEndPointDelegate = PreferIPv4;
+            try { wr.UserAgent = "Stremio"; } catch { }
+            if (headers != null)
             {
-                using (var s = resp.GetResponseStream())
+                foreach (string h in headers)
                 {
-                    byte[] buf = new byte[65536];
-                    long total = 0;
-                    long cap = 4L * 1024 * 1024;
-                    int n;
-                    while ((n = s.Read(buf, 0, buf.Length)) > 0)
-                    {
-                        total += n;
-                        if (total > cap) return cap + 1;
-                    }
-                    return total;
+                    if (string.IsNullOrEmpty(h)) continue;
+                    int c = h.IndexOf(':');
+                    if (c <= 0) continue;
+                    SetProbeHeader(wr, h.Substring(0, c).Trim(), h.Substring(c + 1).Trim());
+                }
+            }
+
+            HttpWebResponse resp;
+            try { resp = (HttpWebResponse)wr.GetResponse(); }
+            catch (WebException wex)
+            {
+                // An error response can still carry a usable Content-Length.
+                var er = wex.Response as HttpWebResponse;
+                if (er == null) return -1;
+                using (er)
+                {
+                    contentType = er.ContentType ?? "";
+                    fileName = ProbeFileName(er.ResponseUri);
+                    return er.ContentLength >= 0 ? er.ContentLength : -1;
                 }
             }
             catch { return -1; }
+
+            using (resp)
+            {
+                int status = (int)resp.StatusCode;
+                string location = resp.Headers["Location"];
+                if (status >= 300 && status < 400 && !string.IsNullOrEmpty(location))
+                {
+                    try { current = new Uri(current, location); }
+                    catch { return -1; }
+                    continue;
+                }
+
+                contentType = resp.ContentType ?? "";
+                fileName = ProbeFileName(resp.ResponseUri);
+
+                // 206: Content-Length is only the 2-byte slice. The file size is
+                // the total in Content-Range - never fall through to measuring the
+                // body, which would report the slice as a 2-byte "file" and block it.
+                if (resp.StatusCode == HttpStatusCode.PartialContent) return ParseContentRangeTotal(resp.Headers["Content-Range"]);
+
+                if (resp.ContentLength >= 0) return resp.ContentLength;
+
+                // Chunked / no length: measure the body, bounded.
+                try
+                {
+                    using (var s = resp.GetResponseStream())
+                    {
+                        byte[] buf = new byte[65536];
+                        long total = 0;
+                        long cap = 4L * 1024 * 1024;
+                        int n;
+                        while ((n = s.Read(buf, 0, buf.Length)) > 0)
+                        {
+                            total += n;
+                            if (total > cap) return cap + 1;
+                        }
+                        return total;
+                    }
+                }
+                catch { return -1; }
+            }
         }
+        return -1; // too many redirects
+    }
+
+    // "bytes 0-1/420617259" -> 420617259; -1 when absent or the total is "*".
+    static long ParseContentRangeTotal(string contentRange)
+    {
+        if (string.IsNullOrEmpty(contentRange)) return -1;
+        int slash = contentRange.LastIndexOf('/');
+        if (slash < 0) return -1;
+        long total;
+        return long.TryParse(contentRange.Substring(slash + 1).Trim(), out total) && total >= 0 ? total : -1;
+    }
+
+    // Last path segment of a URL, percent-decoded; "" when there is none.
+    static string ProbeFileName(Uri uri)
+    {
+        if (uri == null) return "";
+        try
+        {
+            string path = uri.AbsolutePath;
+            return Uri.UnescapeDataString(path.Substring(path.LastIndexOf('/') + 1));
+        }
+        catch { return ""; }
+    }
+
+    // Bind delegate for every hop of the probe: fail an IPv6 endpoint outright
+    // when the host also has an IPv4 address, so the connect loop moves straight
+    // on to IPv4 instead of waiting out a dead NAT64 path. IPv6-only hosts are
+    // dialled as usual.
+    static IPEndPoint PreferIPv4(ServicePoint servicePoint, IPEndPoint remote, int retryCount)
+    {
+        if (remote.AddressFamily == AddressFamily.InterNetworkV6 && HostHasIPv4(servicePoint.Address.DnsSafeHost))
+        {
+            throw new SocketException((int)SocketError.AddressFamilyNotSupported);
+        }
+        return null; // no local binding: connect as usual
+    }
+
+    static bool HostHasIPv4(string host)
+    {
+        try
+        {
+            foreach (IPAddress a in Dns.GetHostAddresses(host))
+            {
+                if (a.AddressFamily == AddressFamily.InterNetwork) return true;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    // JSON string body for a value that came off the network: backslash,
+    // quote and control characters escaped.
+    static string JsonEscape(string s)
+    {
+        if (string.IsNullOrEmpty(s)) return "";
+        var sb = new StringBuilder(s.Length);
+        foreach (char ch in s)
+        {
+            if (ch == '\\') sb.Append("\\\\");
+            else if (ch == '"') sb.Append("\\\"");
+            else if (ch < ' ') sb.Append("\\u").Append(((int)ch).ToString("x4"));
+            else sb.Append(ch);
+        }
+        return sb.ToString();
     }
 
     static string ReadRequestBody(Stream stream, Dictionary<string, string> reqHeaders)

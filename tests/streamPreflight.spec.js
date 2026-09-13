@@ -1,7 +1,9 @@
 // Copyright (C) 2017-2026 Smart code 203358507
 
 const {
+    isCopyrightHistoryEvidence,
     isStubSize,
+    isTransientStubFileName,
     parseAdvertisedSizeBytes,
     preflightAutoPickStream,
     probeContentLength,
@@ -28,6 +30,26 @@ describe('streamPreflight', () => {
 
     it('parses advertised sizes', () => {
         expect(parseAdvertisedSizeBytes('💾 525.66 MB')).toBeGreaterThan(0);
+    });
+
+    it('recognises only the "downloading" clip as a transient stub', () => {
+        expect(isTransientStubFileName('downloading_v3.mp4')).toBe(true);
+        expect(isTransientStubFileName('downloading_v4.mp4')).toBe(true);
+        expect(isTransientStubFileName('failed_infringement_v3.mp4')).toBe(false);
+        expect(isTransientStubFileName('failed_unexpected_v3.mp4')).toBe(false);
+        expect(isTransientStubFileName('download_failed_v3.mp4')).toBe(false);
+        expect(isTransientStubFileName('BoJack.Horseman.S01E01.downloading.mkv')).toBe(false);
+        expect(isTransientStubFileName('')).toBe(false);
+        expect(isTransientStubFileName(undefined)).toBe(false);
+    });
+
+    it('only lets definite, non-transient verdicts feed the show history', () => {
+        expect(isCopyrightHistoryEvidence({ skipped: true, reason: 'no-size' })).toBe(false);
+        expect(isCopyrightHistoryEvidence({ blocked: true, transient: true })).toBe(false);
+        expect(isCopyrightHistoryEvidence({ blocked: true, transient: false })).toBe(true);
+        expect(isCopyrightHistoryEvidence({ blocked: true })).toBe(true);
+        expect(isCopyrightHistoryEvidence({ blocked: false })).toBe(true);
+        expect(isCopyrightHistoryEvidence(null)).toBe(false);
     });
 
     it('returns null on proxy/upstream HTTP errors (fail open)', async () => {
@@ -267,11 +289,11 @@ describe('streamPreflight', () => {
         };
         const stream = { name: '[RD download] Torrentio', deepLinks: { player: '#/player/ENCODEDSTREAM/extra' } };
 
-        function launcherJson(size, contentType) {
+        function launcherJson(size, contentType, fileName) {
             return {
                 ok: true,
                 status: 200,
-                json: () => Promise.resolve({ size, contentType }),
+                json: () => Promise.resolve(fileName === undefined ? { size, contentType } : { size, contentType, fileName }),
             };
         }
 
@@ -305,6 +327,51 @@ describe('streamPreflight', () => {
 
             const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
             expect(verdict.skipped).toBe(true);
+
+            global.fetch = originalFetch;
+        });
+
+        // Sizes and names as Torrentio serves its error clips today (measured).
+        it('keeps a copyright clip as show-history evidence', async () => {
+            const originalFetch = global.fetch;
+            global.fetch = jest.fn(() => Promise.resolve(launcherJson(148959, 'video/mp4', 'failed_infringement_v3.mp4')));
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict).toMatchObject({ blocked: true, transient: false });
+            expect(isCopyrightHistoryEvidence(verdict)).toBe(true);
+
+            global.fetch = originalFetch;
+        });
+
+        it('skips the "downloading" clip without letting it feed the show history', async () => {
+            const originalFetch = global.fetch;
+            global.fetch = jest.fn(() => Promise.resolve(launcherJson(118743, 'video/mp4', 'downloading_v3.mp4')));
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict).toMatchObject({ blocked: true, transient: true });
+            expect(isCopyrightHistoryEvidence(verdict)).toBe(false);
+
+            global.fetch = originalFetch;
+        });
+
+        it('never lets a stub-like name block a real-sized file', async () => {
+            const originalFetch = global.fetch;
+            global.fetch = jest.fn(() => Promise.resolve(launcherJson(420617259, 'application/force-download', 'downloading_v3.mp4')));
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict).toMatchObject({ blocked: false, transient: false });
+            expect(isCopyrightHistoryEvidence(verdict)).toBe(true);
+
+            global.fetch = originalFetch;
+        });
+
+        it('still counts a stub as evidence from a launcher too old to report fileName', async () => {
+            const originalFetch = global.fetch;
+            global.fetch = jest.fn(() => Promise.resolve(launcherJson(148959, 'video/mp4')));
+
+            const verdict = await preflightAutoPickStream({ core, stream, ssBaseUrl: 'http://127.0.0.1:12470/' });
+            expect(verdict.blocked).toBe(true);
+            expect(isCopyrightHistoryEvidence(verdict)).toBe(true);
 
             global.fetch = originalFetch;
         });

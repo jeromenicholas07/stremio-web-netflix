@@ -33,7 +33,7 @@ const {
     setAutoPickOverride,
     storeAutoPickSelection,
 } = require('stremio/common/autoPick');
-const { preflightAutoPickStream } = require('stremio/common/streamPreflight');
+const { preflightAutoPickStream, isCopyrightHistoryEvidence } = require('stremio/common/streamPreflight');
 const {
     CLEAN_RUNS_TO_CLEAR,
     getCopyrightCheckState,
@@ -482,10 +482,15 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                 if (cancelled) return;
 
                 // An inconclusive probe has no `blocked` field and is not
-                // evidence either way, so it never feeds the history.
+                // evidence either way, so it never feeds the history. A stub
+                // that is only still caching is not recorded either, but it
+                // still uses up the run's one verdict: the next candidate is
+                // below the true top pick and says nothing about the show.
                 if (canRecordRun && !recordedRun && typeof verdict.blocked === 'boolean') {
                     recordedRun = true;
-                    setCopyrightCheckState(recordCopyrightCheckRun(type, metaId, { clean: !verdict.blocked }));
+                    if (isCopyrightHistoryEvidence(verdict)) {
+                        setCopyrightCheckState(recordCopyrightCheckRun(type, metaId, { clean: !verdict.blocked }));
+                    }
                 }
 
                 if (verdict.blocked) {
