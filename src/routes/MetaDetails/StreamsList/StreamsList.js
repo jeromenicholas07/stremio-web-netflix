@@ -296,17 +296,8 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
     const autoPickTriggered = React.useRef(false);
     const blockedKeysRef = React.useRef(new Set());
     const waitStartRef = React.useRef(Date.now());
-    // The pending jump to the player once a stream is committed. It belongs to
-    // the commit, not to the effect run that made it: a re-render inside the
-    // delay (a late addon reporting, the episode's meta arriving) used to cancel
-    // it, leaving "Playing #1" on screen with nothing playing and auto-pick
-    // already marked as done.
-    const navigateTimerRef = React.useRef(null);
     const [autoPickInfo, setAutoPickInfo] = React.useState(null);
-    // Readiness is recorded against the state key it was reached for, so a key
-    // change is "not ready" in the very render it happens. A plain boolean was
-    // still true in that render, and the driver committed off the stale value.
-    const [autoPickReadyKey, setAutoPickReadyKey] = React.useState(null);
+    const [autoPickReady, setAutoPickReady] = React.useState(false);
     const retryToken = queryParams?.get('autopickRetry') || null;
     const retryReason = queryParams?.get('autopickReason') || null;
     const failedCount = React.useMemo(() => {
@@ -322,7 +313,6 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             JSON.stringify(effectiveAutoPickSettings),
         ].join('|');
     }, [type, metaId, video?.id, retryToken, effectiveAutoPickSettings]);
-    const autoPickReady = autoPickReadyKey === autoPickStateKey;
     // Stable signature of the candidate set — only changes when the actual
     // streams change, so the driver effect won't re-run on cosmetic re-renders.
     const autoPickSignature = React.useMemo(() => {
@@ -333,25 +323,22 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
         autoPickTriggered.current = false;
         blockedKeysRef.current = new Set();
         waitStartRef.current = Date.now();
-        clearTimeout(navigateTimerRef.current);
+        setAutoPickReady(false);
         setAutoPickInfo(null);
     }, [autoPickStateKey]);
-    React.useEffect(() => {
-        return () => clearTimeout(navigateTimerRef.current);
-    }, []);
     // Readiness gate: ready once all addons settle, or after a hard cap.
     React.useEffect(() => {
         if (autoPickStreams.length === 0 && countLoadingAddons > 0) {
-            setAutoPickReadyKey(null);
+            setAutoPickReady(false);
         }
         if (countLoadingAddons === 0) {
-            const settle = setTimeout(() => setAutoPickReadyKey(autoPickStateKey), AUTOPICK_SETTLE_MS);
+            const settle = setTimeout(() => setAutoPickReady(true), AUTOPICK_SETTLE_MS);
             return () => clearTimeout(settle);
         }
         // Some addon is still loading — proceed anyway once the hard cap elapses.
         const elapsed = Date.now() - waitStartRef.current;
         const remaining = Math.max(0, AUTOPICK_MAX_WAIT_MS - elapsed);
-        const cap = setTimeout(() => setAutoPickReadyKey(autoPickStateKey), remaining);
+        const cap = setTimeout(() => setAutoPickReady(true), remaining);
         return () => clearTimeout(cap);
     }, [countLoadingAddons, autoPickStreams.length, autoPickStateKey]);
     React.useEffect(() => {
@@ -411,12 +398,9 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                     }
                 });
             }
-            // Small delay so the user sees what was picked. Deliberately not
-            // tied to `cancelled` (see navigateTimerRef); only a new title or
-            // episode, or leaving the page, calls it off.
-            clearTimeout(navigateTimerRef.current);
-            navigateTimerRef.current = setTimeout(() => {
-                navigateTimerRef.current = null;
+            // Small delay so the user sees what was picked.
+            setTimeout(() => {
+                if (cancelled) return;
                 skipBackGuardRef.current = true;
                 setTimeout(() => {
                     skipBackGuardRef.current = false;
