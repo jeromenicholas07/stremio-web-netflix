@@ -710,6 +710,34 @@ function buildMetaDetailsStreamsHash(type, metaId, videoId, query = {}) {
     return `#/metadetails/${encodeURIComponent(type)}/${encodeURIComponent(metaId)}/${encodeURIComponent(videoId)}${search ? `?${search}` : ''}`;
 }
 
+// Core only gives a Continue Watching item a streams link while it has playback
+// progress. A show that is there because a new episode came out (progress was
+// reset, e.g. the previous season was finished) has no link, so its card opened
+// the episode list and auto-pick never ran. This returns the streams page of the
+// earliest-released new episode for such an item, or null when the item should
+// keep core's links (it has progress, or nothing new to point at).
+function getContinueWatchingStreamsHash({ type, metaId, deepLinks, notificationItems }) {
+    if (deepLinks && typeof deepLinks.metaDetailsStreams === 'string' && deepLinks.metaDetailsStreams.length > 0) {
+        return null;
+    }
+    if (!Array.isArray(notificationItems)) return null;
+
+    const releasedAt = (item) => {
+        const time = Date.parse(item.videoReleased);
+        return Number.isNaN(time) ? Infinity : time;
+    };
+    const next = notificationItems
+        .filter((item) => item && typeof item.videoId === 'string' && item.videoId.length > 0)
+        .reduce((earliest, item) => {
+            return earliest === null || releasedAt(item) < releasedAt(earliest) ? item : earliest;
+        }, null);
+
+    return next !== null && getMetaKey(type, metaId) !== null ?
+        buildMetaDetailsStreamsHash(type, metaId, next.videoId)
+        :
+        null;
+}
+
 module.exports = {
     QUALITIES,
     SOURCES,
@@ -748,4 +776,5 @@ module.exports = {
     clearAutoPickFailure,
     isRecoverableAutoPickError,
     buildMetaDetailsStreamsHash,
+    getContinueWatchingStreamsHash,
 };

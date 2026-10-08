@@ -5,9 +5,22 @@ const PropTypes = require('prop-types');
 const { useServices } = require('stremio/services');
 const LibItem = require('stremio/components/LibItem');
 const traktBridge = require('stremio/services/TraktBridge');
+const { getContinueWatchingStreamsHash } = require('stremio/common/autoPick');
 
-const ContinueWatchingItem = ({ _id, notifications, type, name, ...props }) => {
+const ContinueWatchingItem = ({ _id, notifications, type, name, deepLinks, ...props }) => {
     const { core } = useServices();
+
+    // A show listed only for a new episode has no streams link from core, so
+    // send its card to that episode's streams page, where auto-pick runs.
+    const cardDeepLinks = React.useMemo(() => {
+        const metaDetailsStreams = getContinueWatchingStreamsHash({
+            type,
+            metaId: _id,
+            deepLinks,
+            notificationItems: notifications?.items?.[_id],
+        });
+        return metaDetailsStreams !== null ? { ...deepLinks, metaDetailsStreams } : deepLinks;
+    }, [_id, type, deepLinks, notifications]);
 
     const onDismissClick = React.useCallback((event) => {
         event.preventDefault();
@@ -73,6 +86,7 @@ const ContinueWatchingItem = ({ _id, notifications, type, name, ...props }) => {
             _id={_id}
             type={type}
             name={name}
+            deepLinks={cardDeepLinks}
             posterChangeCursor={true}
             notifications={notifications}
             onDismissClick={onDismissClick}

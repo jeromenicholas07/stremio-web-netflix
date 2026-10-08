@@ -411,4 +411,48 @@ describe('autoPick', () => {
             expect(autoPick.pickBestStream([rdDownload, rdPlus], settings, { preferWebPlayable: true }).deepLinks.player).toBe('rdplus');
         });
     });
+
+    describe('getContinueWatchingStreamsHash', () => {
+        const notification = (videoId, videoReleased) => ({ metaId: 'tt100', videoId, videoReleased });
+
+        it('sends a new-episode-only item to the earliest new episode', () => {
+            const hash = autoPick.getContinueWatchingStreamsHash({
+                type: 'series',
+                metaId: 'tt100',
+                deepLinks: { metaDetailsVideos: '#/detail/series/tt100', metaDetailsStreams: null, player: null },
+                notificationItems: [
+                    notification('tt100:2:2', '2026-10-07T00:00:00.000Z'),
+                    notification('tt100:2:1', '2026-09-30T00:00:00.000Z'),
+                ],
+            });
+
+            expect(hash).toBe('#/metadetails/series/tt100/tt100%3A2%3A1');
+        });
+
+        it('keeps core\'s streams link when the item has progress', () => {
+            expect(autoPick.getContinueWatchingStreamsHash({
+                type: 'series',
+                metaId: 'tt100',
+                deepLinks: { metaDetailsStreams: '#/detail/series/tt100/tt100%3A1%3A5' },
+                notificationItems: [notification('tt100:2:1', '2026-09-30T00:00:00.000Z')],
+            })).toBeNull();
+        });
+
+        it('returns null when there is no new episode to point at', () => {
+            const deepLinks = { metaDetailsVideos: '#/detail/series/tt100', metaDetailsStreams: null };
+
+            expect(autoPick.getContinueWatchingStreamsHash({ type: 'series', metaId: 'tt100', deepLinks, notificationItems: undefined })).toBeNull();
+            expect(autoPick.getContinueWatchingStreamsHash({ type: 'series', metaId: 'tt100', deepLinks, notificationItems: [] })).toBeNull();
+            expect(autoPick.getContinueWatchingStreamsHash({ type: 'series', metaId: '', deepLinks, notificationItems: [notification('tt100:2:1', '')] })).toBeNull();
+        });
+
+        it('falls back to list order when release dates are missing', () => {
+            expect(autoPick.getContinueWatchingStreamsHash({
+                type: 'series',
+                metaId: 'tt100',
+                deepLinks: null,
+                notificationItems: [notification('tt100:3:1', 'not a date'), notification('tt100:3:2', null)],
+            })).toBe('#/metadetails/series/tt100/tt100%3A3%3A1');
+        });
+    });
 });
