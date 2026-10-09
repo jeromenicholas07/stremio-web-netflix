@@ -532,6 +532,12 @@ function getStreamAttemptNumber(allStreams, stream) {
     return idx === -1 ? 1 : idx + 1;
 }
 
+// Core gives a stream watch progress only when it is the one last played for
+// the episode being resumed (the red bar in the list).
+function isResumeStream(stream) {
+    return typeof stream?.progress === 'number' && stream.progress > 0;
+}
+
 function getAutoPickCandidates(allStreams, settings, options = {}) {
     if (!settings || !Array.isArray(allStreams) || allStreams.length === 0) {
         return [];
@@ -539,11 +545,28 @@ function getAutoPickCandidates(allStreams, settings, options = {}) {
 
     const failedStreamKeys = new Set(options.failedStreamKeys || []);
 
-    return allStreams
+    const ranked = allStreams
         .map((stream, index) => ({ stream, index, rank: rankStream(stream, settings, options) }))
         .filter(({ stream, rank }) => rank !== null && !failedStreamKeys.has(getStreamKey(stream)))
         .sort((a, b) => a.rank - b.rank || a.index - b.index)
         .map(({ stream }) => stream);
+
+    // The stream the user was already watching goes first, whatever the
+    // settings rank it: it has played before, and resuming on the same file
+    // keeps the saved position in the right place. Once it fails it is in
+    // failedStreamKeys like any other, and the ranked list takes over.
+    // `options.preferResume` must confirm this page is the episode being
+    // resumed: core keys the progress to the library's episode, not the page's.
+    const resume = options.preferResume === true && allStreams.find((stream) => {
+        return isResumeStream(stream) &&
+            typeof stream.deepLinks?.player === 'string' &&
+            !failedStreamKeys.has(getStreamKey(stream));
+    });
+
+    return resume ?
+        [resume, ...ranked.filter((stream) => stream !== resume)]
+        :
+        ranked;
 }
 
 function pickBestStream(allStreams, settings, options = {}) {
@@ -734,6 +757,7 @@ module.exports = {
     formatAutoPickSkipSummary,
     streamSourceKeys,
     rankStream,
+    isResumeStream,
     getAutoPickCandidates,
     pickBestStream,
     detectAvailability,

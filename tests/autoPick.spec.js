@@ -170,6 +170,59 @@ describe('autoPick', () => {
         expect(picked.deepLinks.player).toBe('same-quality');
     });
 
+    describe('resuming the last played stream', () => {
+        const withProgress = (props, progress) => ({ ...stream(props), progress });
+
+        it('plays the stream core marks with progress ahead of a better-ranked one', () => {
+            const settings = makeSettings(['rd_plus', 'torrentio']);
+            const best = stream({ name: '[RD+] 4k', player: 'best-ranked' });
+            const lastPlayed = withProgress({ name: '[RD+] 720p', player: 'last-played' }, 42);
+
+            expect(autoPick.pickBestStream([best, lastPlayed], settings, { preferResume: true }).deepLinks.player).toBe('last-played');
+            expect(autoPick.getAutoPickCandidates([best, lastPlayed], settings, { preferResume: true }).map((s) => s.deepLinks.player))
+                .toEqual(['last-played', 'best-ranked']);
+        });
+
+        it('ranks normally on a page that is not the episode being resumed', () => {
+            const settings = makeSettings(['rd_plus', 'torrentio']);
+            const best = stream({ name: '[RD+] 4k', player: 'best-ranked' });
+            const lastPlayed = withProgress({ name: '[RD+] 720p', player: 'last-played' }, 42);
+
+            expect(autoPick.pickBestStream([best, lastPlayed], settings).deepLinks.player).toBe('best-ranked');
+            expect(autoPick.pickBestStream([best, lastPlayed], settings, { preferResume: false }).deepLinks.player).toBe('best-ranked');
+        });
+
+        it('plays it even from a source or language the settings would skip', () => {
+            const settings = { ...makeSettings(['rd_plus']), englishOnly: true };
+            const ranked = stream({ name: '[RD+] 1080p', player: 'ranked' });
+            const lastPlayed = withProgress({ addonName: 'Other', name: 'P2P 1080p ITA', player: 'last-played' }, 10);
+
+            expect(autoPick.pickBestStream([ranked, lastPlayed], settings, { preferResume: true }).deepLinks.player).toBe('last-played');
+        });
+
+        it('falls back to normal ranking once the last played stream has failed', () => {
+            const settings = makeSettings(['rd_plus']);
+            const ranked = stream({ name: '[RD+] 1080p', player: 'ranked' });
+            const lastPlayed = withProgress({ name: '[RD+] 720p', player: 'last-played' }, 42);
+
+            const picked = autoPick.pickBestStream([ranked, lastPlayed], settings, {
+                failedStreamKeys: [autoPick.getStreamKey(lastPlayed)],
+                preferResume: true,
+            });
+
+            expect(picked.deepLinks.player).toBe('ranked');
+        });
+
+        it('ignores streams with no progress', () => {
+            const settings = makeSettings(['rd_plus']);
+            const ranked = stream({ name: '[RD+] 1080p', player: 'ranked' });
+            const unplayed = withProgress({ name: '[RD+] 720p', player: 'unplayed' }, 0);
+            const unknown = withProgress({ name: '[RD+] 480p', player: 'unknown' }, null);
+
+            expect(autoPick.pickBestStream([unplayed, unknown, ranked], settings, { preferResume: true }).deepLinks.player).toBe('ranked');
+        });
+    });
+
     it('steps down a quality when no same-quality stream remains', () => {
         const settings = makeSettings(['rd_plus']);
         const failed = stream({ name: '[RD+] 1080p A', player: 'failed' });

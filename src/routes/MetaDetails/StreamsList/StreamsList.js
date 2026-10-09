@@ -16,6 +16,7 @@ const {
     clearAutoPickFailure,
     clearAutoPickSelection,
     describeStream,
+    isResumeStream,
     detectAvailability,
     detectIsForeign,
     formatAutoPickSkipSummary,
@@ -56,7 +57,7 @@ function isPlaybackOrStreamsHash(hash) {
     return /^\/player\//.test(path) || /^\/(?:metadetails|detail)\/[^/]*\/[^/]*\/[^/]*$/.test(path);
 }
 
-const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryParams, ...props }) => {
+const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeSearch, queryParams, ...props }) => {
     const { t } = useTranslation();
     const { core } = useServices();
     const platform = usePlatform();
@@ -372,12 +373,15 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
 
         let cancelled = false;
         const controller = new AbortController();
+        // Only resume the last played stream on the episode it was played for.
+        const preferResume = typeof video?.id === 'string' && video.id === resumeVideoId;
 
         const commit = (best, described, attempt, blockedCount) => {
             autoPickTriggered.current = true;
             setAutoPickInfo({
                 attempt,
                 blockedCount,
+                resumed: preferResume && isResumeStream(best),
                 qualityLabel: described.qualityLabel,
                 sourceLabel: described.sourceLabel,
             });
@@ -430,6 +434,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
             while (!cancelled) {
                 const best = pickBestStream(autoPickStreams, settings, {
                     failedStreamKeys: Array.from(failedSet),
+                    preferResume,
                     // iOS Safari can only play a subset of formats inline; prefer
                     // web-playable releases so auto-pick avoids kicking out to an
                     // external player. No-op on every other platform.
@@ -468,6 +473,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                 setAutoPickInfo({
                     attempt,
                     blockedCount,
+                    resumed: preferResume && isResumeStream(best),
                     qualityLabel: described.qualityLabel,
                     sourceLabel: described.sourceLabel,
                     checking: true,
@@ -701,7 +707,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                             <span className={styles['autopick-spinner']} />
                             <span className={styles['autopick-text']}>
                                 <span className={styles['autopick-title']}>
-                                    {'Checking #'}{autoPickInfo.attempt}{' \u00b7 '}{autoPickInfo.qualityLabel}{' \u00b7 '}{autoPickInfo.sourceLabel}
+                                    {autoPickInfo.resumed ? 'Checking last played' : `Checking #${autoPickInfo.attempt}`}{' \u00b7 '}{autoPickInfo.qualityLabel}{' \u00b7 '}{autoPickInfo.sourceLabel}
                                 </span>
                                 {
                                     autoPickSkipSummary ?
@@ -717,7 +723,7 @@ const StreamsList = ({ className, video, type, metaId, onEpisodeSearch, queryPar
                                 <span className={styles['autopick-check']}>{'\u2713'}</span>
                                 <span className={styles['autopick-text']}>
                                     <span className={styles['autopick-title']}>
-                                        {'Playing #'}{autoPickInfo.attempt}{' \u00b7 '}{autoPickInfo.qualityLabel}{' \u00b7 '}{autoPickInfo.sourceLabel}
+                                        {autoPickInfo.resumed ? 'Resuming last played' : `Playing #${autoPickInfo.attempt}`}{' \u00b7 '}{autoPickInfo.qualityLabel}{' \u00b7 '}{autoPickInfo.sourceLabel}
                                     </span>
                                     {
                                         autoPickSkipSummary ?
@@ -867,6 +873,7 @@ StreamsList.propTypes = {
     video: PropTypes.object,
     type: PropTypes.string,
     metaId: PropTypes.string,
+    resumeVideoId: PropTypes.string,
     onEpisodeSearch: PropTypes.func,
     queryParams: PropTypes.instanceOf(URLSearchParams),
 };

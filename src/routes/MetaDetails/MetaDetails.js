@@ -190,6 +190,7 @@ const MetaDetails = ({ urlParams, queryParams }) => {
                             video={video}
                             type={streamPath.type}
                             metaId={metaDetails.metaItem?.content?.content?.id || urlParams.id}
+                            resumeVideoId={metaDetails.libraryItem?.state?.video_id}
                             onEpisodeSearch={handleEpisodeSearch}
                             queryParams={queryParams}
                         />
