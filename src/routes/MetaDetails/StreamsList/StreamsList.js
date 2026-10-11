@@ -57,7 +57,30 @@ function isPlaybackOrStreamsHash(hash) {
     return /^\/player\//.test(path) || /^\/(?:metadetails|detail)\/[^/]*\/[^/]*\/[^/]*$/.test(path);
 }
 
-const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeSearch, queryParams, ...props }) => {
+// Auto-pick marks the history entry it navigated away from, so that entry
+// never auto-plays again. Any fresh navigation (a card click, an episode
+// switch, the player's retry or next-episode redirect) is a new entry with
+// no state, and auto-picks normally.
+const AUTOPICK_PLAYED_STATE_KEY = 'autoPickPlayed';
+
+function hasAutoPickPlayedFromHistoryEntry() {
+    try {
+        return Boolean(window.history.state && window.history.state[AUTOPICK_PLAYED_STATE_KEY]);
+    } catch {
+        return false;
+    }
+}
+
+function markAutoPickPlayedFromHistoryEntry() {
+    try {
+        const state = window.history.state && typeof window.history.state === 'object' ? window.history.state : {};
+        window.history.replaceState({ ...state, [AUTOPICK_PLAYED_STATE_KEY]: true }, '');
+    } catch {
+        // History state unavailable — the entry just stays unmarked.
+    }
+}
+
+const StreamsList = ({ className, video, type, metaId, metaLoading, isResumeVideo, onEpisodeSearch, queryParams, ...props }) => {
     const { t } = useTranslation();
     const { core } = useServices();
     const platform = usePlatform();
@@ -298,7 +321,11 @@ const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeS
     const blockedKeysRef = React.useRef(new Set());
     const waitStartRef = React.useRef(Date.now());
     const [autoPickInfo, setAutoPickInfo] = React.useState(null);
-    const [autoPickReady, setAutoPickReady] = React.useState(false);
+    // Readiness is recorded against the state key it was reached for, so it
+    // reads as "not ready" in the very render the key changes. A plain boolean
+    // was still true there: the driver committed off the stale value, and the
+    // next render cancelled that commit's jump to the player.
+    const [autoPickReadyKey, setAutoPickReadyKey] = React.useState(null);
     const retryToken = queryParams?.get('autopickRetry') || null;
     const retryReason = queryParams?.get('autopickReason') || null;
     const failedCount = React.useMemo(() => {
@@ -314,6 +341,7 @@ const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeS
             JSON.stringify(effectiveAutoPickSettings),
         ].join('|');
     }, [type, metaId, video?.id, retryToken, effectiveAutoPickSettings]);
+    const autoPickReady = autoPickReadyKey === autoPickStateKey;
     // Stable signature of the candidate set — only changes when the actual
     // streams change, so the driver effect won't re-run on cosmetic re-renders.
     const autoPickSignature = React.useMemo(() => {
@@ -324,26 +352,33 @@ const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeS
         autoPickTriggered.current = false;
         blockedKeysRef.current = new Set();
         waitStartRef.current = Date.now();
-        setAutoPickReady(false);
         setAutoPickInfo(null);
     }, [autoPickStateKey]);
-    // Readiness gate: ready once all addons settle, or after a hard cap.
+    // Readiness gate: ready once all addons and the meta settle, or after a
+    // hard cap. The meta counts because its arrival changes the state key (the
+    // episode becomes known) and every stream's player link (they gain the
+    // meta request); picking before it meant picking twice.
     React.useEffect(() => {
-        if (autoPickStreams.length === 0 && countLoadingAddons > 0) {
-            setAutoPickReady(false);
+        const pendingLoads = countLoadingAddons + (metaLoading ? 1 : 0);
+        if (autoPickStreams.length === 0 && pendingLoads > 0) {
+            setAutoPickReadyKey(null);
         }
-        if (countLoadingAddons === 0) {
-            const settle = setTimeout(() => setAutoPickReady(true), AUTOPICK_SETTLE_MS);
+        if (pendingLoads === 0) {
+            const settle = setTimeout(() => setAutoPickReadyKey(autoPickStateKey), AUTOPICK_SETTLE_MS);
             return () => clearTimeout(settle);
         }
-        // Some addon is still loading — proceed anyway once the hard cap elapses.
+        // Something is still loading — proceed anyway once the hard cap elapses.
         const elapsed = Date.now() - waitStartRef.current;
         const remaining = Math.max(0, AUTOPICK_MAX_WAIT_MS - elapsed);
-        const cap = setTimeout(() => setAutoPickReady(true), remaining);
+        const cap = setTimeout(() => setAutoPickReadyKey(autoPickStateKey), remaining);
         return () => clearTimeout(cap);
-    }, [countLoadingAddons, autoPickStreams.length, autoPickStateKey]);
+    }, [countLoadingAddons, metaLoading, autoPickStreams.length, autoPickStateKey]);
     React.useEffect(() => {
         if (autoPickTriggered.current) return;
+        // This history entry already sent the user to the player. Coming back
+        // to it (back button, or the page re-rendering under the player) shows
+        // the list; it never starts playback on its own a second time.
+        if (hasAutoPickPlayedFromHistoryEntry()) return;
         // Don't auto-pick when user clicked "More Info" (info=1) or paused it.
         if (queryParams && queryParams.has('info')) return;
         if (queryParams && queryParams.has('autopickPaused')) return;
@@ -372,9 +407,11 @@ const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeS
         }
 
         let cancelled = false;
+        let navigateTimer = null;
         const controller = new AbortController();
-        // Only resume the last played stream on the episode it was played for.
-        const preferResume = typeof video?.id === 'string' && video.id === resumeVideoId;
+        // Only resume the last played stream on the video (episode, or the
+        // movie itself) the library is resuming.
+        const preferResume = isResumeVideo === true;
 
         const commit = (best, described, attempt, blockedCount) => {
             autoPickTriggered.current = true;
@@ -402,9 +439,11 @@ const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeS
                     }
                 });
             }
-            // Small delay so the user sees what was picked.
-            setTimeout(() => {
-                if (cancelled) return;
+            // Small delay so the user sees what was picked. Cancelled by this
+            // run's cleanup (see below).
+            navigateTimer = setTimeout(() => {
+                navigateTimer = null;
+                markAutoPickPlayedFromHistoryEntry();
                 skipBackGuardRef.current = true;
                 setTimeout(() => {
                     skipBackGuardRef.current = false;
@@ -517,6 +556,16 @@ const StreamsList = ({ className, video, type, metaId, resumeVideoId, onEpisodeS
         return () => {
             cancelled = true;
             controller.abort();
+            // A commit whose jump to the player had not fired yet is undone,
+            // not kept: the page changed under it. Clearing the trigger lets
+            // the run that follows pick again from the current streams;
+            // without it the page sat on "Playing #1" with nothing playing.
+            // On unmount there is no following run, so nothing plays.
+            if (navigateTimer !== null) {
+                clearTimeout(navigateTimer);
+                navigateTimer = null;
+                autoPickTriggered.current = false;
+            }
         };
     }, [autoPickSignature, autoPickReady, countLoadingAddons, autoPickStateKey]);
 
@@ -873,7 +922,8 @@ StreamsList.propTypes = {
     video: PropTypes.object,
     type: PropTypes.string,
     metaId: PropTypes.string,
-    resumeVideoId: PropTypes.string,
+    metaLoading: PropTypes.bool,
+    isResumeVideo: PropTypes.bool,
     onEpisodeSearch: PropTypes.func,
     queryParams: PropTypes.instanceOf(URLSearchParams),
 };
